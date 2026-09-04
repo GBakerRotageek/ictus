@@ -19,7 +19,7 @@ def emit_command(
     """Emit Conductor YAML from typed pipeline definitions."""
     import importlib.util
 
-    from ictus.core import Pipeline
+    from ictus.pipeline import Pipeline
 
     pipelines_path = Path(pipelines_dir)
     out_path = Path(out)
@@ -61,7 +61,7 @@ def emit_command(
             attr = getattr(module, attr_name)
             if isinstance(attr, Pipeline):
                 pipeline_dict = attr.to_dict()
-                out_file = out_path / f"{attr.name}.yaml"
+                out_file = out_path / f"{attr.pipeline_id}.yaml"
 
                 with out_file.open("w") as f:
                     yaml.dump(pipeline_dict, f)
