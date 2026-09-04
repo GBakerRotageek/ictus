@@ -1,0 +1,32 @@
+workflow:
+  name: smoke-test-pipeline
+  description: 'Smoke test pipeline: plan -> breakdown -> review -> execute -> test
+    -> finish'
+  version: '1'
+  entry_point: plan
+agents:
+- name: Plan
+  task_id: plan
+  type: agent
+  next_task_id: breakdown
+- name: Breakdown
+  task_id: breakdown
+  type: agent
+  next_task_id: review_gate
+- name: Review Gate
+  task_id: review_gate
+  type: human_gate
+  transitions:
+    rejected: breakdown
+    approved: execution
+- name: Execution
+  task_id: execution
+  type: agent
+  next_task_id: testing
+- name: Testing
+  task_id: testing
+  type: agent
+  next_task_id: finish
+- name: Finish
+  task_id: finish
+  type: agent
