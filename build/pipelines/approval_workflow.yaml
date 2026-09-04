@@ -1,0 +1,41 @@
+workflow:
+  name: Approval Workflow Example
+  description: Gather data -> Summarize -> Human approval -> Execute/Fail
+  version: '1'
+  entry_point: gather
+agents:
+- name: Gather Requirements
+  task_id: gather
+  type: agent
+  config: {}
+  next_task_id: summarize_reqs
+- name: Summarize Requirements
+  task_id: summarize_reqs
+  type: agent
+  config: {}
+  next_task_id: review_approve
+- name: Review & Approve
+  task_id: review_approve
+  type: agent
+  config: {}
+  transitions:
+    approved: execute
+    rejected: rejected
+- name: Execute Work
+  task_id: execute
+  type: agent
+  config: {}
+  next_task_id: approved
+- name: Approved
+  task_id: approved
+  type: agent
+  config: {}
+  next_task_id: final_report
+- name: Rejected
+  task_id: rejected
+  type: agent
+  config: {}
+- name: Final Report
+  task_id: final_report
+  type: agent
+  config: {}
