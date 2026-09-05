@@ -18,10 +18,10 @@ from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError, LintError
 from ictus.graph.node import SubGraphNode
-from ictus.lint.rules import node_problems, stage_contract_problems
+from ictus.lint.rules import group_routing_problems, node_problems, stage_contract_problems
 
 if TYPE_CHECKING:
-    from ictus.graph.pipeline import Pipeline
+    from ictus.graph.pipeline import Pipeline, RouteEnd
     from ictus.interfaces import Backend
 
 __all__ = ["check", "lint_pipeline"]
@@ -63,6 +63,9 @@ def lint_pipeline(
     )
     for node in pipeline.nodes:
         problems.extend(node_problems(pipeline, node, where))
+    collections: tuple[RouteEnd, ...] = (*pipeline.groups, *pipeline.maps)
+    for group in collections:
+        problems.extend(group_routing_problems(pipeline, group, where))
 
     by_id = {n.node_id: n for n in pipeline.nodes}
     for host_id, child in pipeline.children.items():

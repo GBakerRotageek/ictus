@@ -23,7 +23,7 @@ from ictus import (
     QuestionsNode,
     tpl,
 )
-from ictus.interfaces.conductor import conductor
+from ictus.interfaces.conductor import ConductorBackend, conductor
 from ictus.lint import lint_pipeline
 from ictus.stdlib import ask_human, resolve_unknowns, succeed
 
@@ -193,7 +193,14 @@ class TestResolveUnknowns:
         assert ask["source"] == "identify.output.missing"
 
     def test_answers_are_defaulted_for_the_path_that_never_asked(self) -> None:
-        assert "default('{}')" in self._stage().exposed_outputs["answers"]
+        emitted = ConductorBackend().document(self._stage())["output"]
+        assert isinstance(emitted, dict)
+        # The guard, not `| default()`: on the path that never asked, `ask` is
+        # absent from context entirely and the attribute chain raises before any
+        # filter runs. Both branches emit the same JSON so the type is stable.
+        assert emitted["answers"] == (
+            "{% if ask is defined %}{{ ask.output.answers | tojson }}{% else %}{}{% endif %}"
+        )
 
     def test_an_empty_needs_list_is_refused(self) -> None:
         with pytest.raises(ValueError, match="at least one thing"):

@@ -11,11 +11,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from ictus.graph.node import GateNode
+from ictus.graph.node import GateNode, Node, TerminateNode
+from ictus.graph.ref import Origin
+from ictus.interfaces.conductor.templates import output_path
 
 if TYPE_CHECKING:
-    from ictus.graph.node import Node
     from ictus.graph.pipeline import Pipeline
+    from ictus.graph.ref import Ref
 
 __all__ = ["conductor_problems"]
 
@@ -60,6 +62,16 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
         for node in pipeline.nodes:
             problems.extend(_undeclared_reference_problems(pipeline, node, where))
 
+    for host_id, child in pipeline.children.items():
+        problems.extend(
+            f"{where}: stage {host_id!r} can exit through {node.node_id!r}, a failed terminal. "
+            "A child engine converts that into SubworkflowTerminatedError before the parent's "
+            "routes are evaluated (engine/workflow.py:2131), so it kills the caller instead of "
+            "routing. End with a success terminal carrying the outcome as a value."
+            for node in child.nodes
+            if isinstance(node, TerminateNode) and node.status == "failed"
+        )
+
     problems.extend(
         f"{where}: exposed output {name!r} collides with Conductor's output wrapper and will "
         "read back empty; rename it"
@@ -85,6 +97,8 @@ def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -
         for ref in edge.condition_refs():
             if not ref.from_input:
                 referenced.add(ref.source_id)
+    # Only the explicit-rendered slots. A terminal's payload is rendered with the
+    # whole run in scope, so requiring it to be declared would be wrong.
     for template in node.template_strings():
         referenced.update(name for name, _ in OUTPUT_REF.findall(template))
         referenced.update(name for name, _ in GROUP_REF.findall(template))
@@ -92,19 +106,64 @@ def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -
     declared: set[str] = {node.node_id}
     for dep in pipeline.deps_into(node):
         declared.add(dep.source.node_id)
-        group = pipeline.group_of(dep.source)
-        if group is not None:
-            # A member is addressed through its group, so either name resolves.
-            declared.add(group.group_id)
-    known = {n.node_id for n in pipeline.nodes} | {g.group_id for g in pipeline.groups}
+        if isinstance(dep.source, Node):
+            group = pipeline.group_of(dep.source)
+            if group is not None:
+                # A member is addressed through its group, so either name resolves.
+                declared.add(group.group_id)
+    known = (
+        {n.node_id for n in pipeline.nodes}
+        | {g.group_id for g in pipeline.groups}
+        | {m.group_id for m in pipeline.maps}
+    )
 
-    return [
+    problems = [
         f"{where}: agent {node.node_id!r} references {name!r} but does not declare it as an "
         f"input. Under context.mode 'explicit' it will not be in scope, and the template "
         f"fails at run time with \"'{name}' is undefined\". Wire it with feed() or connect()."
         for name in sorted(referenced - declared)
         if name in known
     ]
+    return problems + _undeclared_member_field_problems(pipeline, node, where)
+
+
+def _undeclared_member_field_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
+    """A parallel group's fields are projected one at a time, not as a whole object.
+
+    ``_add_parallel_group_input`` (engine/context.py:99-101) copies exactly the
+    field each ``input:`` entry names, so declaring ``g.outputs.a.position``
+    puts *only* that key under ``a``. Reading ``g.outputs.a.satisfied`` next to
+    it then fails with "'dict object' has no attribute 'satisfied'" — and the
+    group name being declared is what makes that look wired.
+    """
+    wanted: dict[str, Ref] = {}
+    for ref in node.prompt_refs():
+        _collect_member_path(pipeline, ref, wanted)
+    for edge in pipeline.outgoing(node):
+        for ref in edge.condition_refs():
+            _collect_member_path(pipeline, ref, wanted)
+
+    declared = {
+        output_path(pipeline, dep.source, dep.connection.source.name)
+        for dep in pipeline.deps_into(node)
+    }
+    return [
+        f"{where}: agent {node.node_id!r} reads {path!r}, but only the exact fields it "
+        f"declares are put in scope — a sibling field of the same group member is not. "
+        f"Wire {ref.source_id}.{ref.port} into {node.node_id!r} with feed()."
+        for path, ref in sorted(wanted.items())
+        if path not in declared
+    ]
+
+
+def _collect_member_path(pipeline: Pipeline, ref: Ref, into: dict[str, Ref]) -> None:
+    """Record ``ref`` if it reads a field of a parallel group member."""
+    if ref.origin is not Origin.NODE:
+        return
+    source = next((n for n in pipeline.nodes if n.node_id == ref.source_id), None)
+    if source is None or pipeline.group_of(source) is None:
+        return
+    into[output_path(pipeline, source, ref.port)] = ref
 
 
 def _deferred_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
@@ -161,7 +220,7 @@ def _template_problems(
 ) -> list[str]:
     """Check the field segment of every reference, which Conductor never does."""
     problems: list[str] = []
-    for template in node.template_strings():
+    for template in (*node.template_strings(), *node.settled_template_strings()):
         for ref_node, ref_field in OUTPUT_REF.findall(template):
             target = by_id.get(ref_node)
             if target is None:

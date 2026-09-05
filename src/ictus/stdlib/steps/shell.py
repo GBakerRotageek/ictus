@@ -28,7 +28,7 @@ def shell(
 ) -> ScriptNode:
     """Run a command, with no model in the loop.
 
-    Two things bite here:
+    Three things bite here:
 
     * A relative ``command`` resolves against ``working_dir``, which defaults to
       **the process's current directory** — not the repo root, and not the
@@ -38,8 +38,14 @@ def shell(
     * ``args`` goes on the command line and hits the OS length cap. Pass large
       payloads through ``stdin``.
 
-    Stdout that parses as JSON is merged over ``{stdout, stderr, exit_code}``,
-    so declared ``outputs`` can name those JSON fields directly.
+    * Declaring ``outputs`` makes stdout a **contract, not a log**: the command
+      must print a JSON object, and Conductor raises "declares an output schema
+      but stdout is not valid JSON" if it does not — after the command has
+      already run and done whatever it does. Leave ``outputs`` empty for a
+      command that prints prose, and send progress to stderr.
+
+    A stdout object is merged over ``{stdout, stderr, exit_code}``, so declared
+    ``outputs`` can name its fields directly.
     """
     return ScriptNode(
         node_id=node_id,

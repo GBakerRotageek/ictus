@@ -16,6 +16,7 @@ from ictus import (
     END,
     AgentNode,
     CompositionError,
+    InputPort,
     McpServer,
     McpTransport,
     OutputPort,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 BOOL = PortType.BOOLEAN
+STR = PortType.STRING
 
 
 def _checker(node_id: str) -> AgentNode:
@@ -218,9 +220,13 @@ class TestCyclesThroughGroups:
         assert p.has_cycle()
         assert [e.describe_target for e in p.back_edges()] == ["both"]
 
-    def test_the_loop_is_measured_not_assumed_to_be_one_step(self) -> None:
-        """Its length drives the iteration budget; reporting 1 under-buys the loop."""
-        assert self._looping().longest_cycle_length() == 2
+    def test_the_loop_is_priced_in_executions_not_hops(self) -> None:
+        """The budget is in step executions, and a two-member group costs two.
+
+        `both -> decide -> both` is two hops and three executions. Pricing it at
+        two under-buys every pass, and the run dies partway through one.
+        """
+        assert self._looping().longest_cycle_length() == 3
 
     def test_an_unbounded_loop_through_a_group_is_still_refused(self) -> None:
         p = Pipeline(pipeline_id="t")
@@ -305,8 +311,11 @@ class TestRemediation:
         assert set(dialog) == {"trigger_prompt"}
 
     def test_the_longer_loop_is_priced_in(self) -> None:
-        """checks -> verdict -> gate -> assist -> checks is four steps, not three."""
-        assert self._stage().longest_cycle_length() == 4
+        """checks -> verdict -> gate -> assist -> checks, where `checks` is a group.
+
+        Four hops, five executions: the group runs both its members every pass.
+        """
+        assert self._stage().longest_cycle_length() == 5
 
     def test_it_still_loads(self, validates: Callable[[Pipeline], None]) -> None:
         validates(self._stage())
@@ -371,3 +380,64 @@ class TestGroupMemberAvailability:
         assert isinstance(prompt, str)
         assert "{% if both is defined %}" in prompt
         assert "{% if a is defined %}" not in prompt
+
+
+class TestExposingGroupOutputs:
+    """A member's output is addressed through its group, in the final map too.
+
+    `expose_output` used to build the path by hand, so a member was exposed as
+    `member.output.field` — a name Conductor never binds. It passes validation
+    and renders empty, and the `{% if member is defined %}` guard a default
+    would add is always false, so the fallback was the only branch that could
+    ever be taken.
+    """
+
+    @staticmethod
+    def _pipeline() -> Pipeline:
+        p = Pipeline(pipeline_id="expose")
+        a, b = p.add(_checker("a")), p.add(_checker("b"))
+        group = p.parallel("both", [a, b])
+        done = p.add(succeed(node_id="done", reason="d"))
+        p.set_entry(group)
+        p.route(group, done)
+        p.expose_output("a_ok", a, "ok")
+        p.expose_output("with_default", b, "ok", default="false")
+        return p
+
+    def test_a_member_is_exposed_through_its_group(self) -> None:
+        out = conductor.document(self._pipeline())["output"]
+        assert isinstance(out, dict)
+        assert out["a_ok"] == "{{ both.outputs.a.ok }}"
+
+    def test_the_guard_on_a_default_names_the_group_not_the_member(self) -> None:
+        """`{% if a is defined %}` can never be true: a member is not bound by name."""
+        out = conductor.document(self._pipeline())["output"]
+        assert isinstance(out, dict)
+        assert out["with_default"] == (
+            "{% if both is defined %}{{ both.outputs.b.ok }}{% else %}false{% endif %}"
+        )
+
+    def test_it_still_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        validates(self._pipeline())
+
+
+def test_a_member_cannot_read_a_sibling() -> None:
+    """They run at the same time, and `group.outputs` exists only once all have finished.
+
+    The group spelling made this invisible on both sides: ictus emitted
+    `both.outputs.a.v` as an ordinary dependency, and Conductor's validator sees
+    a well-formed group reference. It resolves to nothing at run time.
+    """
+    p = Pipeline(pipeline_id="sib")
+    a = p.add(_checker("a"))
+    b = p.add(
+        AgentNode(
+            node_id="b",
+            inputs=(InputPort("from_a", STR),),
+            prompt="y",
+            declared_outputs=(OutputPort("ok", BOOL),),
+        )
+    )
+    p.parallel("both", [a, b])
+    with pytest.raises(CompositionError, match="both run inside parallel group"):
+        p.feed(a, "detail", b, "from_a")

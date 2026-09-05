@@ -9,10 +9,14 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from ictus.config import CONFIG_FILE, MINIMAL, PipelineConfig, read_config
 from ictus.errors import IctusError
+from ictus.gate import add_start_gate
 from ictus.graph.pipeline import Pipeline
 from ictus.interfaces.conductor import conductor
 from ictus.lint import lint_pipeline
+from ictus.runspec import PipelineFolder, read_input_file
+from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
 if TYPE_CHECKING:
     from ictus.interfaces import PreflightIssue
@@ -29,39 +33,95 @@ def _fail(message: str) -> None:
     raise typer.Exit(code=1)
 
 
-def _load_pipelines(pipelines_dir: Path) -> list[Pipeline]:
-    """Import every module in ``pipelines_dir`` and collect the top-level pipelines.
+def _folders(path: Path) -> list[PipelineFolder]:
+    """The pipeline folders at or under ``path``."""
+    try:
+        return PipelineFolder.find(path)
+    except IctusError as exc:
+        _fail(str(exc))
+        return []
+
+
+def _load_module(module_path: Path) -> list[Pipeline]:
+    """Import one module and collect the top-level pipelines it defines.
 
     A pipeline that is the body of a stage is dropped: it is emitted as part of
     its parent, and emitting it again at top level would produce a second file
     claiming the same name.
     """
-    if not pipelines_dir.is_dir():
-        _fail(f"{pipelines_dir} is not a directory")
+    spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
+    if spec is None or spec.loader is None:
+        _fail(f"could not load {module_path}")
+        return []
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except IctusError as exc:
+        _fail(f"{module_path}: {exc}")
+    except Exception as exc:
+        _fail(f"{module_path}: {type(exc).__name__}: {exc}")
 
     found: list[Pipeline] = []
-    for module_path in sorted(pipelines_dir.glob("*.py")):
-        if module_path.name.startswith("_"):
-            continue
-        spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
-        if spec is None or spec.loader is None:
-            _fail(f"could not load {module_path}")
-            return []
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        try:
-            spec.loader.exec_module(module)
-        except IctusError as exc:
-            _fail(f"{module_path}: {exc}")
-        except Exception as exc:
-            _fail(f"{module_path}: {type(exc).__name__}: {exc}")
-        for name in sorted(dir(module)):
-            value = getattr(module, name)
-            if isinstance(value, Pipeline) and not any(value is p for p in found):
-                found.append(value)
-
+    for name in sorted(dir(module)):
+        value = getattr(module, name)
+        if isinstance(value, Pipeline) and not any(value is p for p in found):
+            found.append(value)
     nested = {id(child) for p in found for child in _descendants(p)}
     return [p for p in found if id(p) not in nested]
+
+
+def _load(folder: PipelineFolder) -> list[Pipeline]:
+    """The pipelines a folder defines, with its run policy applied.
+
+    Policy and the start gate are applied here rather than in the composition so
+    every command sees the same thing: a lint reading a different provider from
+    the emit would be checking a workflow nobody runs.
+    """
+    pipelines = _load_module(folder.module)
+    try:
+        settings = read_config(folder.config_file)
+        _check_provider(settings.provider, where=str(folder.config_file))
+        for pipeline in pipelines:
+            settings.apply(pipeline, where=str(folder.config_file))
+            if settings.start_gate:
+                add_start_gate(pipeline)
+    except IctusError as exc:
+        _fail(str(exc))
+    return pipelines
+
+
+def _check_provider(name: str, *, where: str) -> None:
+    """Refuse a provider the backend cannot use, where it was written."""
+    known = BACKEND.capabilities().providers
+    if known and name not in known:
+        _fail(
+            f"{where}: {name!r} is not a provider {BACKEND.capabilities().name} can use; "
+            f"choose one of {sorted(known)}"
+        )
+
+
+def _policy(folder: PipelineFolder) -> PipelineConfig:
+    """A folder's run policy, on its own."""
+    try:
+        return read_config(folder.config_file)
+    except IctusError as exc:
+        _fail(str(exc))
+        raise
+
+
+def _only(folder: PipelineFolder) -> Pipeline:
+    """The single pipeline a folder defines, which a run needs."""
+    pipelines = _load(folder)
+    if not pipelines:
+        _fail(f"{folder.module} defines no pipeline")
+    if len(pipelines) > 1:
+        names = ", ".join(sorted(p.pipeline_id for p in pipelines))
+        _fail(
+            f"{folder.module} defines more than one top-level pipeline ({names}); "
+            "a pipeline folder runs exactly one"
+        )
+    return pipelines[0]
 
 
 def _descendants(pipeline: Pipeline) -> list[Pipeline]:
@@ -96,20 +156,27 @@ def _write(pipeline: Pipeline, out: Path) -> list[Path]:
 
 @app.command()
 def emit(
-    pipelines_dir: Annotated[Path, typer.Argument(help="Directory of pipeline modules")] = Path(
+    where: Annotated[Path, typer.Argument(help="A pipeline folder, or a directory of them")] = Path(
         "pipelines"
     ),
-    out: Annotated[Path, typer.Option(help="Directory to write YAML into")] = Path(
-        "build/pipelines"
-    ),
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Write every workflow here instead of each folder's build/"),
+    ] = None,
     prune: Annotated[
-        bool, typer.Option(help="Delete YAML in --out that no pipeline claims")
+        bool, typer.Option(help="Delete YAML in the output that no pipeline claims")
     ] = True,
 ) -> None:
-    """Compile pipeline modules to Conductor YAML."""
-    pipelines = _load_pipelines(pipelines_dir)
+    """Compile pipeline folders to Conductor YAML.
+
+    Each folder's YAML goes to its own ``build/`` — committed, so a diff shows
+    what changed in what actually runs.
+    """
+    folders = _folders(where)
+    targets = [(f, out if out is not None else f.build) for f in folders]
+    pipelines = [p for folder, _ in targets for p in _load(folder)]
     if not pipelines:
-        _fail(f"no pipelines found in {pipelines_dir} (nothing was emitted)")
+        _fail(f"no pipelines found in {where} (nothing was emitted)")
 
     seen: dict[str, str] = {}
     problems: list[str] = []
@@ -128,16 +195,20 @@ def emit(
         _fail(f"{len(problems)} composition problem(s); nothing was written")
 
     written: set[Path] = set()
-    for pipeline in pipelines:
-        try:
-            written.update(_write(pipeline, out))
-        except IctusError as exc:
-            _fail(f"{pipeline.pipeline_id}: {exc}")
+    for folder, destination in targets:
+        for pipeline in _load(folder):
+            try:
+                written.update(_write(pipeline, destination))
+            except IctusError as exc:
+                _fail(f"{pipeline.pipeline_id}: {exc}")
 
     if prune:
-        for stale in sorted(set(out.glob("*.yaml")) - written):
-            stale.unlink()
-            typer.echo(f"pruned {stale}")
+        for _, destination in targets:
+            if not destination.is_dir():
+                continue
+            for stale in sorted(set(destination.glob("*.yaml")) - written):
+                stale.unlink()
+                typer.echo(f"pruned {stale}")
 
     for path in sorted(written):
         typer.echo(f"emitted {path}")
@@ -148,14 +219,14 @@ def emit(
 
 @app.command()
 def lint(
-    pipelines_dir: Annotated[Path, typer.Argument(help="Directory of pipeline modules")] = Path(
+    where: Annotated[Path, typer.Argument(help="A pipeline folder, or a directory of them")] = Path(
         "pipelines"
     ),
 ) -> None:
     """Run the composition lints without writing anything."""
-    pipelines = _load_pipelines(pipelines_dir)
+    pipelines = [p for folder in _folders(where) for p in _load(folder)]
     if not pipelines:
-        _fail(f"no pipelines found in {pipelines_dir}")
+        _fail(f"no pipelines found in {where}")
     problems = [p for pipeline in pipelines for p in lint_pipeline(pipeline, backend=BACKEND)]
     if problems:
         for problem in problems:
@@ -178,7 +249,7 @@ def _report_preflight(issues: list[PreflightIssue], *, probed: bool) -> None:
 
 @app.command()
 def preflight(
-    pipelines_dir: Annotated[Path, typer.Argument(help="Directory of pipeline modules")] = Path(
+    where: Annotated[Path, typer.Argument(help="A pipeline folder, or a directory of them")] = Path(
         "pipelines"
     ),
     probe: Annotated[
@@ -190,9 +261,9 @@ def preflight(
     Separate from `validate`: a workflow can be perfectly well-formed and still
     be unrunnable here because a server is not installed or a token is unset.
     """
-    pipelines = _load_pipelines(pipelines_dir)
+    pipelines = [p for folder in _folders(where) for p in _load(folder)]
     if not pipelines:
-        _fail(f"no pipelines found in {pipelines_dir}")
+        _fail(f"no pipelines found in {where}")
     issues: list[PreflightIssue] = []
     for pipeline in pipelines:
         declared = pipeline.all_mcp_servers()
@@ -207,14 +278,28 @@ def preflight(
 
 @app.command()
 def validate(
-    out: Annotated[Path, typer.Argument(help="Directory of emitted YAML")] = Path(
-        "build/pipelines"
-    ),
+    where: Annotated[
+        Path,
+        typer.Argument(help="A pipeline folder, a directory of them, or a directory of YAML"),
+    ] = Path("pipelines"),
 ) -> None:
     """Check emitted YAML with Conductor's own validator."""
-    files = sorted(out.glob("*.yaml"))
+    # Pipeline folders first. A folder holds `config.yaml`, which is not a
+    # workflow — globbing *.yaml here handed it to Conductor's loader, which
+    # rejected it for the entirely correct reason that it has no `agents:`.
+    try:
+        found = PipelineFolder.find(where)
+    except IctusError:
+        found = []
+    if found:
+        files = sorted(f for folder in found for f in folder.build.glob("*.yaml"))
+    elif where.is_dir():
+        files = sorted(where.glob("*.yaml"))
+    else:
+        _fail(f"{where} is not a directory")
+        return
     if not files:
-        _fail(f"no compiled output in {out}; run `ictus emit` first")
+        _fail(f"no compiled output under {where}; run `ictus emit` first")
     try:
         results = BACKEND.validate(files)
     except FileNotFoundError as exc:
@@ -234,11 +319,15 @@ def validate(
 
 @app.command()
 def run(
-    workflow: Annotated[str, typer.Argument(help="Pipeline id (basename of the emitted YAML)")],
-    out: Annotated[Path, typer.Option(help="Directory of emitted YAML")] = Path("build/pipelines"),
-    pipelines_dir: Annotated[
-        Path, typer.Option("--pipelines", help="Where the pipeline modules live")
-    ] = Path("pipelines"),
+    folder: Annotated[Path, typer.Argument(help="The pipeline folder to run")] = Path(),
+    input_file: Annotated[
+        Path | None,
+        typer.Option("--input-file", "-f", help="Use this instead of the folder's input.md"),
+    ] = None,
+    repo: Annotated[
+        Path | None,
+        typer.Option(help="Work in this directory instead of the current one"),
+    ] = None,
     web: Annotated[
         bool, typer.Option(help="Serve the dashboard so gates can be answered remotely")
     ] = True,
@@ -246,6 +335,9 @@ def run(
     skip_preflight: Annotated[
         bool, typer.Option(help="Launch without checking the environment first")
     ] = False,
+    reemit: Annotated[
+        bool, typer.Option(help="Compile before running, so the YAML matches the source")
+    ] = True,
     background: Annotated[
         bool,
         typer.Option(
@@ -256,31 +348,73 @@ def run(
     ] = False,
     inputs: Annotated[
         list[str] | None,
-        typer.Option("--input", "-i", help="Workflow input as name=value; repeatable"),
+        typer.Option("--input", "-i", help="Override one input as name=value; repeatable"),
     ] = None,
 ) -> None:
-    """Run an emitted workflow with Conductor.
+    """Run a pipeline folder against a project.
 
-    The dashboard is on by default: a gate is only answerable from another
-    machine while the run has a dashboard port, and mid-run guidance needs one
-    too.
+    The work happens in the directory you invoked this from, so `cd` to a
+    project and go. A `repo:` key in the input file, or `--repo`, overrides that
+    — a run that touches a checkout can then say which one in something you can
+    commit.
     """
-    path = out / f"{workflow}.yaml"
+    started_in = Path.cwd()
+    try:
+        target = PipelineFolder.at(folder)
+    except IctusError as exc:
+        _fail(str(exc))
+        return
+    pipeline = _only(target)
+
+    spec = None
+    source = input_file if input_file is not None else target.input_file
+    if source.is_file():
+        try:
+            spec = read_input_file(source, pipeline, cwd=started_in)
+        except IctusError as exc:
+            _fail(str(exc))
+    elif input_file is not None:
+        _fail(f"{input_file} does not exist")
+
+    supplied: dict[str, str] = dict(spec.inputs) if spec else {}
+    for pair in inputs or []:
+        name, sep, value = pair.partition("=")
+        if not sep or not name:
+            _fail(f"--input expects name=value, got {pair!r}")
+        supplied[name] = value
+
+    declared = {param.name: param for param in pipeline.workflow_inputs}
+    unknown = sorted(set(supplied) - set(declared))
+    if unknown:
+        known = ", ".join(sorted(declared)) or "(none)"
+        _fail(f"{unknown} are not inputs of {pipeline.pipeline_id!r}; declared: {known}")
+    missing = sorted(n for n, d in declared.items() if d.required and n not in supplied)
+    if missing:
+        hint = f" Add them to {source}," if source.is_file() else f" Create {target.input_file},"
+        _fail(f"{pipeline.pipeline_id!r} requires {missing}.{hint} or pass -i name=value.")
+
+    working = (
+        repo.expanduser().resolve()
+        if repo is not None
+        else (spec.working_dir if spec else started_in)
+    )
+    if not working.is_dir():
+        _fail(f"{working} is not a directory")
+
+    if reemit:
+        try:
+            _write(pipeline, target.build)
+        except IctusError as exc:
+            _fail(f"{pipeline.pipeline_id}: {exc}")
+    path = target.build / f"{pipeline.pipeline_id}.yaml"
     if not path.is_file():
-        available = ", ".join(sorted(p.stem for p in out.glob("*.yaml"))) or "(none emitted)"
-        _fail(f"{path} does not exist; available: {available}")
+        _fail(f"{path} does not exist; run `ictus emit {folder}` first")
 
     if not skip_preflight:
         # Preflight reads the pipeline module, not the emitted file: the
         # requirements are a property of what was authored, and deliberately do
         # not carry secrets into the compiled artifact.
-        matching = [p for p in _load_pipelines(pipelines_dir) if p.pipeline_id == workflow]
-        if not matching:
-            _fail(
-                f"cannot preflight {workflow!r}: no pipeline in {pipelines_dir} declares that id. "
-                "Pass --skip-preflight to launch anyway."
-            )
-        issues = BACKEND.preflight(matching[0], probe=probe)
+        issues = BACKEND.preflight(pipeline, probe=probe)
         blocking = [i for i in issues if i.blocking]
         if issues:
             _report_preflight(issues, probed=probe)
@@ -289,15 +423,20 @@ def run(
                 f"{len(blocking)} requirement(s) unmet; nothing was launched. "
                 "Fix them, or pass --skip-preflight to launch anyway."
             )
-    supplied: dict[str, str] = {}
-    for pair in inputs or []:
-        name, sep, value = pair.partition("=")
-        if not sep or not name:
-            _fail(f"--input expects name=value, got {pair!r}")
-        supplied[name] = value
+
+    typer.secho(f"{pipeline.pipeline_id} in {working}", fg=typer.colors.CYAN)
+    for name in sorted(supplied):
+        preview = supplied[name].replace("\n", " ")
+        typer.echo(f"  {name} = {preview[:70]}{'…' if len(preview) > 70 else ''}")
 
     try:
-        code = BACKEND.run(path, inputs=supplied, dashboard=web, background=background)
+        code = BACKEND.run(
+            path,
+            inputs=supplied,
+            dashboard=web,
+            background=background,
+            working_dir=working,
+        )
     except FileNotFoundError as exc:
         _fail(str(exc))
         return
@@ -306,3 +445,27 @@ def run(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def init(
+    folder: Annotated[Path, typer.Argument(help="The pipeline folder to scaffold")],
+) -> None:
+    """Create the files a pipeline folder needs.
+
+    Nothing that already exists is touched: running this on a folder someone has
+    started is how you add the file you forgot, not a way to lose work.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, body in (
+        (CONFIG_FILE, MINIMAL),
+        ("input.md", STARTER_INPUT),
+        ("pipeline.py", STARTER_PIPELINE),
+    ):
+        target = folder / name
+        if target.exists():
+            typer.echo(f"kept  {target}")
+            continue
+        target.write_text(body, encoding="utf-8")
+        typer.secho(f"wrote {target}", fg=typer.colors.GREEN)
+    typer.echo(f"\nnow: ictus lint {folder} && ictus run {folder}")

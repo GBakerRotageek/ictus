@@ -11,5 +11,6 @@ from ictus.stdlib.agents.briefing import briefing
 from ictus.stdlib.agents.remediate import remediate
 from ictus.stdlib.agents.validate_mcp import validate_mcp
 from ictus.stdlib.agents.verdict import verdict
+from ictus.stdlib.agents.voice import SATISFIED, voice
 
-__all__ = ["briefing", "remediate", "validate_mcp", "verdict"]
+__all__ = ["SATISFIED", "briefing", "remediate", "validate_mcp", "verdict", "voice"]

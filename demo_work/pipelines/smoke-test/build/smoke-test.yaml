@@ -2,7 +2,7 @@ workflow:
   name: smoke-test
   description: Plan a ticket, break it down, gate it on a human, execute and test.
   version: '1'
-  entry_point: locate
+  entry_point: confirm_start
   runtime:
     provider:
       name: claude-agent-sdk
@@ -22,9 +22,9 @@ workflow:
   context:
     mode: explicit
   limits:
-    max_iterations: 11
+    max_iterations: 13
     budget_usd: 5.0
-    budget_mode: enforce
+    budget_mode: audit
   metadata:
     generator: ictus
     pipeline: smoke-test
@@ -70,7 +70,7 @@ agents:
 
       {{ plan.output.plan }}
 
-      {% if review_gate is defined %}A previous breakdown was rejected with these notes — address them:
+      {% if review_gate is defined and review_gate.output.additional_input is defined and review_gate.output.additional_input.notes is defined %}A previous breakdown was rejected with these notes — address them:
       {{ review_gate.output.additional_input.notes }}{% endif %}
     input:
       - plan.output.plan
@@ -143,5 +143,37 @@ agents:
       report: '{{ testing.output.report }}'
     input:
       - testing.output.report
+  - name: confirm_start
+    description: Confirm before anything runs
+    type: human_gate
+    prompt: |
+      Start **smoke-test**?
+
+      Plan a ticket, break it down, gate it on a human, execute and test.
+
+      7 step(s), beginning with `locate`.
+
+      ---
+
+      **ticket**
+
+      ```
+      {{ workflow.input.ticket }}
+      ```
+    input:
+      - workflow.input.ticket
+    options:
+      - label: Start the run
+        value: start
+        route: locate
+      - label: Stop — do not run
+        value: cancel
+        route: not_started
+  - name: not_started
+    type: terminate
+    status: success
+    reason: Stopped at the start gate; nothing was run.
+    output_template:
+      started: 'false'
 output:
-  report: '{{ testing.output.report }}'
+  report: '{{ testing.output.report | tojson }}'

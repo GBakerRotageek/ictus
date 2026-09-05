@@ -2,7 +2,7 @@ workflow:
   name: provision
   description: Reset a database, then gate going live on a human.
   version: '1'
-  entry_point: check_connections
+  entry_point: confirm_start
   runtime:
     provider:
       name: claude-agent-sdk
@@ -19,6 +19,8 @@ workflow:
           - -y
           - '@modelcontextprotocol/server-filesystem'
           - .
+    checkpoint:
+      every_agent: true
   input:
     environment:
       type: string
@@ -27,7 +29,7 @@ workflow:
   context:
     mode: explicit
   limits:
-    max_iterations: 9
+    max_iterations: 11
   metadata:
     generator: ictus
     pipeline: provision
@@ -70,5 +72,37 @@ agents:
     type: terminate
     status: success
     reason: Operator declined the reset.
+  - name: confirm_start
+    description: Confirm before anything runs
+    type: human_gate
+    prompt: |
+      Start **provision**?
+
+      Reset a database, then gate going live on a human.
+
+      5 step(s), beginning with `check_connections`.
+
+      ---
+
+      **environment**
+
+      ```
+      {{ workflow.input.environment }}
+      ```
+    input:
+      - workflow.input.environment
+    options:
+      - label: Start the run
+        value: start
+        route: check_connections
+      - label: Stop — do not run
+        value: cancel
+        route: not_started
+  - name: not_started
+    type: terminate
+    status: success
+    reason: Stopped at the start gate; nothing was run.
+    output_template:
+      started: 'false'
 output:
-  review_notes: '{{ confirm.output.notes }}'
+  review_notes: '{{ confirm.output.notes | tojson }}'

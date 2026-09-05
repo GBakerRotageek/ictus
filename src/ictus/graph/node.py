@@ -144,6 +144,19 @@ class Node(ABC):
         """
         return port_name
 
+    def guard_depth(self, port_name: str) -> int:
+        """How many trailing path segments a guard must test individually.
+
+        Zero for almost everything: if the step ran, its declared outputs are
+        there, so testing the node's own name is enough. A gate is the
+        exception — its free-text field exists only on the branch that asked
+        for one, and both ``additional_input`` and the field itself can be
+        missing on any other branch. Reading either under strict undefined is a
+        hard template error, and it lands a round later than the mistake.
+        """
+        _ = port_name
+        return 0
+
     def template_strings(self) -> Iterator[str]:
         """Author-written *raw* strings a backend renders.
 
@@ -153,7 +166,21 @@ class Node(ABC):
         return iter(())
 
     def prompt_refs(self) -> Iterator[Ref]:
-        """Typed references this node reads."""
+        """Typed references this node reads, rendered in the node's own context."""
+        return iter(())
+
+    def settled_template_strings(self) -> Iterator[str]:
+        """Raw strings rendered with the whole run in scope, not the node's inputs.
+
+        Conductor renders a terminal's output payload against the accumulated
+        context rather than the step's declared inputs, so the explicit-mode rule
+        that governs a prompt does not govern these. Keeping them apart is what
+        stops a correct payload being reported as an undeclared reference.
+        """
+        return iter(())
+
+    def settled_refs(self) -> Iterator[Ref]:
+        """Typed references in the accumulate-rendered slots."""
         return iter(())
 
     def ref(self, port: str) -> Ref:
@@ -166,6 +193,7 @@ class Node(ABC):
         return Ref(
             source_id=self.node_id,
             port=declared.name,
+            element=declared.element,
             port_type=declared.port_type,
             source=self,
         )
@@ -199,7 +227,15 @@ class AgentNode(Node):
     system_prompt: str | None = None
     model: str | None = None
     provider: str | None = None
-    tools: tuple[str, ...] = ()
+    tools: tuple[str, ...] | None = None
+    """Which tools this step may call.
+
+    ``None`` leaves it to the workflow; an empty tuple denies tools outright.
+    Two different things, and collapsing them is why a step could not be built
+    that is *denied* tools — Conductor reads ``None`` as all and ``[]`` as none,
+    and an omitted key is the former.
+    """
+
     declared_outputs: tuple[OutputPort, ...] = ()
     session_key: str | None = None
     dialog_trigger: str | None = None
@@ -313,6 +349,16 @@ class GateNode(Node):
     def output_ref(self, port_name: str) -> str:
         return port_name if port_name == "selected" else f"additional_input.{port_name}"
 
+    def guard_depth(self, port_name: str) -> int:
+        """``selected`` is always there; a free-text field is not.
+
+        Verified against the engine's own Jinja settings: with only the node
+        name guarded, reading a field the chosen option never asked for raises
+        "'dict object' has no attribute 'notes'", and with ``additional_input``
+        absent entirely it raises one segment earlier.
+        """
+        return 0 if port_name == "selected" else 2
+
     def template_strings(self) -> Iterator[str]:
         if isinstance(self.prompt, str):
             yield self.prompt
@@ -327,9 +373,13 @@ class ScriptNode(Node):
     """A subprocess step. Conductor ``type: script`` — no model in the loop."""
 
     command: str
-    args: tuple[str, ...] = ()
+    args: tuple[str | Template, ...] = ()
     env: Mapping[str, str] | None = None
-    stdin: str | None = None
+    stdin: str | Template | None = None
+    """What to pipe to the process. A ``Template`` so a step can be handed a
+    value another step produced — writing a report to a file is a script whose
+    whole payload is somebody else's output."""
+
     timeout: int | None = None
     working_dir: str | None = None
     declared_outputs: tuple[OutputPort, ...] = ()
@@ -352,9 +402,16 @@ class ScriptNode(Node):
         return True
 
     def template_strings(self) -> Iterator[str]:
-        yield from self.args
-        if self.stdin is not None:
+        yield from (arg for arg in self.args if isinstance(arg, str))
+        if isinstance(self.stdin, str):
             yield self.stdin
+
+    def prompt_refs(self) -> Iterator[Ref]:
+        for arg in self.args:
+            if isinstance(arg, Template):
+                yield from arg.refs()
+        if isinstance(self.stdin, Template):
+            yield from self.stdin.refs()
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -368,6 +425,7 @@ class ComputeNode(Node):
     value: str | None = None
     values: Mapping[str, str] | None = None
     value_type: PortType | None = None
+    declared_outputs: tuple[OutputPort, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.value is None) == (self.values is None):
@@ -384,6 +442,37 @@ class ComputeNode(Node):
     @property
     def kind(self) -> NodeKind:
         return NodeKind.COMPUTATION
+
+    @property
+    def outputs(self) -> tuple[OutputPort, ...]:
+        return self.declared_outputs
+
+    @property
+    def emits_output_schema(self) -> bool:
+        """Never. A ``set`` step's shape is decided by the engine, not declared.
+
+        Both forms fail if a schema is written, and both fail *after* the step
+        has run. A single ``value:`` produces a scalar, and Conductor refuses a
+        schema on one: "declares an output schema but its rendered value is a
+        int, not a dict". A ``values:`` block produces a dict, but each binding's
+        type comes from a YAML load of its rendered text (executor/set_step.py),
+        with no per-key override — so a binding that renders as ``no`` arrives as
+        a boolean and a declared ``string`` fails validation.
+
+        The ports stay known to ictus, so references to them are still typed and
+        checked at composition. They are simply not written to the file.
+        """
+        return False
+
+    def output_ref(self, port_name: str) -> str:
+        """A single ``value:`` is stored as the bare scalar, not wrapped in a key.
+
+        Verified on a live run: reading ``tally.output.value`` off a
+        ``value:``/``output_type: number`` step raises "'int object' has no
+        attribute 'value'". Only the ``values:`` form produces a mapping, so
+        only it has sub-paths.
+        """
+        return port_name if self.values is not None else ""
 
     def template_strings(self) -> Iterator[str]:
         if self.value is not None:
@@ -427,7 +516,7 @@ class TerminateNode(Node):
 
     status: Literal["success", "failed"]
     reason: str | Template
-    result: Mapping[str, str] | None = None
+    result: Mapping[str, str | Template] | None = None
 
     def __post_init__(self) -> None:
         if not _has_text(self.reason):
@@ -445,12 +534,20 @@ class TerminateNode(Node):
     def template_strings(self) -> Iterator[str]:
         if isinstance(self.reason, str):
             yield self.reason
-        if self.result is not None:
-            yield from self.result.values()
+
+    def settled_template_strings(self) -> Iterator[str]:
+        for value in (self.result or {}).values():
+            if isinstance(value, str):
+                yield value
 
     def prompt_refs(self) -> Iterator[Ref]:
         if isinstance(self.reason, Template):
             yield from self.reason.refs()
+
+    def settled_refs(self) -> Iterator[Ref]:
+        for value in (self.result or {}).values():
+            if isinstance(value, Template):
+                yield from value.refs()
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,6 +692,26 @@ class SubGraphNode(Node):
         return self.declared_outputs
 
 
+OUTCOME_PORT = "outcome"
+
+
+@dataclass(frozen=True, kw_only=True, eq=False)
+class ScopeNode(SubGraphNode):
+    """A scope placed in a parent, carrying its outcome vocabulary with it.
+
+    The vocabulary travels on the node rather than living in the parent's head:
+    ``branch_on_outcome`` reads it back to check that every exit is routed and
+    that no route names an outcome the scope cannot produce.
+    """
+
+    outcomes: tuple[str, ...] = ()
+
+    @property
+    def outcome(self) -> Ref:
+        """The port a parent branches on."""
+        return self.ref(OUTCOME_PORT)
+
+
 def render_output_schema(ports: Sequence[OutputPort]) -> YamlDict:
     """Lower output ports to Conductor's ``output:`` block."""
     out: YamlDict = {}
@@ -602,5 +719,14 @@ def render_output_schema(ports: Sequence[OutputPort]) -> YamlDict:
         entry: dict[str, YamlValue] = {"type": port.port_type.value}
         if port.description:
             entry["description"] = port.description
+        if port.element is not None:
+            # The shape each entry must have. This is the only thing that tells
+            # the model what keys to emit; a fan-out over the array reads them.
+            entry["items"] = {
+                "type": "object",
+                "properties": {
+                    name: {"type": port_type.value} for name, port_type in port.element.items()
+                },
+            }
         out[port.name] = entry
     return out

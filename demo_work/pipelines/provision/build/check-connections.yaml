@@ -5,13 +5,13 @@ workflow:
   entry_point: checks
   runtime:
     provider:
-      name: copilot
+      name: claude-agent-sdk
     checkpoint:
       every_agent: true
   context:
     mode: explicit
   limits:
-    max_iterations: 15
+    max_iterations: 33
 agents:
   - name: check_github
     description: Check the github MCP server responds
@@ -62,10 +62,10 @@ agents:
       detail: {{ checks.outputs.check_filesystem.detail }}
 
     input:
-      - checks.outputs.check_github.available
-      - checks.outputs.check_github.detail
-      - checks.outputs.check_filesystem.available
-      - checks.outputs.check_filesystem.detail
+      - checks.outputs.check_github.available?
+      - checks.outputs.check_github.detail?
+      - checks.outputs.check_filesystem.available?
+      - checks.outputs.check_filesystem.detail?
     output:
       all_ok:
         type: boolean
@@ -145,8 +145,8 @@ agents:
     reason: Every declared MCP server responded.
   - name: aborted
     type: terminate
-    status: failed
-    reason: 'Aborted: a required MCP server was unreachable.'
+    status: success
+    reason: 'Aborted by the operator: a required MCP server was unreachable.'
 parallel:
   - name: checks
     agents:
@@ -157,4 +157,4 @@ parallel:
     routes:
       - to: verdict
 output:
-  report: '{{ verdict.output.report }}'
+  report: '{{ verdict.output.report | tojson }}'

@@ -9,13 +9,25 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ictus.graph.node import GateNode, SubGraphNode
+from ictus.errors import CompositionError
+from ictus.graph.node import GateNode, ScopeNode, SubGraphNode
+from ictus.graph.ref import Origin
 
 if TYPE_CHECKING:
+    from ictus.graph.mapping import MapGroup
     from ictus.graph.node import Node
-    from ictus.graph.pipeline import Pipeline
+    from ictus.graph.pipeline import Pipeline, RouteEnd
+    from ictus.graph.ref import Ref
 
-__all__ = ["node_problems", "reference_problems", "stage_contract_problems"]
+# Conductor carries an abandoned question set on `abort_route`, not in `routes:`.
+ABORT_CASE = "__abort__"
+
+__all__ = [
+    "group_routing_problems",
+    "node_problems",
+    "reference_problems",
+    "stage_contract_problems",
+]
 
 
 def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
@@ -31,9 +43,18 @@ def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     problems: list[str] = []
     refs = [
         *node.prompt_refs(),
+        *node.settled_refs(),
         *(r for edge in pipeline.outgoing(node) for r in edge.condition_refs()),
     ]
+    maps = {m.group_id: m for m in pipeline.maps}
     for ref in refs:
+        if ref.origin is Origin.LOOP_ITEM:
+            # The item's fields were checked by `Item.ref` when the reference
+            # was written; the graph has nothing further to say about them.
+            continue
+        if ref.source_id in maps:
+            problems.extend(_map_reference_problems(maps[ref.source_id], node, ref, where))
+            continue
         if ref.from_input:
             param = declared_inputs.get(ref.source_id)
             if param is None:
@@ -72,16 +93,70 @@ def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     return problems
 
 
+def _map_reference_problems(group: MapGroup, node: Node, ref: Ref, where: str) -> list[str]:
+    """A reference to a map group's aggregate — outputs, errors or count."""
+    try:
+        port = group.get_output(ref.port)
+    except CompositionError as exc:
+        return [f"{where}: agent {node.node_id!r} {exc}"]
+    if port.port_type is not ref.port_type:
+        return [
+            f"{where}: agent {node.node_id!r} reads {group.group_id}.{ref.port} as "
+            f"{ref.port_type.value} but a map group produces {port.port_type.value}"
+        ]
+    return []
+
+
+def group_routing_problems(pipeline: Pipeline, group: RouteEnd, where: str) -> list[str]:
+    """A group routes like a step, so it can dead-end like one.
+
+    Only nodes were ever linted, and a group is not a node — so a parallel or map
+    group with nothing but conditional routes passed every check and then hit
+    ``ValueError: No matching route found`` (engine/router.py:109) at run time,
+    after every member had already been paid for.
+    """
+    edges = pipeline.outgoing(group)
+    if not edges:
+        return [
+            f"{where}: group {group.node_id!r} has no outgoing route, so the run stops "
+            "there — indistinguishable from a forgotten edge. Route it to a step or END."
+        ]
+    if all(e.when is not None for e in edges):
+        return [
+            f"{where}: group {group.node_id!r} has only conditional routes; if none match, "
+            "execution has nowhere to go. Add an unconditional route (or route to END)."
+        ]
+    return []
+
+
 def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """Problems with one node's place in the graph."""
     problems: list[str] = []
     edges = pipeline.outgoing(node)
+    # A map body is not a step of the graph: it is reached by the group that
+    # spawns it, has no routes of its own, and is never emitted in `agents:`.
+    # Every rule about edges is therefore silent about it.
+    if pipeline.map_of(node) is not None:
+        return reference_problems(pipeline, node, where)
     in_group = pipeline.group_of(node) is not None
 
-    if edges and not isinstance(node, GateNode) and all(e.when is not None for e in edges):
+    # A scope is the one node whose conditional routes are provably exhaustive:
+    # its outcome vocabulary is closed, `branch_on_outcome` refuses to leave a
+    # member unrouted, and outcome names that a JSON parse would turn into
+    # non-strings are rejected at composition. Nothing else can reach the port.
+    exhaustive = isinstance(node, ScopeNode) and {e.case for e in edges} >= set(node.outcomes)
+    routed = [e for e in edges if e.case != ABORT_CASE]
+    if (
+        edges
+        and routed
+        and not isinstance(node, GateNode)
+        and not exhaustive
+        and all(e.when is not None for e in routed)
+    ):
         problems.append(
-            f"{where}: agent {node.node_id!r} has only conditional routes; if none match, "
-            "execution has nowhere to go. Add an unconditional route (or route to END)."
+            f"{where}: agent {node.node_id!r} has only conditional routes once its abort "
+            "edge is set aside. An abort is emitted as `abort_route`, not in `routes:`, so "
+            "it is not the fallback the answered path needs."
         )
     elif not edges and node.accepts_routes and not in_group:
         # A member of a parallel group routes as part of the group and correctly
@@ -134,7 +209,7 @@ def stage_contract_problems(where: str, host: SubGraphNode, child: Pipeline) -> 
         if declared[name].port_type is not supplied[name].port_type
     )
 
-    exposed = {p.name for p in child.exposed_output_ports}
+    exposed = set(child.output_contract_names)
     problems.extend(
         f"{where}: stage {host.node_id!r} reads output {port.name!r}, which workflow "
         f"{child.pipeline_id!r} does not expose; exposed outputs: "

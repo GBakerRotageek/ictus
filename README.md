@@ -33,8 +33,11 @@ emitted as Conductor YAML. Conductor executes.
         stages/              reusable sub-graphs
 
     demo_work/               what a *consumer* of ictus writes, not the library
-      pipelines/             authored pipelines, one module per ticket type
-      build/                 emitted YAML, committed so diffs show what runs
+      pipelines/
+        <name>/              one folder per pipeline — the running contract
+          pipeline.py        the composition
+          input.md           what to run it on
+          build/             emitted YAML, committed so diffs show what runs
       scripts/               shell steps invoked by script nodes
 
 `ictus/__init__.py` is the only public surface — `ictus.graph` deliberately
@@ -48,8 +51,9 @@ run; deleting it would not touch the library.
 
 | Tier | You write | Conductor gets |
 |---|---|---|
-| **Node** | `AgentNode`, `GateNode`, `ScriptNode`, `SetNode`, `WaitNode`, `TerminateNode` | one entry in the flat `agents:` list |
+| **Node** | `AgentNode`, `GateNode`, `QuestionsNode`, `ScriptNode`, `ComputeNode`, `WaitNode`, `TerminateNode` | one entry in the flat `agents:` list |
 | **Stage** | `Stage`, with its own graph and an input/output contract | its own YAML file plus a `type: workflow` agent in the parent |
+| **Scope** | `Scope` — a stage whose every exit is an outcome the caller routes on | the same, plus a closed vocabulary the parent must route exhaustively |
 | **Pipeline** | `Pipeline` | the `WorkflowConfig` envelope |
 
 Conductor has no nested-step construct inside an agent. `type: workflow` is its
@@ -128,20 +132,22 @@ is silent until a run is already in flight:
 ## The stdlib
 
 One primitive per module, so the docstring beside a thing is about that thing.
+**[STDLIB.md](STDLIB.md) is the catalogue** — every constructor, what it is for,
+its options and what it produces.
 
 | Group | Emits | What's there |
 |---|---|---|
 | `gates/` | `human_gate`, `questions` | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
-| `agents/` | `agent` | `briefing`, `verdict`, `validate_mcp`, `remediate` |
-| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `wait`, `shell` |
+| `agents/` | `agent` | `briefing`, `verdict`, `voice`, `validate_mcp`, `remediate` |
+| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `counter`, `wait`, `shell` |
 | `terminals/` | `terminate` | `succeed`, `fail` |
-| `stages/` | `workflow` | `revise_loop`, `briefing_gate`, `poll_until`, `script_sequence`, `validate_mcps`, `resolve_unknowns` |
+| `stages/` | `workflow` | `briefing_gate`, `resolve_unknowns`, `script_sequence`, `validate_mcps`, and the scopes `converge` and `council` |
 
-The stages are whole sub-graphs. `revise_loop` is the draft/review/revise cycle
-with the reviewer's notes fed back into the producer; `briefing_gate` summarises
-data and reports a human decision without deciding what it means, leaving the
-branch to the caller; `poll_until` is check/wait/check; `script_sequence` chains
-shell steps. Each costs its caller one iteration however many steps it contains.
+Each stage is a whole sub-graph costing its caller one iteration. The last two are
+**scopes** — a stage whose every exit is an outcome the caller routes on, rather
+than a failure that raises past it. `converge` is a bounded try/judge loop;
+`council` runs several `voice` nodes at once and loops them over a synthesised
+report until they agree.
 
 ## Preflight
 
@@ -255,17 +261,77 @@ time it mattered nobody read it either.
 - Checkpointing is failure-only by default. Any graph with a gate gets
   `checkpoint.every_agent`, because the human may be hours away.
 
+## The running contract
+
+A pipeline is a folder, not a module — three files, three questions:
+
+    pipelines/code-council/
+      pipeline.py            what the graph is       (composition)
+      config.yaml            how it runs             (policy)
+      input.md               what to run it on       (this run's values)
+      build/                 emitted YAML, committed
+
+`ictus init <folder>` writes all three. `config.yaml` is required and the minimal
+one is a line:
+
+    provider: claude-agent-sdk
+
+`provider` has no default because Conductor's is `copilot`, and a pipeline that
+silently inherited it is how four emitted workflows once ran somewhere nobody
+chose. Policy lives here rather than in the composition so a pipeline moves
+between providers without editing Python, and so a value set in both places and
+set differently is refused instead of silently resolved.
+
+`input.md` is YAML frontmatter over a Markdown body — the shape Conductor
+already uses for `SKILL.md` and plugin agents, so it is one convention across
+both tools. Frontmatter holds the short values; the body is the long one, and
+which input it feeds is declared once with `declare_input(..., prose=True)`.
+
+    ---
+    target: HEAD~1..HEAD
+    repo: ../../some-project     # optional; relative to this file
+    ---
+    Ship it Friday behind a flag. Prefer reversible over ideal.
+
+A key matching no declared input is refused rather than ignored: `targt:` doing
+nothing quietly is how a run does the default thing and nobody notices until the
+output is wrong.
+
+The work happens in the directory you invoke it from, so `cd` to a project and
+go. `repo:` — or `--repo` — overrides that, which is how a run that touches a
+particular checkout says so in something you can commit.
+
+## Nothing starts without a person
+
+Every pipeline gets a confirmation gate at its entry point, unless its
+`config.yaml` says `start_gate: false`. The run loads, the dashboard comes up
+with the whole graph in it and the actual input values rendered in the prompt,
+and nothing happens until someone chooses.
+
+This exists because Conductor's dashboard is a view onto a live engine, not a
+launcher: the web API has `stop`, `kill` and `resume` but no start, and
+`--dry-run` returns before the dashboard is built. A human gate costs no provider
+call and no money, so it is the one mechanism that can hold a run open for
+inspection. It is added at emit time, so what is committed in `build/` is what
+runs — a confirmation step that only appeared at launch would make the artifact
+a lie.
+
+Declining is a *success*: nothing was attempted, so nothing failed, and a caller
+should not have to treat "a person looked at it and said no" as an error.
+
 ## Usage
 
     make soundcheck            # lint, types, tests, emit, and conductor validate
-    make run WF=smoke-test     # run it, dashboard on
+    make run WF=smoke-test     # run that folder, dashboard on
 
-In your own project the defaults are plain `pipelines/` and `build/pipelines/`:
+    cd ~/work/my-service
+    ictus run ~/pipelines/code-council            # input.md supplies the inputs
+    ictus run ~/pipelines/code-council -i target=HEAD~5..HEAD
+    ictus run ~/pipelines/code-council -f release-review.md
 
-    ictus emit                 # reads ./pipelines, writes ./build/pipelines
-    ictus lint                 # composition rules only, writes nothing
-    ictus validate             # hands the emitted YAML to conductor
-    ictus run <pipeline-id>    # runs it with the dashboard served
+    ictus emit pipelines/      # each folder's own build/
+    ictus lint pipelines/      # composition rules only, writes nothing
+    ictus validate pipelines/  # hands the emitted YAML to conductor
 
 `soundcheck` ends with `conductor validate`, and that step is not optional: a
 green build that never asked Conductor whether the output loads has checked

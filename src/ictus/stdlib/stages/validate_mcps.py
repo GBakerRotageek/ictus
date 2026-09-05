@@ -24,7 +24,6 @@ from ictus.graph.stage import Stage
 from ictus.stdlib.agents.remediate import remediate
 from ictus.stdlib.agents.validate_mcp import validate_mcp
 from ictus.stdlib.gates.choice import choice_gate
-from ictus.stdlib.terminals.fail import fail
 from ictus.stdlib.terminals.succeed import succeed
 
 if TYPE_CHECKING:
@@ -173,7 +172,10 @@ def validate_mcps(
 
     ready = body.add(succeed(node_id="ready", reason="Every declared MCP server responded."))
     aborted = body.add(
-        fail(node_id="aborted", reason="Aborted: a required MCP server was unreachable.")
+        succeed(
+            node_id="aborted",
+            reason="Aborted by the operator: a required MCP server was unreachable.",
+        )
     )
 
     body.set_entry(start)

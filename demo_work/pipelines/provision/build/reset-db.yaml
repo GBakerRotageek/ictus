@@ -5,7 +5,7 @@ workflow:
   entry_point: drop
   runtime:
     provider:
-      name: copilot
+      name: claude-agent-sdk
   input:
     environment:
       type: string
@@ -65,4 +65,4 @@ agents:
     routes:
       - to: $end
 output:
-  result: '{{ seed.output.status }}'
+  result: '{{ seed.output.status | tojson }}'

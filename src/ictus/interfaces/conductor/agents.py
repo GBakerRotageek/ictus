@@ -32,8 +32,15 @@ from ictus.graph.node import (
     WaitNode,
     render_output_schema,
 )
-from ictus.graph.pipeline import Pipeline
-from ictus.interfaces.conductor.templates import reference_path, render
+from ictus.graph.pipeline import DataDep, FailureMode, Pipeline
+from ictus.graph.ports import PortType
+from ictus.interfaces.conductor.templates import (
+    guard_test,
+    output_path,
+    reference_path,
+    render,
+    render_settled,
+)
 
 if TYPE_CHECKING:
     from ictus.graph.pipeline import Edge, RouteEnd
@@ -44,6 +51,9 @@ __all__ = ["agent_entry"]
 # Conductor's terminal route marker. The graph says an edge ends the run; this
 # is the only place that says how that is written down.
 END_MARKER = "$end"
+
+# Values Conductor reads back with json.loads, so they must be rendered as JSON.
+_STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
 
 # The one place a neutral node kind becomes a Conductor type string.
 CONDUCTOR_TYPE: dict[NodeKind, str] = {
@@ -95,7 +105,7 @@ def kind_fields(pipeline: Pipeline, node: Node) -> YamlDict:
                 fields["model"] = node.model
             if node.provider is not None:
                 fields["provider"] = node.provider
-            if node.tools:
+            if node.tools is not None:
                 fields["tools"] = list(node.tools)
             if node.session_key is not None:
                 fields["session_key"] = node.session_key
@@ -107,11 +117,11 @@ def kind_fields(pipeline: Pipeline, node: Node) -> YamlDict:
         case ScriptNode():
             fields = {"command": node.command}
             if node.args:
-                fields["args"] = list(node.args)
+                fields["args"] = [render(pipeline, node, arg) for arg in node.args]
             if node.env:
                 fields["env"] = dict(node.env)
             if node.stdin is not None:
-                fields["stdin"] = node.stdin
+                fields["stdin"] = render(pipeline, node, node.stdin)
             if node.timeout is not None:
                 fields["timeout"] = node.timeout
             if node.working_dir is not None:
@@ -134,7 +144,9 @@ def kind_fields(pipeline: Pipeline, node: Node) -> YamlDict:
         case TerminateNode():
             fields = {"status": node.status, "reason": render(pipeline, node, node.reason)}
             if node.result is not None:
-                fields["output_template"] = dict(node.result)
+                fields["output_template"] = {
+                    key: render_settled(pipeline, node, value) for key, value in node.result.items()
+                }
             return fields
         case QuestionsNode():
             fields = dict(node.kind_flags())
@@ -202,14 +214,8 @@ def input_refs(pipeline: Pipeline, node: Node) -> list[str]:
             optional = port.optional or not param.required
             refs.append(f"workflow.input.{param.name}" + ("?" if optional else ""))
     for dep in pipeline.deps_into(node):
-        path = dep.source.output_ref(dep.connection.source.name)
-        group = pipeline.group_of(dep.source)
-        ref = (
-            f"{group.group_id}.outputs.{dep.source.node_id}.{path}"
-            if group is not None
-            else f"{dep.source.node_id}.output.{path}"
-        )
-        if dep.connection.target.optional or pipeline.may_be_unresolved(dep.source, node):
+        ref = output_path(pipeline, dep.source, dep.connection.source.name)
+        if _may_be_absent(pipeline, node, dep):
             ref += "?"
         refs.append(ref)
     seen: set[str] = set()
@@ -219,6 +225,31 @@ def input_refs(pipeline: Pipeline, node: Node) -> list[str]:
             seen.add(ref)
             unique.append(ref)
     return unique
+
+
+def _may_be_absent(pipeline: Pipeline, node: Node, dep: DataDep) -> bool:
+    """Whether this dependency can be missing when the target's context is built.
+
+    ``_add_agent_input`` raises ``KeyError`` for a required entry whose path is
+    not there (engine/context.py), which happens *before* a template guard can
+    run. Three ways a value can be legitimately missing, and only the first two
+    were asked about:
+
+    * the author declared the port optional, or the source may not have run;
+    * the source is a group member and the group is allowed to finish with a
+      member that failed — ``continue_on_error`` is unusable otherwise;
+    * the source's own spelling says the field is conditional, as a gate's
+      free-text answer is on every branch that did not ask for one.
+    """
+    if dep.connection.target.optional or pipeline.may_be_unresolved(dep.source, node):
+        return True
+    if isinstance(dep.source, Node):
+        if dep.source.guard_depth(dep.connection.source.name) > 0:
+            return True
+        group = pipeline.group_of(dep.source)
+        if group is not None and group.failure_mode is not FailureMode.FAIL_FAST:
+            return True
+    return False
 
 
 def input_mapping(pipeline: Pipeline, node: SubGraphNode) -> YamlDict:
@@ -231,11 +262,48 @@ def input_mapping(pipeline: Pipeline, node: SubGraphNode) -> YamlDict:
     mapping: YamlDict = {}
     for param, target, port in pipeline.input_bindings:
         if target is node:
-            mapping[port.name] = "{{ workflow.input." + param.name + " }}"
+            # Rendered to text and parsed back like every other boundary: without
+            # `| tojson` a structured parameter reaches the child as a Python
+            # repr, which json.loads cannot read, so it survives as a string
+            # that looks like data.
+            expression = "workflow.input." + param.name
+            if param.port_type in _STRUCTURED:
+                expression += " | tojson"
+            mapping[port.name] = "{{ " + expression + " }}"
     for dep in pipeline.deps_into(node):
-        path = dep.source.output_ref(dep.connection.source.name)
-        mapping[dep.connection.target.name] = f"{{{{ {dep.source.node_id}.output.{path} }}}}"
+        expression = output_path(pipeline, dep.source, dep.connection.source.name)
+        if dep.connection.source.port_type in _STRUCTURED:
+            expression += " | tojson"
+        rendered = "{{ " + expression + " }}"
+        if _may_be_absent(pipeline, node, dep):
+            # The mapping is rendered against the same explicit context as the
+            # step's own templates, so a source that may not have run is an
+            # undefined variable here too — and the engine turns that into an
+            # ExecutionError rather than an empty string.
+            empty = _EMPTY_FOR[dep.connection.source.port_type]
+            rendered = (
+                "{% if "
+                + guard_test(pipeline, dep.source.ref(dep.connection.source.name))
+                + " %}"
+                + rendered
+                + "{% else %}"
+                + empty
+                + "{% endif %}"
+            )
+        mapping[dep.connection.target.name] = rendered
     return mapping
+
+
+# What an absent value becomes on the way into a child. A missing key is not the
+# same as an empty one, but the child declared the parameter, so something of the
+# right type has to arrive.
+_EMPTY_FOR = {
+    PortType.STRING: "",
+    PortType.OBJECT: "{}",
+    PortType.ARRAY: "[]",
+    PortType.NUMBER: "0",
+    PortType.BOOLEAN: "false",
+}
 
 
 def gate_options(pipeline: Pipeline, gate: GateNode) -> list[YamlValue]:

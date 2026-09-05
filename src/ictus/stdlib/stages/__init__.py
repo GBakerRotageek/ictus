@@ -8,20 +8,27 @@ steps it contains, and the dashboard renders it as a nested group.
 from __future__ import annotations
 
 from ictus.stdlib.stages.briefing_gate import APPROVE_OR_REJECT, ReviewOption, briefing_gate
-from ictus.stdlib.stages.poll_until import poll_until
+from ictus.stdlib.stages.converge import CONVERGED, EXHAUSTED, Attempt, converge
+from ictus.stdlib.stages.council import AGREED, HALTED, UNRESOLVED, Voice, council
 from ictus.stdlib.stages.resolve_unknowns import resolve_unknowns
-from ictus.stdlib.stages.revise_loop import revise_loop
 from ictus.stdlib.stages.script_sequence import ScriptStep, script_sequence
 from ictus.stdlib.stages.validate_mcps import validate_mcps
 
 __all__ = [
+    "AGREED",
     "APPROVE_OR_REJECT",
+    "CONVERGED",
+    "EXHAUSTED",
+    "HALTED",
+    "UNRESOLVED",
+    "Attempt",
     "ReviewOption",
     "ScriptStep",
+    "Voice",
     "briefing_gate",
-    "poll_until",
+    "converge",
+    "council",
     "resolve_unknowns",
-    "revise_loop",
     "script_sequence",
     "validate_mcps",
 ]

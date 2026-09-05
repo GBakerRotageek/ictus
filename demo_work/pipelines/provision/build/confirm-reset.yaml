@@ -5,7 +5,7 @@ workflow:
   entry_point: summarise
   runtime:
     provider:
-      name: copilot
+      name: claude-agent-sdk
     checkpoint:
       every_agent: true
   input:
@@ -63,6 +63,6 @@ agents:
     input:
       - review.output.selected
 output:
-  decision: '{{ review.output.selected }}'
-  summary: '{{ summarise.output.summary }}'
-  notes: "{{ review.output.additional_input.notes | default('') }}"
+  decision: '{{ review.output.selected | tojson }}'
+  summary: '{{ summarise.output.summary | tojson }}'
+  notes: '{% if review is defined %}{{ review.output.additional_input.notes | tojson }}{% else %}""{% endif %}'

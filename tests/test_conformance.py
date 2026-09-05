@@ -36,8 +36,8 @@ S = PortType.STRING
 
 def _authored_pipelines() -> list[tuple[str, PipelineType]]:
     out: list[tuple[str, PipelineType]] = []
-    for path in sorted((REPO_ROOT / "demo_work" / "pipelines").glob("*.py")):
-        spec = importlib.util.spec_from_file_location(path.stem, path)
+    for path in sorted((REPO_ROOT / "demo_work" / "pipelines").glob("*/pipeline.py")):
+        spec = importlib.util.spec_from_file_location(path.parent.name, path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
@@ -51,7 +51,7 @@ def _authored_pipelines() -> list[tuple[str, PipelineType]]:
         for name in sorted(dir(module)):
             value = getattr(module, name)
             if isinstance(value, PipelineType) and id(value) not in nested:
-                out.append((f"{path.stem}:{name}", value))
+                out.append((f"{path.parent.name}:{name}", value))
     return out
 
 
@@ -68,7 +68,7 @@ def test_authored_pipelines_load_in_conductor(
 
 
 def test_committed_yaml_matches_a_fresh_emit(tmp_path: Path) -> None:
-    """build/pipelines is committed so diffs show what runs; it must be current."""
+    """Each folder's build/ is committed so diffs show what runs; it must be current."""
     result = subprocess.run(
         [sys.executable, "-m", "ictus.cli", "emit", "demo_work/pipelines", "--out", str(tmp_path)],
         cwd=REPO_ROOT,
@@ -77,10 +77,12 @@ def test_committed_yaml_matches_a_fresh_emit(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    committed = REPO_ROOT / "demo_work" / "build"
     fresh = {p.name: p.read_text() for p in tmp_path.glob("*.yaml")}
-    on_disk = {p.name: p.read_text() for p in committed.glob("*.yaml")}
-    assert fresh == on_disk, "demo_work/build is stale; run `make emit`"
+    on_disk = {
+        p.name: p.read_text()
+        for p in (REPO_ROOT / "demo_work" / "pipelines").glob("*/build/*.yaml")
+    }
+    assert fresh == on_disk, "a pipeline folder's build/ is stale; run `make emit`"
 
 
 def test_every_node_kind_loads(validates: Callable[[PipelineType], None]) -> None:

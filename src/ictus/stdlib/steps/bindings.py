@@ -10,7 +10,7 @@ from ictus.graph.node import ComputeNode
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ictus.graph.ports import InputPort
+    from ictus.graph.ports import InputPort, OutputPort
 
 __all__ = ["bindings"]
 
@@ -19,6 +19,7 @@ def bindings(
     *,
     node_id: str,
     values: Mapping[str, str],
+    outputs: Sequence[OutputPort] = (),
     description: str = "",
     inputs: Sequence[InputPort] = (),
 ) -> ComputeNode:
@@ -27,6 +28,14 @@ def bindings(
     Bindings inside one block cannot reference each other — they are evaluated
     against the surrounding context, not against each other — so chain two nodes
     when one value depends on another.
+
+    Declare ``outputs`` for the keys anything downstream reads: without them the
+    values exist but no typed reference can name them, and the step is
+    write-only. The types are ictus's, not the engine's — Conductor decides each
+    binding's type by YAML-loading its rendered text, so a binding that renders
+    as ``no``, ``3`` or ``2024-01-01`` arrives as a boolean, an integer or a
+    date whatever this says. Where the type has to hold, use one ``constant``
+    per value and set its ``output_type``.
     """
     if not values:
         raise CompositionError(f"bindings {node_id!r} needs at least one value")
@@ -35,4 +44,5 @@ def bindings(
         description=description,
         inputs=tuple(inputs),
         values=dict(values),
+        declared_outputs=tuple(outputs),
     )

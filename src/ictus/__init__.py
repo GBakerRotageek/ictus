@@ -19,8 +19,20 @@ from ictus.graph.node import (
 )
 from ictus.graph.pipeline import END, Edge, Pipeline, WorkflowInput
 from ictus.graph.ports import InputPort, OutputPort, PortConnection, PortType
-from ictus.graph.ref import Ref, Template, equals, not_equals, optional, ref_to, tpl
+from ictus.graph.ref import (
+    Ref,
+    Template,
+    at_least,
+    equals,
+    every,
+    not_equals,
+    not_every,
+    optional,
+    ref_to,
+    tpl,
+)
 from ictus.graph.requirements import EnvVar, McpServer, McpTransport
+from ictus.graph.scope import Scope, ScopeNode, outcome_scope
 from ictus.graph.stage import Stage
 
 __all__ = [
@@ -46,6 +58,8 @@ __all__ = [
     "Question",
     "QuestionsNode",
     "Ref",
+    "Scope",
+    "ScopeNode",
     "ScriptNode",
     "Stage",
     "SubGraphNode",
@@ -54,9 +68,13 @@ __all__ = [
     "UnknownPortError",
     "WaitNode",
     "WorkflowInput",
+    "at_least",
     "equals",
+    "every",
     "not_equals",
+    "not_every",
     "optional",
+    "outcome_scope",
     "ref_to",
     "slugify",
     "tpl",

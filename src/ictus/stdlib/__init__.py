@@ -13,26 +13,40 @@ One primitive per module, so the docstring next to a thing is about that thing.
 
 from __future__ import annotations
 
-from ictus.stdlib.agents import briefing, remediate, validate_mcp, verdict
+from ictus.stdlib.agents import briefing, remediate, validate_mcp, verdict, voice
 from ictus.stdlib.gates import approval_gate, ask_human, ask_human_for, choice_gate
 from ictus.stdlib.stages import (
+    AGREED,
     APPROVE_OR_REJECT,
+    CONVERGED,
+    EXHAUSTED,
+    HALTED,
+    UNRESOLVED,
+    Attempt,
     ReviewOption,
     ScriptStep,
+    Voice,
     briefing_gate,
-    poll_until,
+    converge,
+    council,
     resolve_unknowns,
-    revise_loop,
     script_sequence,
     validate_mcps,
 )
-from ictus.stdlib.steps import bindings, constant, shell, wait
+from ictus.stdlib.steps import bindings, constant, counter, save_text, shell, wait
 from ictus.stdlib.terminals import fail, succeed
 
 __all__ = [
+    "AGREED",
     "APPROVE_OR_REJECT",
+    "CONVERGED",
+    "EXHAUSTED",
+    "HALTED",
+    "UNRESOLVED",
+    "Attempt",
     "ReviewOption",
     "ScriptStep",
+    "Voice",
     "approval_gate",
     "ask_human",
     "ask_human_for",
@@ -41,16 +55,19 @@ __all__ = [
     "briefing_gate",
     "choice_gate",
     "constant",
+    "converge",
+    "council",
+    "counter",
     "fail",
-    "poll_until",
     "remediate",
     "resolve_unknowns",
-    "revise_loop",
+    "save_text",
     "script_sequence",
     "shell",
     "succeed",
     "validate_mcp",
     "validate_mcps",
     "verdict",
+    "voice",
     "wait",
 ]

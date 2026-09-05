@@ -62,7 +62,6 @@ provision = Pipeline(
     description="Reset a database, then gate going live on a human.",
     # The review can send the work back, so the graph loops and needs a bound.
     loop_passes=3,
-    provider="claude-agent-sdk",
     metadata={"generator": "ictus", "pipeline": "provision"},
 )
 

@@ -21,10 +21,12 @@ from ictus.graph.node import NODE_KINDS
 from ictus.interfaces import Capabilities, Document, PreflightIssue, ValidationResult
 from ictus.interfaces.conductor.agents import agent_entry
 from ictus.interfaces.conductor.lints import conductor_problems
+from ictus.interfaces.conductor.mapping import for_each_block
 from ictus.interfaces.conductor.mcp import preflight_issues
 from ictus.interfaces.conductor.parallel import parallel_block
 from ictus.interfaces.conductor.serialize import dump_yaml
-from ictus.interfaces.conductor.workflow import workflow_block
+from ictus.interfaces.conductor.templates import output_block
+from ictus.interfaces.conductor.workflow import NOTHING_INHERITED, Inherited, workflow_block
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -46,39 +48,56 @@ class ConductorBackend:
         return Capabilities(
             name="conductor",
             kinds=frozenset(NODE_KINDS),
+            # AgentDef.provider / ProviderSettings.name (config/schema.py) is a
+            # closed Literal; anything else is rejected by the loader.
+            providers=frozenset(
+                {"copilot", "openai", "claude", "claude-agent-sdk", "hermes", "aca"}
+            ),
             conditional_routes=True,
             cycles=True,
             sub_graphs=True,
             notes="Loops are bounded by a single global step budget, not per cycle.",
         )
 
-    def document(self, pipeline: Pipeline) -> YamlDict:
+    def document(self, pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED) -> YamlDict:
         """The workflow mapping for one pipeline, before serialization.
 
         Public because the backend's own tests assert on the structure; the
         ``Backend`` protocol only promises rendered text.
         """
-        agents: list[YamlValue] = [agent_entry(pipeline, node) for node in pipeline.nodes]
-        doc: YamlDict = {"workflow": workflow_block(pipeline), "agents": agents}
+        # A map group's body lives inline under `for_each:`; emitting it here as
+        # well would leave a step Conductor schedules once on its own.
+        agents: list[YamlValue] = [
+            agent_entry(pipeline, node) for node in pipeline.nodes if pipeline.map_of(node) is None
+        ]
+        doc: YamlDict = {"workflow": workflow_block(pipeline, inherited), "agents": agents}
         groups = parallel_block(pipeline)
         if groups:
             doc["parallel"] = groups
-        exposed = pipeline.exposed_outputs
+        mapped = for_each_block(pipeline)
+        if mapped:
+            doc["for_each"] = mapped
+        exposed = output_block(pipeline)
         if exposed:
-            doc["output"] = dict(exposed)
+            doc["output"] = exposed
         return doc
 
-    def compile(self, pipeline: Pipeline) -> list[Document]:
+    def compile(
+        self, pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED
+    ) -> list[Document]:
         """Render ``pipeline`` and every stage it contains.
 
         The parent comes first; each nested stage follows as its own file,
         because ``type: workflow`` references a sibling rather than inlining a
         graph. A stage placed twice in one parent is two nodes over one file.
         """
-        out = [Document(f"{pipeline.pipeline_id}.yaml", dump_yaml(self.document(pipeline)))]
+        out = [
+            Document(f"{pipeline.pipeline_id}.yaml", dump_yaml(self.document(pipeline, inherited)))
+        ]
         seen = {out[0].filename}
+        below = inherited.under(pipeline)
         for child in pipeline.children.values():
-            for rendered in self.compile(child):
+            for rendered in self.compile(child, below):
                 if rendered.filename not in seen:
                     seen.add(rendered.filename)
                     out.append(rendered)
@@ -121,20 +140,27 @@ class ConductorBackend:
         inputs: Mapping[str, str],
         dashboard: bool,
         background: bool = False,
+        working_dir: Path | None = None,
     ) -> int:
         """Run a compiled workflow, serving the dashboard by default.
 
         A gate is only answerable from elsewhere while the run has a dashboard
         port, and mid-run guidance needs one too.
+
+        ``working_dir`` is the directory the agents read and write in: Conductor
+        resolves script paths and the model's own tools against the process's
+        cwd, so this is what "run it on that project" means. The workflow path
+        is made absolute first, because it is almost never inside the project
+        being worked on.
         """
-        command = [self._binary(), "run", str(path)]
+        command = [self._binary(), "run", str(path.resolve())]
         for name, value in inputs.items():
             command += ["-i", f"{name}={value}"]
         if background:
             command.append("--web-bg")
         elif dashboard:
             command.append("--web")
-        return subprocess.run(command, check=False).returncode
+        return subprocess.run(command, check=False, cwd=working_dir).returncode
 
     @staticmethod
     def _binary() -> str:

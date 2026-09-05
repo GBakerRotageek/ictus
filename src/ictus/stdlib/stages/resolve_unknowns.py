@@ -20,7 +20,6 @@ from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import tpl
 from ictus.graph.stage import Stage
 from ictus.stdlib.gates.ask import ask_human_for
-from ictus.stdlib.terminals.fail import fail
 from ictus.stdlib.terminals.succeed import succeed
 
 if TYPE_CHECKING:
@@ -90,7 +89,12 @@ def resolve_unknowns(
         )
     )
     ready = body.add(succeed(node_id="ready", reason="Everything needed is known."))
-    abandoned = body.add(fail(node_id="abandoned", reason="The run needs values nobody supplied."))
+    abandoned = body.add(
+        succeed(
+            node_id="abandoned",
+            reason="Abandoned: the run needs values nobody supplied.",
+        )
+    )
 
     body.connect_input(brief, identify, "brief")
     # Ask only about what is actually unknown.

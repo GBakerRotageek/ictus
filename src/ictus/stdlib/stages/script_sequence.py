@@ -33,6 +33,12 @@ class ScriptStep:
     args: Sequence[str] = ()
     output: str = "stdout"
     description: str = ""
+    receives_previous: bool = False
+    """Whether the previous step's output is appended to this step's arguments.
+
+    Off by default: most sequences are ordered rather than piped, and passing a
+    value a command does not expect is worse than not passing it.
+    """
 
 
 def script_sequence(
@@ -50,9 +56,14 @@ def script_sequence(
     file, so the whole sequence costs the calling pipeline one iteration rather
     than one per command.
 
-    Every command receives ``parameter`` as its final argument. A relative
-    command resolves against ``working_dir``, defaulting to the directory the
-    run was launched from — set it explicitly rather than relying on that.
+    Every command receives ``parameter`` as its final argument. A step with
+    ``receives_previous`` also receives the previous step's output after it;
+    without that flag the steps are merely *ordered*, and the declared
+    dependency exists only to establish that order.
+
+    A relative command resolves against ``working_dir``, defaulting to the
+    directory the run was launched from — set it explicitly rather than relying
+    on that.
 
     Contract: input named by ``parameter`` (string) in, output ``result``
     (string) out, taken from the last step.
@@ -68,6 +79,11 @@ def script_sequence(
     previous: ScriptNode | None = None
     previous_port = ""
     for step in steps:
+        threaded = (
+            (f"{{{{ {previous.node_id}.output.{previous_port} }}}}",)
+            if step.receives_previous and previous is not None
+            else ()
+        )
         inputs = (
             (InputPort(parameter, PortType.STRING),)
             if previous is None
@@ -78,7 +94,7 @@ def script_sequence(
                 node_id=step.node_id,
                 description=step.description,
                 command=step.command,
-                args=(*step.args, f"{{{{ workflow.input.{parameter} }}}}"),
+                args=(*step.args, f"{{{{ workflow.input.{parameter} }}}}", *threaded),
                 inputs=inputs,
                 working_dir=working_dir,
                 outputs=(OutputPort(step.output, PortType.STRING, f"Output of {step.node_id}"),),

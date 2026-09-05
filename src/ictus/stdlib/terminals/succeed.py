@@ -21,7 +21,7 @@ def succeed(
     reason: str | Template,
     description: str = "",
     inputs: Sequence[InputPort] = (),
-    result: Mapping[str, str] | None = None,
+    result: Mapping[str, str | Template] | None = None,
 ) -> TerminateNode:
     """End the run successfully. Emits ``type: terminate``.
 

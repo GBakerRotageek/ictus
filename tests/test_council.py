@@ -1,0 +1,364 @@
+"""Councils and the voices on them.
+
+A council is only worth having if its members can disagree and the caller can
+act on the disagreement. The tests below are about those two things: that each
+voice is genuinely given something different to watch for, and that "they never
+agreed" arrives as an outcome rather than as a dead run.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+
+from ictus import Pipeline, PortType
+from ictus.errors import CompositionError
+from ictus.graph.node import AgentNode
+from ictus.graph.ports import InputPort, OutputPort
+from ictus.graph.ref import tpl
+from ictus.interfaces.conductor import conductor
+from ictus.lint import lint_pipeline
+from ictus.stdlib import AGREED, HALTED, UNRESOLVED, Voice, council, succeed, voice
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ictus.graph.scope import Scope
+    from ictus.graph.values import YamlDict
+
+STR, NUM, BOOL = PortType.STRING, PortType.NUMBER, PortType.BOOLEAN
+
+SPEAKERS = (
+    Voice(node_id="perf", persona="Paged at 3am once too often.", focus="allocation and IO"),
+    Voice(node_id="shape", persona="Maintains this code.", focus="fitting its neighbours"),
+    Voice(
+        node_id="risk",
+        persona="Has watched a two-line change take a service down.",
+        focus="what else depends on this",
+    ),
+)
+
+
+def _council(**kwargs: object) -> Scope:
+    settings: dict[str, object] = {"stage_id": "panel", "voices": SPEAKERS, "rounds": 3}
+    settings.update(kwargs)
+    return council(**settings)  # type: ignore[arg-type]
+
+
+def _agent(pipeline: Pipeline, name: str) -> YamlDict:
+    agents = conductor.document(pipeline)["agents"]
+    assert isinstance(agents, list)
+    for candidate in agents:
+        if isinstance(candidate, dict) and candidate.get("name") == name:
+            return candidate
+    raise AssertionError(f"no agent named {name!r} was emitted")
+
+
+def _host(scope: Scope, *, interject: bool = False) -> Pipeline:
+    parent = Pipeline(pipeline_id="host", provider="claude-agent-sdk")
+    material = parent.declare_input("material", STR)
+    seat = scope.instantiate(parent, node_id="council")
+    parent.set_entry(seat)
+    parent.connect_input(material, seat, "subject")
+    ok = parent.add(succeed(node_id="ok", reason="agreed"))
+    split = parent.add(succeed(node_id="split", reason="contested"))
+    routes = {AGREED: ok, UNRESOLVED: split, **({HALTED: split} if interject else {})}
+    parent.branch_on_outcome(seat, routes)
+    return parent
+
+
+# --- voices -----------------------------------------------------------------
+
+
+class TestVoice:
+    def test_each_voice_is_told_something_different_to_watch_for(self) -> None:
+        """Identical prompts make a council that agrees with itself."""
+        prompts = {
+            name: _agent(_council().body, name)["prompt"] for name in ("perf", "shape", "risk")
+        }
+        assert len(set(prompts.values())) == 3
+        assert "allocation and IO" in str(prompts["perf"])
+        assert "Paged at 3am once too often." in str(prompts["perf"])
+
+    def test_the_verdict_is_a_boolean_a_route_can_test(self) -> None:
+        outputs = _agent(_council().body, "perf")["output"]
+        assert isinstance(outputs, dict)
+        verdict = outputs["satisfied"]
+        assert isinstance(verdict, dict)
+        assert verdict["type"] == "boolean"
+
+    def test_satisfaction_is_about_the_record_not_the_material(self) -> None:
+        """Otherwise `agreed` is unreachable and every council exhausts its rounds.
+
+        Observed on a live run: three voices assessing code with a real defect
+        all reported satisfied=false in both rounds — correctly, under the old
+        wording — and the council came back `unresolved` carrying a complete
+        report whose own dissent field said "Nothing is contested".
+        """
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "`satisfied` is not about the material" in prompt
+        assert "including any disagreement you still hold" in prompt
+
+    def test_the_first_round_has_no_report_to_accept(self) -> None:
+        assert "If no previous report is shown below, you have not seen one" in str(
+            _agent(_council().body, "perf")["prompt"]
+        )
+
+    def test_a_voice_with_no_standpoint_is_refused(self) -> None:
+        p = Pipeline(pipeline_id="v")
+        src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("t", STR),)))
+        with pytest.raises(CompositionError, match="has no persona"):
+            voice(node_id="v", persona="  ", focus="things", subject=src.ref("t"))
+
+    def test_it_can_be_used_on_its_own(self) -> None:
+        """Not council-only: one standpoint assessing one thing is a valid step."""
+        p = Pipeline(pipeline_id="v")
+        src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("t", STR),)))
+        solo = p.add(
+            voice(
+                node_id="v",
+                persona="You care about naming.",
+                focus="names",
+                subject=src.ref("t"),
+                inputs=(InputPort("t", STR),),
+            )
+        )
+        done = p.add(succeed(node_id="d", reason="d"))
+        p.set_entry(src)
+        p.connect(src, "t", solo, "t")
+        p.route(solo, done)
+        assert lint_pipeline(p) == []
+
+
+# --- councils ---------------------------------------------------------------
+
+
+class TestCouncil:
+    def test_the_voices_run_at_once(self) -> None:
+        doc = conductor.document(_council().body)
+        groups = doc["parallel"]
+        assert isinstance(groups, list)
+        first = groups[0]
+        assert isinstance(first, dict)
+        assert first["agents"] == ["perf", "shape", "risk"]
+
+    def test_agreement_is_tested_over_the_actual_membership(self) -> None:
+        """Hand-written, the conjunction stops matching the council that was convened."""
+        routes = _agent(_council().body, "report")["routes"]
+        assert isinstance(routes, list)
+        agreed = routes[0]
+        assert isinstance(agreed, dict)
+        assert agreed["when"] == (
+            "{{ voices.outputs.perf.satisfied"
+            " and voices.outputs.shape.satisfied"
+            " and voices.outputs.risk.satisfied }}"
+        )
+
+    def test_adding_a_voice_changes_the_agreement_test(self) -> None:
+        extra = (*SPEAKERS, Voice(node_id="docs", persona="You read this next year.", focus="docs"))
+        routes = _agent(_council(voices=extra).body, "report")["routes"]
+        assert isinstance(routes, list)
+        first = routes[0]
+        assert isinstance(first, dict)
+        assert "voices.outputs.docs.satisfied" in str(first["when"])
+
+    def test_each_round_is_a_deliberation_not_a_re_poll(self) -> None:
+        """Without the report fed back, round two is round one run again."""
+        deps = [(d.source.node_id, d.target.node_id) for d in _council().body.data_deps]
+        assert ("report", "perf") in deps
+        assert ("report", "shape") in deps
+
+    def test_the_prior_round_is_guarded_on_the_first_pass(self) -> None:
+        """A voice told "the last round concluded:" with nothing after it invents one."""
+        assert "{% if report is defined %}" in str(_agent(_council().body, "perf")["prompt"])
+
+    def test_never_agreeing_is_an_outcome_rather_than_a_dead_run(self) -> None:
+        scope = _council()
+        assert scope.outcomes == (AGREED, UNRESOLVED)
+        routes = _agent(scope.body, "report")["routes"]
+        assert isinstance(routes, list)
+        second = routes[1]
+        assert isinstance(second, dict)
+        assert second["when"] == "{{ round_number.output | int >= 3 }}"
+        assert second["to"] == "unresolved"
+
+    def test_both_outcomes_carry_the_report_and_the_disagreement(self) -> None:
+        """Salvage: "four people could not agree, here is why" is a useful result."""
+        for name in ("agreed", "unresolved"):
+            template = _agent(_council().body, name)["output_template"]
+            assert isinstance(template, dict)
+            assert set(template) == {"outcome", "report", "dissent", "rounds"}
+
+    def test_the_synthesis_records_disagreement_rather_than_averaging_it(self) -> None:
+        prompt = str(_agent(_council().body, "report")["prompt"])
+        assert "Do not average them" in prompt
+        assert "perf" in prompt and "shape" in prompt and "risk" in prompt
+
+    def test_a_single_round_council_is_refused(self) -> None:
+        """It can only come back unresolved: there is no report to be satisfied with."""
+        with pytest.raises(CompositionError, match="needs rounds >= 2"):
+            _council(rounds=1)
+
+    def test_a_council_of_one_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="at least two voices"):
+            _council(voices=SPEAKERS[:1])
+
+    def test_two_voices_with_the_same_name_are_refused(self) -> None:
+        with pytest.raises(CompositionError, match="more than one voice named"):
+            _council(voices=(SPEAKERS[0], SPEAKERS[0]))
+
+    def test_it_is_lint_clean_and_loads_in_conductor(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        parent = _host(_council())
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+class TestInterjection:
+    def test_a_person_can_steer_stop_or_stand_back(self) -> None:
+        options = _agent(_council(interject=True).body, "interject")["options"]
+        assert isinstance(options, list)
+        assert [o["value"] for o in options if isinstance(o, dict)] == [
+            "continue",
+            "steer",
+            "stop",
+        ]
+
+    def test_stopping_is_its_own_outcome(self) -> None:
+        """Taking the report early is not the same as the council having agreed."""
+        assert _council(interject=True).outcomes == (AGREED, UNRESOLVED, HALTED)
+
+    def test_direction_reaches_the_next_round(self) -> None:
+        deps = [
+            (d.source.node_id, d.target.node_id) for d in _council(interject=True).body.data_deps
+        ]
+        assert ("interject", "perf") in deps
+
+    def test_direction_is_a_constraint_not_another_vote(self) -> None:
+        prompt = str(_agent(_council(interject=True).body, "perf")["prompt"])
+        assert "not a vote you can outweigh" in prompt
+
+    def test_an_absent_steer_does_not_kill_the_next_round(self) -> None:
+        """ "Let them carry on" leaves no notes, and reading them is a hard error.
+
+        Verified against the engine's own Jinja settings: guarding only the gate
+        name renders "'dict object' has no attribute 'notes'" on every round
+        after a plain continue.
+        """
+        prompt = str(_agent(_council(interject=True).body, "perf")["prompt"])
+        assert "interject.output.additional_input is defined" in prompt
+        assert "interject.output.additional_input.notes is defined" in prompt
+
+    def test_the_tally_declares_everything_its_routes_read(self) -> None:
+        """A gate cannot test a counter, so the decision moves one zero-cost step on."""
+        tally = _agent(_council(interject=True).body, "tallied")
+        assert tally["type"] == "set"
+        assert tally["input"] == [
+            "interject.output.selected",
+            "round_number.output",
+            "voices.outputs.perf.satisfied",
+            "voices.outputs.shape.satisfied",
+            "voices.outputs.risk.satisfied",
+        ]
+
+    def test_it_is_lint_clean_and_loads_in_conductor(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        parent = _host(_council(interject=True), interject=True)
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+def test_the_round_budget_covers_a_full_deliberation() -> None:
+    """A group costs one execution per member, every round it runs."""
+    doc = conductor.document(_council(interject=True).body)
+    workflow = doc["workflow"]
+    assert isinstance(workflow, dict)
+    limits = workflow["limits"]
+    assert isinstance(limits, dict)
+    # round + 3 voices + report + gate + tally = 7 per round, 3 rounds, then an exit.
+    budget = limits["max_iterations"]
+    assert isinstance(budget, int)
+    assert budget >= 7 * 3 + 1
+
+
+def test_a_council_reads_what_the_step_before_it_worked_out(
+    validates: Callable[[Pipeline], None],
+) -> None:
+    """The demo's shape: pull -> intent -> council, judged against the intent."""
+    parent = Pipeline(pipeline_id="chained", provider="claude-agent-sdk")
+    target = parent.declare_input("target", STR)
+    purpose = parent.add(
+        AgentNode(
+            node_id="purpose",
+            inputs=(InputPort("target", STR),),
+            prompt=tpl("What is this for? ", target.ref()),
+            declared_outputs=(OutputPort("intent", STR),),
+        )
+    )
+    seat = _council().instantiate(parent, node_id="council")
+    ok = parent.add(succeed(node_id="ok", reason="a"))
+    parent.set_entry(purpose)
+    parent.connect_input(target, purpose, "target")
+    parent.connect_input(target, seat, "subject")
+    parent.route(purpose, seat)
+    parent.feed(purpose, "intent", seat, "intent")
+    parent.branch_on_outcome(seat, {AGREED: ok, UNRESOLVED: ok})
+    assert lint_pipeline(parent) == []
+    validates(parent)
+
+
+class TestVoiceCost:
+    def test_a_voice_is_denied_tools_by_default(self) -> None:
+        """Observed live: four voices with tools is four agents hunting the same file.
+
+        The material is already in the prompt. `tools: []` and an omitted key are
+        different things to Conductor — none versus all — so this only works
+        because ictus can express the empty list.
+        """
+        assert _agent(_council().body, "perf")["tools"] == []
+
+    def test_a_voice_can_be_given_tools_when_it_must_go_and_look(self) -> None:
+        looks = (
+            Voice(
+                node_id="deps",
+                persona="You check what depends on things.",
+                focus="callers",
+                tools=("read_file", "grep"),
+            ),
+            SPEAKERS[0],
+        )
+        assert _agent(_council(voices=looks).body, "deps")["tools"] == ["read_file", "grep"]
+
+    def test_the_workflow_default_is_still_reachable(self) -> None:
+        free = (Voice(node_id="a", persona="p", focus="f", tools=None), SPEAKERS[0])
+        assert "tools" not in _agent(_council(voices=free).body, "a")
+
+
+class TestCharge:
+    """One instruction every voice receives, settable per run."""
+
+    def test_it_reaches_every_voice(self) -> None:
+        for name in ("perf", "shape", "risk"):
+            prompt = str(_agent(_council().body, name)["prompt"])
+            assert "--- what this council has been asked to do ---" in prompt
+            assert "{{ workflow.input.charge }}" in prompt
+
+    def test_it_is_an_input_so_it_can_change_per_run(self) -> None:
+        declared = {p.name: p for p in _council().input_ports}
+        assert set(declared) == {"subject", "charge", "intent"}
+        assert declared["charge"].optional
+        assert not declared["subject"].optional
+
+    def test_an_unset_optional_input_renders_nothing_not_the_none_literal(self) -> None:
+        """The engine binds an absent optional input to None, so `is defined` is true.
+
+        Guarding on definedness put the literal "None" under a heading in every
+        voice's prompt — a model reads that as content.
+        """
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "{% if workflow.input.charge %}" in prompt
+        assert "{% if workflow.input.intent %}" in prompt
+        assert "is defined" not in prompt.split("--- the material ---")[0]

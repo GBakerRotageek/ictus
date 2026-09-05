@@ -8,23 +8,30 @@
 soundcheck:
 > uv run ruff check .
 > uv run ruff format --check .
-> uv run mypy src demo_work tests
+> uv run mypy src tests
+# Each pipeline folder holds a file called pipeline.py, so mypy sees four modules
+# with one name. Checking them a folder at a time keeps the folder names readable
+# (a hyphen is not a valid module component, so package-based disambiguation is
+# not available) without giving up type checking on the demos.
+> for d in demo_work/pipelines/*/; do uv run mypy "$$d"pipeline.py || exit 1; done
 > uv run pytest -q
 > $(MAKE) emit
 > $(MAKE) validate
 
 emit:
-> uv run ictus emit ./demo_work/pipelines --out ./demo_work/build
+> uv run ictus emit ./demo_work/pipelines
 
 lint:
 > uv run ictus lint ./demo_work/pipelines
 
+# Every folder's build/, in one pass.
 validate:
-> uv run ictus validate ./demo_work/build
+> uv run ictus validate ./demo_work/pipelines
 
-# WF is the pipeline_id, e.g. `make run WF=smoke-test`.
+# WF is the folder name, e.g. `make run WF=smoke-test`. The run works in the
+# directory you invoke it from unless the folder's input.md pins a `repo:`.
 run:
-> uv run ictus run $(WF) --out ./demo_work/build
+> uv run ictus run ./demo_work/pipelines/$(WF)
 
 clean:
-> rm -rf demo_work/build/*.yaml
+> rm -rf demo_work/pipelines/*/build

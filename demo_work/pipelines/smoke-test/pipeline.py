@@ -40,7 +40,6 @@ smoke_test = Pipeline(
     loop_passes=3,
     # Conductor's own default is copilot. Emitting the provider explicitly means
     # the choice is visible in the diff rather than discovered on a failed run.
-    provider="claude-agent-sdk",
     budget_usd=5.0,
     budget_mode="enforce",
     metadata={"generator": "ictus", "pipeline": "smoke-test"},

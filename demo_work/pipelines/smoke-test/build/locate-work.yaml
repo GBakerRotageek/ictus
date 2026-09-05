@@ -5,7 +5,7 @@ workflow:
   entry_point: identify
   runtime:
     provider:
-      name: copilot
+      name: claude-agent-sdk
   input:
     brief:
       type: string
@@ -61,8 +61,8 @@ agents:
     reason: Everything needed is known.
   - name: abandoned
     type: terminate
-    status: failed
-    reason: The run needs values nobody supplied.
+    status: success
+    reason: 'Abandoned: the run needs values nobody supplied.'
 output:
-  known: '{{ identify.output.known }}'
-  answers: "{{ ask.output.answers | default('{}') }}"
+  known: '{{ identify.output.known | tojson }}'
+  answers: '{% if ask is defined %}{{ ask.output.answers | tojson }}{% else %}{}{% endif %}'

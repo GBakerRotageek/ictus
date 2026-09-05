@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ictus.graph.node import ComputeNode
+from ictus.graph.ports import OutputPort, PortType
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.graph.ports import InputPort, PortType
+    from ictus.graph.ports import InputPort
 
 __all__ = ["constant"]
 
@@ -29,6 +30,11 @@ def constant(
     back as ``False`` and ``"3"`` as an integer — a silent type change at the
     point a route condition is about to test it.
 
+    The value is readable as ``node.ref("value")``. Conductor stores a single
+    ``value:`` as the bare scalar, so that reference renders as ``node.output``
+    with no trailing key — a distinction ``ComputeNode.output_ref`` owns, since
+    reading ``node.output.value`` off one is a hard template error.
+
     Still costs one iteration, like every other step.
     """
     return ComputeNode(
@@ -37,4 +43,7 @@ def constant(
         inputs=tuple(inputs),
         value=value,
         value_type=output_type,
+        declared_outputs=(
+            OutputPort("value", output_type or PortType.STRING, description or "The value"),
+        ),
     )

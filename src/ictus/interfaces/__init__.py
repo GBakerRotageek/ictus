@@ -55,6 +55,14 @@ class Capabilities:
 
     name: str
     kinds: frozenset[NodeKind]
+    providers: frozenset[str] = frozenset()
+    """Who can answer a model call. Empty means the engine does not constrain it.
+
+    Declared here so a misspelled provider is refused where it is written rather
+    than by the engine's own loader, which only sees it once the whole pipeline
+    has been compiled.
+    """
+
     conditional_routes: bool = True
     cycles: bool = True
     sub_graphs: bool = True
@@ -129,6 +137,13 @@ class Backend(Protocol):
         """
         ...
 
-    def run(self, path: Path, *, inputs: Mapping[str, str], dashboard: bool) -> int:
-        """Execute a compiled document. Returns the process exit code."""
+    def run(
+        self,
+        path: Path,
+        *,
+        inputs: Mapping[str, str],
+        dashboard: bool,
+        working_dir: Path | None = None,
+    ) -> int:
+        """Execute a compiled document in ``working_dir``. Returns the exit code."""
         ...
