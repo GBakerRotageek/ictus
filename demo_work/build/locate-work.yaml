@@ -1,0 +1,68 @@
+workflow:
+  name: locate-work
+  description: Resolve unknowns for ticket
+  version: '1'
+  entry_point: identify
+  runtime:
+    provider:
+      name: copilot
+  input:
+    brief:
+      type: string
+      required: true
+      description: The ticket to examine
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 4
+agents:
+  - name: identify
+    description: Work out what is missing from the ticket
+    type: agent
+    prompt: |-
+      Examine the ticket below. The work needs each of these:
+      - the filesystem path of every repository this ticket requires changes in
+      - which repository owns the change, if more than one is involved
+
+      {{ workflow.input.brief }}
+
+      For each item, decide whether you can determine it from what you have. Put what you determined in `known`, keyed by item.
+
+      For anything you cannot determine, write a question for the person running this. Ask for one specific value per question, say what it is for, and give an example of the form you expect. Where you can guess plausible answers, offer them as choices — picking is far less work than typing.
+
+      Do not invent values. An unanswered question is recoverable; a fabricated path is not.
+    input:
+      - workflow.input.brief
+    output:
+      known:
+        type: object
+        description: What could be determined without asking
+      missing:
+        type: array
+        description: Questions for the person, one per unknown
+      all_known:
+        type: boolean
+        description: Whether nothing needs asking
+    routes:
+      - to: ready
+        when: '{{ identify.output.all_known }}'
+      - to: ask
+  - name: ask
+    description: Ask for what the ticket did not say
+    type: questions
+    allow_abort: true
+    source: identify.output.missing
+    abort_route: abandoned
+    routes:
+      - to: ready
+  - name: ready
+    type: terminate
+    status: success
+    reason: Everything needed is known.
+  - name: abandoned
+    type: terminate
+    status: failed
+    reason: The run needs values nobody supplied.
+output:
+  known: '{{ identify.output.known }}'
+  answers: "{{ ask.output.answers | default('{}') }}"

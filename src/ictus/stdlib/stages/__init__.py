@@ -1,0 +1,27 @@
+"""Reusable stages — collections of nodes worth naming as a unit.
+
+Each compiles to its own Conductor workflow file plus a single ``type: workflow``
+agent in the parent, so a stage costs the caller one iteration however many
+steps it contains, and the dashboard renders it as a nested group.
+"""
+
+from __future__ import annotations
+
+from ictus.stdlib.stages.briefing_gate import APPROVE_OR_REJECT, ReviewOption, briefing_gate
+from ictus.stdlib.stages.poll_until import poll_until
+from ictus.stdlib.stages.resolve_unknowns import resolve_unknowns
+from ictus.stdlib.stages.revise_loop import revise_loop
+from ictus.stdlib.stages.script_sequence import ScriptStep, script_sequence
+from ictus.stdlib.stages.validate_mcps import validate_mcps
+
+__all__ = [
+    "APPROVE_OR_REJECT",
+    "ReviewOption",
+    "ScriptStep",
+    "briefing_gate",
+    "poll_until",
+    "resolve_unknowns",
+    "revise_loop",
+    "script_sequence",
+    "validate_mcps",
+]

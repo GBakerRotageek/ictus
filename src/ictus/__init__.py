@@ -1,77 +1,63 @@
-"""Typed pipeline composition for multi-stage agent workflows.
-
-Three-tier hierarchy:
-- Nodes: Atomic units with typed inputs/outputs
-- Stages: Reusable collections of nodes
-- Pipelines: Large-scale flows of stages and nodes
-
-Composition-time validation ensures type safety at every connection.
-
-Standard library (stdlib) provides pre-built nodes for common patterns:
-- Gate nodes: approval_gate(), multi_choice_gate()
-- Summary nodes: text_summary(), status_report()
-- Terminal nodes: success_node(), failure_node()
-- Utilities: log_node(), merge_data(), transform_data(), etc.
-"""
+"""Typed composition for Conductor workflows."""
 
 from __future__ import annotations
 
-from ictus.core import (
-    InputPort,
+from ictus.errors import CompositionError, EmitError, LintError, PortTypeError, UnknownPortError
+from ictus.graph.node import (
+    AgentNode,
+    ComputeNode,
+    GateChoice,
+    GateNode,
     Node,
-    NodeBuilder,
-    OutputPort,
-    Pipeline,
-    PipelineBuilder,
-    PipelineElement,
-    PortConnection,
-    PortType,
-    Stage,
-    StageBuilder,
+    Question,
+    QuestionsNode,
+    ScriptNode,
+    SubGraphNode,
+    TerminateNode,
+    WaitNode,
+    slugify,
 )
-from ictus.stdlib import (
-    approval_gate,
-    build_approval_gate_pair,
-    build_summary_approval_gate,
-    failure_node,
-    filter_array,
-    if_then_node,
-    log_node,
-    merge_data,
-    multi_choice_gate,
-    status_report,
-    success_node,
-    switch_node,
-    text_summary,
-    transform_data,
-    wait_node,
-)
+from ictus.graph.pipeline import END, Edge, Pipeline, WorkflowInput
+from ictus.graph.ports import InputPort, OutputPort, PortConnection, PortType
+from ictus.graph.ref import Ref, Template, equals, not_equals, optional, ref_to, tpl
+from ictus.graph.requirements import EnvVar, McpServer, McpTransport
+from ictus.graph.stage import Stage
 
 __all__ = [
+    "END",
+    "AgentNode",
+    "CompositionError",
+    "ComputeNode",
+    "Edge",
+    "EmitError",
+    "EnvVar",
+    "GateChoice",
+    "GateNode",
     "InputPort",
+    "LintError",
+    "McpServer",
+    "McpTransport",
     "Node",
-    "NodeBuilder",
     "OutputPort",
     "Pipeline",
-    "PipelineBuilder",
-    "PipelineElement",
     "PortConnection",
     "PortType",
+    "PortTypeError",
+    "Question",
+    "QuestionsNode",
+    "Ref",
+    "ScriptNode",
     "Stage",
-    "StageBuilder",
-    "approval_gate",
-    "build_approval_gate_pair",
-    "build_summary_approval_gate",
-    "failure_node",
-    "filter_array",
-    "if_then_node",
-    "log_node",
-    "merge_data",
-    "multi_choice_gate",
-    "status_report",
-    "success_node",
-    "switch_node",
-    "text_summary",
-    "transform_data",
-    "wait_node",
+    "SubGraphNode",
+    "Template",
+    "TerminateNode",
+    "UnknownPortError",
+    "WaitNode",
+    "WorkflowInput",
+    "equals",
+    "not_equals",
+    "optional",
+    "ref_to",
+    "slugify",
+    "tpl",
 ]

@@ -1,43 +1,56 @@
-"""Standard library of reusable nodes for common workflow patterns.
+"""Ready-made nodes and stages for the shapes that recur in every pipeline.
 
-Organized into focused modules:
-- gates: Human approval/choice points
-- summary: Data formatting and reporting
-- terminal: Workflow endpoint nodes
-- utilities: Data transformation and flow control
-- branching: Conditional routing nodes
-- builders: Pre-built node combinations
+Organised by what Conductor charges for them:
+
+* ``gates``     — human decision points (``human_gate``)
+* ``agents``    — model calls (``agent``)
+* ``steps``     — zero-model steps (``set``, ``wait``, ``script``)
+* ``terminals`` — explicit, distinguishable exits (``terminate``)
+* ``stages``    — reusable sub-graphs (``workflow``)
+
+One primitive per module, so the docstring next to a thing is about that thing.
 """
 
 from __future__ import annotations
 
-from ictus.stdlib.branching import if_then_node, switch_node
-from ictus.stdlib.builders import build_approval_gate_pair, build_summary_approval_gate
-from ictus.stdlib.gates import approval_gate, multi_choice_gate
-from ictus.stdlib.summary import status_report, text_summary
-from ictus.stdlib.terminal import failure_node, success_node
-from ictus.stdlib.utilities import (
-    filter_array,
-    log_node,
-    merge_data,
-    transform_data,
-    wait_node,
+from ictus.stdlib.agents import briefing, remediate, validate_mcp, verdict
+from ictus.stdlib.gates import approval_gate, ask_human, ask_human_for, choice_gate
+from ictus.stdlib.stages import (
+    APPROVE_OR_REJECT,
+    ReviewOption,
+    ScriptStep,
+    briefing_gate,
+    poll_until,
+    resolve_unknowns,
+    revise_loop,
+    script_sequence,
+    validate_mcps,
 )
+from ictus.stdlib.steps import bindings, constant, shell, wait
+from ictus.stdlib.terminals import fail, succeed
 
 __all__ = [
+    "APPROVE_OR_REJECT",
+    "ReviewOption",
+    "ScriptStep",
     "approval_gate",
-    "build_approval_gate_pair",
-    "build_summary_approval_gate",
-    "failure_node",
-    "filter_array",
-    "if_then_node",
-    "log_node",
-    "merge_data",
-    "multi_choice_gate",
-    "status_report",
-    "success_node",
-    "switch_node",
-    "text_summary",
-    "transform_data",
-    "wait_node",
+    "ask_human",
+    "ask_human_for",
+    "bindings",
+    "briefing",
+    "briefing_gate",
+    "choice_gate",
+    "constant",
+    "fail",
+    "poll_until",
+    "remediate",
+    "resolve_unknowns",
+    "revise_loop",
+    "script_sequence",
+    "shell",
+    "succeed",
+    "validate_mcp",
+    "validate_mcps",
+    "verdict",
+    "wait",
 ]

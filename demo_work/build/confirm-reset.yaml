@@ -1,0 +1,68 @@
+workflow:
+  name: confirm-reset
+  description: Review database reset
+  version: '1'
+  entry_point: summarise
+  runtime:
+    provider:
+      name: copilot
+    checkpoint:
+      every_agent: true
+  input:
+    data:
+      type: string
+      required: true
+      description: The database reset to review
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 3
+agents:
+  - name: summarise
+    description: Summarise database reset
+    type: agent
+    prompt: |-
+      Summarise the following database reset for a human reviewer who must decide whether to approve it. Lead with the decision-relevant facts, name any risk or omission plainly, and keep it short.
+
+      {{ workflow.input.data }}
+    input:
+      - workflow.input.data
+    output:
+      summary:
+        type: string
+        description: Prose summary of database reset
+    routes:
+      - to: review
+  - name: review
+    description: The database was reset. Take this environment live?
+    type: human_gate
+    prompt: |-
+      The database was reset. Take this environment live?
+
+      {{ summarise.output.summary }}
+    input:
+      - summarise.output.summary
+    options:
+      - label: Take it live
+        value: approved
+        route: recorded
+      - label: Reset it again — with notes
+        value: redo
+        route: recorded
+        prompt_for: notes
+        multiline: true
+      - label: Abort — do not go live
+        value: abort
+        route: recorded
+        prompt_for: notes
+        multiline: true
+  - name: recorded
+    type: terminate
+    status: success
+    reason: 'Decision recorded: {{ review.output.selected }}'
+    input:
+      - review.output.selected
+output:
+  decision: '{{ review.output.selected }}'
+  summary: '{{ summarise.output.summary }}'
+  notes: "{{ review.output.additional_input.notes | default('') }}"

@@ -1,0 +1,74 @@
+workflow:
+  name: provision
+  description: Reset a database, then gate going live on a human.
+  version: '1'
+  entry_point: check_connections
+  runtime:
+    provider:
+      name: claude-agent-sdk
+    mcp_servers:
+      github:
+        type: http
+        url: https://api.githubcopilot.com/mcp/
+        headers:
+          Authorization: Bearer ${GITHUB_TOKEN:-}
+      filesystem:
+        type: stdio
+        command: npx
+        args:
+          - -y
+          - '@modelcontextprotocol/server-filesystem'
+          - .
+  input:
+    environment:
+      type: string
+      required: true
+      description: Environment to provision
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 9
+  metadata:
+    generator: ictus
+    pipeline: provision
+agents:
+  - name: check_connections
+    description: Confirm every MCP server answers before touching a database
+    type: workflow
+    workflow: ./check-connections.yaml
+    routes:
+      - to: reset
+  - name: reset
+    description: Reset the database
+    type: workflow
+    workflow: ./reset-db.yaml
+    input:
+      - workflow.input.environment
+    input_mapping:
+      environment: '{{ workflow.input.environment }}'
+    routes:
+      - to: confirm
+  - name: confirm
+    description: Confirm before going live
+    type: workflow
+    workflow: ./confirm-reset.yaml
+    input:
+      - reset.output.result
+    input_mapping:
+      data: '{{ reset.output.result }}'
+    routes:
+      - to: live
+        when: "{{ confirm.output.decision == 'approved' }}"
+      - to: reset
+        when: "{{ confirm.output.decision == 'redo' }}"
+      - to: aborted
+  - name: live
+    type: terminate
+    status: success
+    reason: Reset confirmed; environment is live.
+  - name: aborted
+    type: terminate
+    status: success
+    reason: Operator declined the reset.
+output:
+  review_notes: '{{ confirm.output.notes }}'
