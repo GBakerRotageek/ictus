@@ -168,11 +168,17 @@ class TestTheTableStopsWhenEveryoneWouldStop:
         # separate write-up step inside the loop.
         assert set(into) == {"carol"}
 
+    def test_a_failed_lookup_is_said_out_loud_and_kept(self) -> None:
+        """The one signal this whole family of stages exists to protect."""
+        assert "what you could not check" in str(_agent(_table(), "alice")["prompt"])
+        minutes = str(_agent(_table(), "minutes")["prompt"])
+        assert "Do not tidy it away" in minutes
+
     def test_every_outcome_carries_the_minutes(self) -> None:
         for name in ("agreed", "unresolved"):
             template = _agent(_table(), name)["output_template"]
             assert isinstance(template, dict)
-            assert set(template) == {"outcome", "minutes", "dissent", "rounds"}
+            assert set(template) == {"outcome", "minutes", "dissent", "unverified", "rounds"}
 
 
 class TestTheTableRefusesNonsense:

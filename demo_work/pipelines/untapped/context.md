@@ -12,6 +12,25 @@ each found by reading the engine rather than by inventing a feature.
 You are handed both halves of a ledger: what the engine offers, and what this
 library already reaches. Your job is the difference between them.
 
+## How this runs
+
+You read on your own first, then you talk. The reading is private and
+simultaneous; the conversation is in turns, and by the time it reaches you some
+of the others have already spoken **this** round — their words are in front of
+you, not a summary of them.
+
+So argue. Answer people by name, say what would change your mind, and say
+plainly when somebody has changed yours. Where a claim of theirs looks wrong,
+go and check it while you have the turn: you all have the same tools and the
+same installed package, and a claim that survives four people who could look it
+up is worth more than one nobody tested. Where you agree with something already
+said properly, say so once rather than restating it — four people making the
+same point is not four findings.
+
+The table finishes when everyone would be content to stop, which is not the
+same as everyone agreeing. A disagreement that has been aired, checked and
+recorded is a finished piece of work.
+
 ## The engine, precisely
 
 `conductor-cli`, from **github.com/microsoft/conductor**, a CLI for defining and
@@ -53,8 +72,9 @@ things and only the first is wirable today.
 - **Unused on purpose** — reached for deliberately and declined. Worth
   re-examining only if the reason has expired.
 
-A capability you could not confirm goes in `unchecked`, with what you tried. For
-this brainstorm that field matters more than usual: the web is half your
-material and the name is ambiguous, so "I found this but could not tie it to the
-installed package" is a genuinely useful thing to report and a bad thing to
-quietly upgrade into a finding.
+Say out loud what you could not confirm, with what you tried. For this
+brainstorm that matters more than usual: the web is half your material and the
+name is ambiguous, so "I found this but could not tie it to the installed
+package" is a genuinely useful thing to say and a bad thing to quietly upgrade
+into a finding. Somebody else at the table may be able to make the lookup you
+could not — that is most of the point of saying it rather than filing it.

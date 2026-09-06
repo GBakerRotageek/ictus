@@ -149,6 +149,7 @@ def roundtable(
         carry={
             MINUTES: OutputPort(MINUTES, STR, "What the table concluded"),
             "dissent": OutputPort("dissent", STR, "What was still contested"),
+            "unverified": OutputPort("unverified", STR, "What nobody could confirm"),
             "rounds": OutputPort("rounds", NUM, "How many rounds it took"),
         },
         description=description or f"Roundtable of {len(speakers)}: {subject}",
@@ -157,6 +158,11 @@ def roundtable(
     body = scope.body
     material = body.declare_input("subject", STR, description=subject)
     charge_in = body.declare_input("charge", STR, required=False, description=charge)
+    # A second document the table is given alongside the material — what it is
+    # meant to do, or whatever standing context the material alone does not carry.
+    intent_in = body.declare_input(
+        "intent", STR, required=False, description="What the material is meant to do"
+    )
 
     steer = ref_to(INTERJECT, "notes", STR) if interject else None
 
@@ -169,7 +175,11 @@ def roundtable(
                 AgentNode(
                     node_id=f"{spec.node_id}{STUDY_SUFFIX}",
                     description=f"What {spec.node_id!r} makes of it alone",
-                    inputs=(InputPort("subject", STR), InputPort("charge", STR, optional=True)),
+                    inputs=(
+                        InputPort("subject", STR),
+                        InputPort("charge", STR, optional=True),
+                        InputPort("intent", STR, optional=True),
+                    ),
                     tools=spec.tools,
                     max_turns=spec.max_turns,
                     # The same session the speaker later talks from, so it
@@ -188,6 +198,7 @@ def roundtable(
                         "In `notes`, write what you found and where you stand, for "
                         "yourself. Nobody else reads this.\n\n",
                         optional("--- what this is for ---\n", charge_in.ref(), "\n\n"),
+                        optional("--- what this is meant to do ---\n", intent_in.ref(), "\n\n"),
                         "--- the material ---\n",
                         material.ref(),
                     ),
@@ -197,6 +208,7 @@ def roundtable(
         for desk in desks.values():
             body.connect_input(material, desk, "subject")
             body.connect_input(charge_in, desk, "charge")
+            body.connect_input(intent_in, desk, "intent")
         reading = body.parallel(
             STUDY, list(desks.values()), description=f"{len(desks)} reading, at once"
         )
@@ -231,6 +243,7 @@ def roundtable(
                     inputs=(
                         InputPort("subject", STR),
                         InputPort("charge", STR, optional=True),
+                        InputPort("intent", STR, optional=True),
                         InputPort(ROUND, NUM, "Which round this is"),
                         *((InputPort(NOTES, STR, "Your own reading"),) if study else ()),
                         *(
@@ -265,6 +278,11 @@ def roundtable(
                         "more than the same position restated by four people.\n\n"
                         "Put your contribution in `remark`. It is the only thing the "
                         "others see of this turn, so it has to stand on its own.\n\n"
+                        "Say plainly what you could not check. A lookup you failed to "
+                        "make is not evidence about the thing you were looking for, and "
+                        "at a table it is worth saying out loud: somebody else may be "
+                        "able to make it, and the write-up needs to know which claims "
+                        "rest on something nobody confirmed.\n\n"
                         "Set `agree` true when you would be content for the table to "
                         "stop here — meaning the discussion has covered what you came "
                         "with and your remaining disagreements, if any, are recorded "
@@ -272,6 +290,7 @@ def roundtable(
                         "has become tiring is how a table agrees on something nobody "
                         "checked.\n\n",
                         optional("--- what this is for ---\n", charge_in.ref(), "\n\n"),
+                        optional("--- what this is meant to do ---\n", intent_in.ref(), "\n\n"),
                         *(
                             (
                                 "--- what you made of it on your own ---\n",
@@ -309,6 +328,7 @@ def roundtable(
     for seat in seats:
         body.connect_input(material, seat, "subject")
         body.connect_input(charge_in, seat, "charge")
+        body.connect_input(intent_in, seat, "intent")
         body.feed(counter, "value", seat, ROUND)
         if study:
             body.feed(desks[seat.node_id], NOTES, seat, NOTES)
@@ -383,6 +403,10 @@ def _close(
                 "naming who holds what — a disagreement recorded as a disagreement is "
                 "useful, and one smoothed into consensus is a decision made by "
                 "omission.\n\n"
+                "Collect what nobody could check into `unverified`, naming who tried "
+                "and what stopped them. Do not tidy it away and do not promote it into "
+                "the conclusion: a claim resting on a lookup that failed is not a "
+                "finding, however many people repeated it afterwards.\n\n"
                 "Say what changed during the conversation. A position somebody "
                 "arrived with and abandoned, and why, is usually the most informative "
                 "thing that happened, and it is the part a transcript buries.\n",
@@ -397,6 +421,7 @@ def _close(
             declared_outputs=(
                 OutputPort("text", STR, "What the table concluded"),
                 OutputPort("dissent", STR, "What is still contested, and by whom"),
+                OutputPort("unverified", STR, "Claims nobody at the table could confirm"),
             ),
         )
     )
@@ -411,6 +436,7 @@ def _close(
         reason="The table agreed",
         minutes=minutes.ref("text"),
         dissent=minutes.ref("dissent"),
+        unverified=minutes.ref("unverified"),
         rounds=counter.ref("value"),
     )
     unresolved = scope.exit(
@@ -419,6 +445,7 @@ def _close(
         reason=f"Still contested after {rounds} round(s)",
         minutes=minutes.ref("text"),
         dissent=minutes.ref("dissent"),
+        unverified=minutes.ref("unverified"),
         rounds=counter.ref("value"),
     )
 

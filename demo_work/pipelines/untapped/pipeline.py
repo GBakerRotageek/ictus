@@ -33,17 +33,25 @@ from ictus import (
     optional,
     tpl,
 )
-from ictus.stdlib import AGREED, HALTED, UNRESOLVED, Voice, council, save_text, succeed
+from ictus.stdlib import (
+    AGREED,
+    HALTED,
+    UNRESOLVED,
+    Speaker,
+    roundtable,
+    save_text,
+    succeed,
+)
 
 STR = PortType.STRING
 
-# Every voice reads the installed package and searches the web, so every voice
-# needs a ceiling: the engine's fifty is a kill rather than a throttle, and a
-# search that goes one page too far would take the whole council down with it.
+# Everyone reads the installed package and searches the web, so everyone needs a
+# ceiling: the engine's fifty is a kill rather than a throttle, and at a table it
+# lands after every earlier turn has already been paid for.
 LOOKING = 200
 
-VOICES = (
-    Voice(
+TABLE = (
+    Speaker(
         node_id="engine",
         persona=(
             "You read execution engines for a living and you have learned that the "
@@ -59,7 +67,7 @@ VOICES = (
         tools=None,
         max_turns=LOOKING,
     ),
-    Voice(
+    Speaker(
         node_id="field",
         persona=(
             "You have watched a dozen orchestration tools arrive and you judge them by "
@@ -75,7 +83,7 @@ VOICES = (
         tools=None,
         max_turns=LOOKING,
     ),
-    Voice(
+    Speaker(
         node_id="operator",
         persona=(
             "You run other people's pipelines at three in the morning. What you value "
@@ -90,7 +98,7 @@ VOICES = (
         tools=None,
         max_turns=LOOKING,
     ),
-    Voice(
+    Speaker(
         node_id="extension",
         persona=(
             "You build on top of other people's systems and you look first for the "
@@ -107,42 +115,44 @@ VOICES = (
     ),
 )
 
-review = council(
+review = roundtable(
     stage_id="untapped-review",
-    voices=VOICES,
+    speakers=TABLE,
     subject="What we already use of the engine, and what the engine is",
-    charge="What this brainstorm is for, and anything the voices must take as settled",
+    charge="What this brainstorm is for, and anything the table must take as settled",
     rounds=3,
     interject=True,
-    verify=(
-        "You are checking a brainstorm about an engine that is installed on this "
-        "machine and readable. Two failure modes matter more than the rest, and both "
-        "produce claims that read perfectly well.\n\n"
+    study=(
+        "Go and look, on your own, before anybody talks. Read the engine's source "
+        "from your angle and search the web for what its project has shipped, "
+        "announced or been asked for. You are the only person at this table who will "
+        "have looked at it this way, so the discussion is worth having only if what "
+        "you bring is yours.\n\n"
+        "Two failure modes matter more than the rest, and both produce claims that "
+        "read perfectly well.\n\n"
         "First: the wrong product. The engine here is `conductor-cli` from "
         "github.com/microsoft/conductor, built on the GitHub Copilot SDK. Several "
         "unrelated products are also called Conductor — Netflix's workflow engine "
-        "most prominently. A capability that turns out to belong to one of those is "
-        "not a finding, it is a different tool. Anything sourced from the web needs "
-        "checking against the installed package before it survives.\n\n"
+        "most prominently. A capability that belongs to one of those is not a "
+        "finding, it is a different tool.\n\n"
         "Second: already done. A capability this library reaches today is not "
-        "untapped. Check `src/ictus/` before agreeing that something is unused — "
-        "`interfaces/conductor/` is where every engine-facing field is emitted, and "
-        "`lints.py` keeps three tables saying which fields are wired and which are "
-        "deliberately refused.\n\n"
-        "For anything that survives both, say whether the provider this project "
-        "actually runs would honour it. A capability the chosen provider ignores is "
-        "worth knowing about and is not worth wiring."
+        "untapped. `src/ictus/interfaces/conductor/` is where every engine-facing "
+        "field is emitted, and `lints.py` keeps three tables saying which are wired, "
+        "which are refused because the provider ignores them, and which the engine "
+        "checks itself.\n\n"
+        "Check both before you bring anything to the table. You will be defending it "
+        "to people who can look it up while you speak."
     ),
-    synthesis=(
-        "Sort what you find by what it would cost to take up: a field to emit, a "
-        "command to wrap, a stdlib constructor to write, a change upstream, or a "
-        "decision nobody has made. Say plainly which items are *deliberately* not "
-        "taken up rather than merely unused — a wrapper that exposed everything "
+    closing=(
+        "Sort what the table settled on by what it would cost to take up: a field to "
+        "emit, a command to wrap, a stdlib constructor to write, a change upstream, "
+        "or a decision nobody has made. Say plainly which items are *deliberately* "
+        "not taken up rather than merely unused — a wrapper that exposed everything "
         "underneath it would be a worse tool than one that chose.\n\n"
         "Where a capability is real but the provider this project runs ignores it, "
         "keep it and mark it: that is a finding about the roadmap, not about today."
     ),
-    description="Four standpoints on the engine surface this library does not use",
+    description="Four people working out which of the engine this library never uses",
 )
 
 untapped = Pipeline(
@@ -219,27 +229,24 @@ survey = untapped.add(
     )
 )
 
-seat = review.instantiate(untapped, node_id="council")
+seat = review.instantiate(untapped, node_id="table")
 
 write_report = untapped.add(
     save_text(
         node_id="write_report",
         description="Write the brainstorm into the repository",
         text=tpl(
-            seat.ref("report"),
+            seat.ref("minutes"),
             "\n\n---\n\n## Still contested\n\n",
             seat.ref("dissent"),
-            "\n\n## Could not be checked\n\n",
+            "\n\n## Nobody could confirm\n\n",
             seat.ref("unverified"),
-            "\n\n## Did not survive checking\n\n",
-            seat.ref("corrections"),
         ),
         to="untapped.md",
         inputs=(
-            InputPort("report", STR),
+            InputPort("minutes", STR),
             InputPort("dissent", STR),
             InputPort("unverified", STR),
-            InputPort("corrections", STR),
         ),
     )
 )
@@ -247,7 +254,7 @@ write_report = untapped.add(
 agreed = untapped.add(
     succeed(
         node_id="reported",
-        reason="The council agreed on what we are leaving unused",
+        reason="The table agreed on what we are leaving unused",
         inputs=(InputPort("written", STR), InputPort("rounds", PortType.NUMBER)),
         result={"report": tpl(write_report.ref("path")), "rounds": tpl(seat.ref("rounds"))},
     )
@@ -255,7 +262,7 @@ agreed = untapped.add(
 split = untapped.add(
     succeed(
         node_id="contested",
-        reason="The council did not converge; a person should read the disagreement",
+        reason="The table did not converge; a person should read the disagreement",
         inputs=(InputPort("written", STR), InputPort("dissent", STR)),
         result={"report": tpl(write_report.ref("path")), "dissent": tpl(seat.ref("dissent"))},
     )
@@ -269,10 +276,9 @@ untapped.feed(survey, "surface", seat, "subject")
 untapped.feed(survey, "used", seat, "intent")
 untapped.connect_input(charge, seat, "charge")
 
-untapped.feed(seat, "report", write_report, "report")
+untapped.feed(seat, "minutes", write_report, "minutes")
 untapped.feed(seat, "dissent", write_report, "dissent")
 untapped.feed(seat, "unverified", write_report, "unverified")
-untapped.feed(seat, "corrections", write_report, "corrections")
 untapped.connect(write_report, "path", agreed, "written")
 untapped.feed(seat, "rounds", agreed, "rounds")
 untapped.feed(write_report, "path", split, "written")

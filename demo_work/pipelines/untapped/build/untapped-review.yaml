@@ -1,6 +1,6 @@
 workflow:
   name: untapped-review
-  description: Four standpoints on the engine surface this library does not use
+  description: Four people working out which of the engine this library never uses
   version: '1'
   instructions:
     - |
@@ -17,6 +17,25 @@ workflow:
 
       You are handed both halves of a ledger: what the engine offers, and what this
       library already reaches. Your job is the difference between them.
+
+      ## How this runs
+
+      You read on your own first, then you talk. The reading is private and
+      simultaneous; the conversation is in turns, and by the time it reaches you some
+      of the others have already spoken **this** round — their words are in front of
+      you, not a summary of them.
+
+      So argue. Answer people by name, say what would change your mind, and say
+      plainly when somebody has changed yours. Where a claim of theirs looks wrong,
+      go and check it while you have the turn: you all have the same tools and the
+      same installed package, and a claim that survives four people who could look it
+      up is worth more than one nobody tested. Where you agree with something already
+      said properly, say so once rather than restating it — four people making the
+      same point is not four findings.
+
+      The table finishes when everyone would be content to stop, which is not the
+      same as everyone agreeing. A disagreement that has been aired, checked and
+      recorded is a finished piece of work.
 
       ## The engine, precisely
 
@@ -59,12 +78,13 @@ workflow:
       - **Unused on purpose** — reached for deliberately and declined. Worth
         re-examining only if the reason has expired.
 
-      A capability you could not confirm goes in `unchecked`, with what you tried. For
-      this brainstorm that field matters more than usual: the web is half your
-      material and the name is ambiguous, so "I found this but could not tie it to the
-      installed package" is a genuinely useful thing to report and a bad thing to
-      quietly upgrade into a finding.
-  entry_point: round_number
+      Say out loud what you could not confirm, with what you tried. For this
+      brainstorm that matters more than usual: the web is half your material and the
+      name is ambiguous, so "I found this but could not tie it to the installed
+      package" is a genuinely useful thing to say and a bad thing to quietly upgrade
+      into a finding. Somebody else at the table may be able to make the lookup you
+      could not — that is most of the point of saying it rather than filing it.
+  entry_point: study
   runtime:
     provider:
       name: claude-agent-sdk
@@ -75,91 +95,49 @@ workflow:
       type: string
       required: true
       description: What we already use of the engine, and what the engine is
+    charge:
+      type: string
+      required: false
+      description: What this brainstorm is for, and anything the table must take as settled
     intent:
       type: string
       required: false
       description: What the material is meant to do
-    charge:
-      type: string
-      required: false
-      description: What this brainstorm is for, and anything the voices must take as settled
   context:
     mode: explicit
   limits:
-    max_iterations: 30
+    max_iterations: 29
 agents:
-  - name: round_number
-    description: Which round this is
-    type: set
-    value: '{% if round_number is defined %}{{ (round_number.output | int) + 1 }}{% else %}1{% endif %}'
-    output_type: number
-    input:
-      - round_number.output?
-    routes:
-      - to: voices
-  - name: engine
-    description: machinery the installed engine already has that no pipeline here can ask for — lifecycle, recovery, concurrency, the shapes a workflow may take
+  - name: engine_study
+    description: What 'engine' makes of it alone
     type: agent
     prompt: |-
       You read execution engines for a living and you have learned that the interesting capability is rarely the one on the front page. It is the field in the schema nobody connected, the lifecycle hook with one caller, the subsystem that exists because someone needed it once and then documented it badly.
 
       Your focus: machinery the installed engine already has that no pipeline here can ask for — lifecycle, recovery, concurrency, the shapes a workflow may take
 
-      You are one voice among several, each watching for something different. Assess the material below from your standpoint alone. Do not try to cover what the others are watching for, and do not soften a real objection because you assume someone else will raise it.
+      Go and look, on your own, before anybody talks. Read the engine's source from your angle and search the web for what its project has shipped, announced or been asked for. You are the only person at this table who will have looked at it this way, so the discussion is worth having only if what you bring is yours.
 
-      Put what you would change in `concerns`, one concrete item per line, each naming the change rather than what is wrong. Leave it empty only if you would change nothing.
+      Two failure modes matter more than the rest, and both produce claims that read perfectly well.
 
-      A claim you have not checked is not a finding. If you could not check something — a file you could not open, a command that failed, a source you could not reach — put it in `unchecked`, saying what you tried and what stopped you. Do not route it into `concerns` as a recommendation instead.
+      First: the wrong product. The engine here is `conductor-cli` from github.com/microsoft/conductor, built on the GitHub Copilot SDK. Several unrelated products are also called Conductor — Netflix's workflow engine most prominently. A capability that belongs to one of those is not a finding, it is a different tool.
 
-      A lookup you could not perform is not evidence about the thing you were looking for. A tool that errors is a fact about this environment, not about the material: `command not found` and `ModuleNotFoundError` mean you asked the wrong path or the wrong interpreter, and neither one means the thing you were checking does not exist. Try another way of reaching it before you give up, and if you still cannot, record that you could not — the others will build on whatever you assert.
+      Second: already done. A capability this library reaches today is not untapped. `src/ictus/interfaces/conductor/` is where every engine-facing field is emitted, and `lints.py` keeps three tables saying which are wired, which are refused because the provider ignores them, and which the engine checks itself.
 
-      `satisfied` is not about the material. It asks whether the record of this discussion is now complete from where you stand: set it true when the previous round's report states your position and your concerns fairly — including any disagreement you still hold, which being recorded is what settles it — and you have nothing to add. Set it false if the report missed something, got your position wrong, or if another voice raised something you now want to answer.
+      Check both before you bring anything to the table. You will be defending it to people who can look it up while you speak.
 
-      If no previous report is shown below, you have not seen one: `satisfied` is false. Say what you think anyway — that is what the first report is built from.
+      You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      {% if workflow.input.charge %}--- what this council has been asked to do ---
+      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+
+      {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
 
-      {% endif %}{% if workflow.input.intent %}What this is meant to do:
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
       {{ workflow.input.intent }}
 
       {% endif %}--- the material ---
       {{ workflow.input.subject }}
-
-      {% if report is defined %}--- where the last round got to ---
-      {{ report.output.text }}
-
-      Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
-      {% endif %}
-      --- what the others said last round, in their own words ---
-
-      ### field
-      said: {{ voices.outputs.field.position }}
-      wants changed:
-      {{ voices.outputs.field.concerns }}
-
-      ### operator
-      said: {{ voices.outputs.operator.position }}
-      wants changed:
-      {{ voices.outputs.operator.concerns }}
-
-      ### extension
-      said: {{ voices.outputs.extension.position }}
-      wants changed:
-      {{ voices.outputs.extension.concerns }}
-
-      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
-
-      {% if verify is defined %}--- what verification struck out of the last round ---
-      {{ verify.output.corrections }}
-
-      These claims did not survive being checked against the thing itself. Do not repeat them, and do not rebuild the same argument on a different one you have not checked either.
-      {% endif %}
-      {% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}--- direction from the person overseeing this ---
-      {{ interject.output.additional_input.notes }}
-
-      This is not a vote you can outweigh. Take it as a constraint.
-      {% endif %}
     system_prompt: |-
       You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
 
@@ -182,91 +160,40 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
-      - voices.outputs.field.position?
-      - voices.outputs.field.concerns?
-      - voices.outputs.operator.position?
-      - voices.outputs.operator.concerns?
-      - voices.outputs.extension.position?
-      - voices.outputs.extension.concerns?
-      - report.output.text?
-      - verify.output.corrections?
-      - interject.output.additional_input.notes?
     output:
-      satisfied:
-        type: boolean
-        description: 'Nothing left to change re: machinery the installed engine already has that no pipeline here can ask for — lifecycle, recovery, concurrency, the shapes a workflow may take'
-      position:
+      notes:
         type: string
-        description: Where this voice stands, in a sentence
-      concerns:
-        type: string
-        description: What to change, one per line
-      unchecked:
-        type: string
-        description: What this voice could not verify, and what blocked it
-  - name: field
-    description: what the project has shipped, announced or been asked for beyond the installed version, and which of it would change what this library can do
+        description: What this person found alone
+  - name: field_study
+    description: What 'field' makes of it alone
     type: agent
     prompt: |-
       You have watched a dozen orchestration tools arrive and you judge them by what people actually build once they have them, not by the feature list. You read release notes, issues and other people's workflows before you form a view, because a capability nobody uses is usually telling you something.
 
       Your focus: what the project has shipped, announced or been asked for beyond the installed version, and which of it would change what this library can do
 
-      You are one voice among several, each watching for something different. Assess the material below from your standpoint alone. Do not try to cover what the others are watching for, and do not soften a real objection because you assume someone else will raise it.
+      Go and look, on your own, before anybody talks. Read the engine's source from your angle and search the web for what its project has shipped, announced or been asked for. You are the only person at this table who will have looked at it this way, so the discussion is worth having only if what you bring is yours.
 
-      Put what you would change in `concerns`, one concrete item per line, each naming the change rather than what is wrong. Leave it empty only if you would change nothing.
+      Two failure modes matter more than the rest, and both produce claims that read perfectly well.
 
-      A claim you have not checked is not a finding. If you could not check something — a file you could not open, a command that failed, a source you could not reach — put it in `unchecked`, saying what you tried and what stopped you. Do not route it into `concerns` as a recommendation instead.
+      First: the wrong product. The engine here is `conductor-cli` from github.com/microsoft/conductor, built on the GitHub Copilot SDK. Several unrelated products are also called Conductor — Netflix's workflow engine most prominently. A capability that belongs to one of those is not a finding, it is a different tool.
 
-      A lookup you could not perform is not evidence about the thing you were looking for. A tool that errors is a fact about this environment, not about the material: `command not found` and `ModuleNotFoundError` mean you asked the wrong path or the wrong interpreter, and neither one means the thing you were checking does not exist. Try another way of reaching it before you give up, and if you still cannot, record that you could not — the others will build on whatever you assert.
+      Second: already done. A capability this library reaches today is not untapped. `src/ictus/interfaces/conductor/` is where every engine-facing field is emitted, and `lints.py` keeps three tables saying which are wired, which are refused because the provider ignores them, and which the engine checks itself.
 
-      `satisfied` is not about the material. It asks whether the record of this discussion is now complete from where you stand: set it true when the previous round's report states your position and your concerns fairly — including any disagreement you still hold, which being recorded is what settles it — and you have nothing to add. Set it false if the report missed something, got your position wrong, or if another voice raised something you now want to answer.
+      Check both before you bring anything to the table. You will be defending it to people who can look it up while you speak.
 
-      If no previous report is shown below, you have not seen one: `satisfied` is false. Say what you think anyway — that is what the first report is built from.
+      You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      {% if workflow.input.charge %}--- what this council has been asked to do ---
+      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+
+      {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
 
-      {% endif %}{% if workflow.input.intent %}What this is meant to do:
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
       {{ workflow.input.intent }}
 
       {% endif %}--- the material ---
       {{ workflow.input.subject }}
-
-      {% if report is defined %}--- where the last round got to ---
-      {{ report.output.text }}
-
-      Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
-      {% endif %}
-      --- what the others said last round, in their own words ---
-
-      ### engine
-      said: {{ voices.outputs.engine.position }}
-      wants changed:
-      {{ voices.outputs.engine.concerns }}
-
-      ### operator
-      said: {{ voices.outputs.operator.position }}
-      wants changed:
-      {{ voices.outputs.operator.concerns }}
-
-      ### extension
-      said: {{ voices.outputs.extension.position }}
-      wants changed:
-      {{ voices.outputs.extension.concerns }}
-
-      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
-
-      {% if verify is defined %}--- what verification struck out of the last round ---
-      {{ verify.output.corrections }}
-
-      These claims did not survive being checked against the thing itself. Do not repeat them, and do not rebuild the same argument on a different one you have not checked either.
-      {% endif %}
-      {% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}--- direction from the person overseeing this ---
-      {{ interject.output.additional_input.notes }}
-
-      This is not a vote you can outweigh. Take it as a constraint.
-      {% endif %}
     system_prompt: |-
       You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
 
@@ -289,91 +216,40 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
-      - voices.outputs.engine.position?
-      - voices.outputs.engine.concerns?
-      - voices.outputs.operator.position?
-      - voices.outputs.operator.concerns?
-      - voices.outputs.extension.position?
-      - voices.outputs.extension.concerns?
-      - report.output.text?
-      - verify.output.corrections?
-      - interject.output.additional_input.notes?
     output:
-      satisfied:
-        type: boolean
-        description: 'Nothing left to change re: what the project has shipped, announced or been asked for beyond the installed version, and which of it would change what this library can do'
-      position:
+      notes:
         type: string
-        description: Where this voice stands, in a sentence
-      concerns:
-        type: string
-        description: What to change, one per line
-      unchecked:
-        type: string
-        description: What this voice could not verify, and what blocked it
-  - name: operator
-    description: what a person driving the engine directly can do that this library's command line does not let them do
+        description: What this person found alone
+  - name: operator_study
+    description: What 'operator' makes of it alone
     type: agent
     prompt: |-
       You run other people's pipelines at three in the morning. What you value is not expressiveness but the ability to see what is happening, stop it, steer it, and pick it back up — and you know that a wrapper which hides the engine's own controls has taken something away.
 
       Your focus: what a person driving the engine directly can do that this library's command line does not let them do
 
-      You are one voice among several, each watching for something different. Assess the material below from your standpoint alone. Do not try to cover what the others are watching for, and do not soften a real objection because you assume someone else will raise it.
+      Go and look, on your own, before anybody talks. Read the engine's source from your angle and search the web for what its project has shipped, announced or been asked for. You are the only person at this table who will have looked at it this way, so the discussion is worth having only if what you bring is yours.
 
-      Put what you would change in `concerns`, one concrete item per line, each naming the change rather than what is wrong. Leave it empty only if you would change nothing.
+      Two failure modes matter more than the rest, and both produce claims that read perfectly well.
 
-      A claim you have not checked is not a finding. If you could not check something — a file you could not open, a command that failed, a source you could not reach — put it in `unchecked`, saying what you tried and what stopped you. Do not route it into `concerns` as a recommendation instead.
+      First: the wrong product. The engine here is `conductor-cli` from github.com/microsoft/conductor, built on the GitHub Copilot SDK. Several unrelated products are also called Conductor — Netflix's workflow engine most prominently. A capability that belongs to one of those is not a finding, it is a different tool.
 
-      A lookup you could not perform is not evidence about the thing you were looking for. A tool that errors is a fact about this environment, not about the material: `command not found` and `ModuleNotFoundError` mean you asked the wrong path or the wrong interpreter, and neither one means the thing you were checking does not exist. Try another way of reaching it before you give up, and if you still cannot, record that you could not — the others will build on whatever you assert.
+      Second: already done. A capability this library reaches today is not untapped. `src/ictus/interfaces/conductor/` is where every engine-facing field is emitted, and `lints.py` keeps three tables saying which are wired, which are refused because the provider ignores them, and which the engine checks itself.
 
-      `satisfied` is not about the material. It asks whether the record of this discussion is now complete from where you stand: set it true when the previous round's report states your position and your concerns fairly — including any disagreement you still hold, which being recorded is what settles it — and you have nothing to add. Set it false if the report missed something, got your position wrong, or if another voice raised something you now want to answer.
+      Check both before you bring anything to the table. You will be defending it to people who can look it up while you speak.
 
-      If no previous report is shown below, you have not seen one: `satisfied` is false. Say what you think anyway — that is what the first report is built from.
+      You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      {% if workflow.input.charge %}--- what this council has been asked to do ---
+      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+
+      {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
 
-      {% endif %}{% if workflow.input.intent %}What this is meant to do:
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
       {{ workflow.input.intent }}
 
       {% endif %}--- the material ---
       {{ workflow.input.subject }}
-
-      {% if report is defined %}--- where the last round got to ---
-      {{ report.output.text }}
-
-      Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
-      {% endif %}
-      --- what the others said last round, in their own words ---
-
-      ### engine
-      said: {{ voices.outputs.engine.position }}
-      wants changed:
-      {{ voices.outputs.engine.concerns }}
-
-      ### field
-      said: {{ voices.outputs.field.position }}
-      wants changed:
-      {{ voices.outputs.field.concerns }}
-
-      ### extension
-      said: {{ voices.outputs.extension.position }}
-      wants changed:
-      {{ voices.outputs.extension.concerns }}
-
-      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
-
-      {% if verify is defined %}--- what verification struck out of the last round ---
-      {{ verify.output.corrections }}
-
-      These claims did not survive being checked against the thing itself. Do not repeat them, and do not rebuild the same argument on a different one you have not checked either.
-      {% endif %}
-      {% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}--- direction from the person overseeing this ---
-      {{ interject.output.additional_input.notes }}
-
-      This is not a vote you can outweigh. Take it as a constraint.
-      {% endif %}
     system_prompt: |-
       You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
 
@@ -396,91 +272,40 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
-      - voices.outputs.engine.position?
-      - voices.outputs.engine.concerns?
-      - voices.outputs.field.position?
-      - voices.outputs.field.concerns?
-      - voices.outputs.extension.position?
-      - voices.outputs.extension.concerns?
-      - report.output.text?
-      - verify.output.corrections?
-      - interject.output.additional_input.notes?
     output:
-      satisfied:
-        type: boolean
-        description: "Nothing left to change re: what a person driving the engine directly can do that this library's command line does not let them do"
-      position:
+      notes:
         type: string
-        description: Where this voice stands, in a sentence
-      concerns:
-        type: string
-        description: What to change, one per line
-      unchecked:
-        type: string
-        description: What this voice could not verify, and what blocked it
-  - name: extension
-    description: where the engine is extensible rather than merely featureful, and what this library could build on those seams instead of beside them
+        description: What this person found alone
+  - name: extension_study
+    description: What 'extension' makes of it alone
     type: agent
     prompt: |-
       You build on top of other people's systems and you look first for the seams they left deliberately — the plugin loader, the registry, the protocol, the server mode. You would rather extend a system through a hook it documents than around it through one it does not.
 
       Your focus: where the engine is extensible rather than merely featureful, and what this library could build on those seams instead of beside them
 
-      You are one voice among several, each watching for something different. Assess the material below from your standpoint alone. Do not try to cover what the others are watching for, and do not soften a real objection because you assume someone else will raise it.
+      Go and look, on your own, before anybody talks. Read the engine's source from your angle and search the web for what its project has shipped, announced or been asked for. You are the only person at this table who will have looked at it this way, so the discussion is worth having only if what you bring is yours.
 
-      Put what you would change in `concerns`, one concrete item per line, each naming the change rather than what is wrong. Leave it empty only if you would change nothing.
+      Two failure modes matter more than the rest, and both produce claims that read perfectly well.
 
-      A claim you have not checked is not a finding. If you could not check something — a file you could not open, a command that failed, a source you could not reach — put it in `unchecked`, saying what you tried and what stopped you. Do not route it into `concerns` as a recommendation instead.
+      First: the wrong product. The engine here is `conductor-cli` from github.com/microsoft/conductor, built on the GitHub Copilot SDK. Several unrelated products are also called Conductor — Netflix's workflow engine most prominently. A capability that belongs to one of those is not a finding, it is a different tool.
 
-      A lookup you could not perform is not evidence about the thing you were looking for. A tool that errors is a fact about this environment, not about the material: `command not found` and `ModuleNotFoundError` mean you asked the wrong path or the wrong interpreter, and neither one means the thing you were checking does not exist. Try another way of reaching it before you give up, and if you still cannot, record that you could not — the others will build on whatever you assert.
+      Second: already done. A capability this library reaches today is not untapped. `src/ictus/interfaces/conductor/` is where every engine-facing field is emitted, and `lints.py` keeps three tables saying which are wired, which are refused because the provider ignores them, and which the engine checks itself.
 
-      `satisfied` is not about the material. It asks whether the record of this discussion is now complete from where you stand: set it true when the previous round's report states your position and your concerns fairly — including any disagreement you still hold, which being recorded is what settles it — and you have nothing to add. Set it false if the report missed something, got your position wrong, or if another voice raised something you now want to answer.
+      Check both before you bring anything to the table. You will be defending it to people who can look it up while you speak.
 
-      If no previous report is shown below, you have not seen one: `satisfied` is false. Say what you think anyway — that is what the first report is built from.
+      You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      {% if workflow.input.charge %}--- what this council has been asked to do ---
+      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+
+      {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
 
-      {% endif %}{% if workflow.input.intent %}What this is meant to do:
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
       {{ workflow.input.intent }}
 
       {% endif %}--- the material ---
       {{ workflow.input.subject }}
-
-      {% if report is defined %}--- where the last round got to ---
-      {{ report.output.text }}
-
-      Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
-      {% endif %}
-      --- what the others said last round, in their own words ---
-
-      ### engine
-      said: {{ voices.outputs.engine.position }}
-      wants changed:
-      {{ voices.outputs.engine.concerns }}
-
-      ### field
-      said: {{ voices.outputs.field.position }}
-      wants changed:
-      {{ voices.outputs.field.concerns }}
-
-      ### operator
-      said: {{ voices.outputs.operator.position }}
-      wants changed:
-      {{ voices.outputs.operator.concerns }}
-
-      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
-
-      {% if verify is defined %}--- what verification struck out of the last round ---
-      {{ verify.output.corrections }}
-
-      These claims did not survive being checked against the thing itself. Do not repeat them, and do not rebuild the same argument on a different one you have not checked either.
-      {% endif %}
-      {% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}--- direction from the person overseeing this ---
-      {{ interject.output.additional_input.notes }}
-
-      This is not a vote you can outweigh. Take it as a constraint.
-      {% endif %}
     system_prompt: |-
       You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
 
@@ -503,147 +328,64 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
-      - voices.outputs.engine.position?
-      - voices.outputs.engine.concerns?
-      - voices.outputs.field.position?
-      - voices.outputs.field.concerns?
-      - voices.outputs.operator.position?
-      - voices.outputs.operator.concerns?
-      - report.output.text?
-      - verify.output.corrections?
-      - interject.output.additional_input.notes?
     output:
-      satisfied:
-        type: boolean
-        description: 'Nothing left to change re: where the engine is extensible rather than merely featureful, and what this library could build on those seams instead of beside them'
-      position:
+      notes:
         type: string
-        description: Where this voice stands, in a sentence
-      concerns:
-        type: string
-        description: What to change, one per line
-      unchecked:
-        type: string
-        description: What this voice could not verify, and what blocked it
-  - name: report
-    description: Synthesise the round
-    type: agent
-    prompt: |
-      Several voices have just assessed the same material, each watching for something different. Write one report of where this round got to.
-
-      Do not average them. Where they disagree, say who disagrees with whom and about what — a disagreement recorded as a disagreement is useful, and one smoothed into consensus is a decision made by omission. Where a concern from one voice would be answered by another's suggestion, say so.
-
-      Put anything still contested in `dissent`, naming the voices. Leave it empty only when nothing is.
-
-      Each voice also reports what it could not check. Collect all of it into `unverified`, naming the voice and what blocked it. This is the one part of the report you must not tidy away: a finding that rests on a lookup nobody managed to perform is not a finding, and it must be visible as such rather than written up in the same voice as a checked one. Where a voice put a claim in `concerns` that its own `unchecked` shows it could not verify, say so in `unverified` rather than repeating the claim.
-
-      Voices agreeing is not evidence. Several voices blocked by the same failed lookup will reach the same wrong conclusion independently and look like consensus; if their `unchecked` entries name the same obstacle, say that plainly — it is the most useful thing in the round.
-
-      Sort what you find by what it would cost to take up: a field to emit, a command to wrap, a stdlib constructor to write, a change upstream, or a decision nobody has made. Say plainly which items are *deliberately* not taken up rather than merely unused — a wrapper that exposed everything underneath it would be a worse tool than one that chose.
-
-      Where a capability is real but the provider this project runs ignores it, keep it and mark it: that is a finding about the roadmap, not about today.
-
-      --- engine (machinery the installed engine already has that no pipeline here can ask for — lifecycle, recovery, concurrency, the shapes a workflow may take) ---
-      position: {{ voices.outputs.engine.position }}
-      concerns:
-      {{ voices.outputs.engine.concerns }}
-      could not check:
-      {{ voices.outputs.engine.unchecked }}
-
-      --- field (what the project has shipped, announced or been asked for beyond the installed version, and which of it would change what this library can do) ---
-      position: {{ voices.outputs.field.position }}
-      concerns:
-      {{ voices.outputs.field.concerns }}
-      could not check:
-      {{ voices.outputs.field.unchecked }}
-
-      --- operator (what a person driving the engine directly can do that this library's command line does not let them do) ---
-      position: {{ voices.outputs.operator.position }}
-      concerns:
-      {{ voices.outputs.operator.concerns }}
-      could not check:
-      {{ voices.outputs.operator.unchecked }}
-
-      --- extension (where the engine is extensible rather than merely featureful, and what this library could build on those seams instead of beside them) ---
-      position: {{ voices.outputs.extension.position }}
-      concerns:
-      {{ voices.outputs.extension.concerns }}
-      could not check:
-      {{ voices.outputs.extension.unchecked }}
-    system_prompt: |-
-      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
-
-      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
-
-      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
-
-      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
-
-      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
-
-      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
-
-      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
-
-      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+        description: What this person found alone
+  - name: round_number
+    description: Which round this is
+    type: set
+    value: '{% if round_number is defined %}{{ (round_number.output | int) + 1 }}{% else %}1{% endif %}'
+    output_type: number
     input:
-      - voices.outputs.engine.position
-      - voices.outputs.engine.concerns
-      - voices.outputs.engine.unchecked
-      - voices.outputs.engine.satisfied
-      - voices.outputs.field.position
-      - voices.outputs.field.concerns
-      - voices.outputs.field.unchecked
-      - voices.outputs.field.satisfied
-      - voices.outputs.operator.position
-      - voices.outputs.operator.concerns
-      - voices.outputs.operator.unchecked
-      - voices.outputs.operator.satisfied
-      - voices.outputs.extension.position
-      - voices.outputs.extension.concerns
-      - voices.outputs.extension.unchecked
-      - voices.outputs.extension.satisfied
-      - round_number.output
-    output:
-      text:
-        type: string
-        description: The round's report
-      dissent:
-        type: string
-        description: What is still contested, and by whom
-      unverified:
-        type: string
-        description: Claims resting on something nobody could check
+      - round_number.output?
     routes:
-      - to: verify
-  - name: verify
-    description: Check the report against the thing itself
+      - to: engine
+  - name: engine
+    description: machinery the installed engine already has that no pipeline here can ask for — lifecycle, recovery, concurrency, the shapes a workflow may take
     type: agent
     prompt: |-
-      You are checking a brainstorm about an engine that is installed on this machine and readable. Two failure modes matter more than the rest, and both produce claims that read perfectly well.
+      You read execution engines for a living and you have learned that the interesting capability is rarely the one on the front page. It is the field in the schema nobody connected, the lifecycle hook with one caller, the subsystem that exists because someone needed it once and then documented it badly.
 
-      First: the wrong product. The engine here is `conductor-cli` from github.com/microsoft/conductor, built on the GitHub Copilot SDK. Several unrelated products are also called Conductor — Netflix's workflow engine most prominently. A capability that turns out to belong to one of those is not a finding, it is a different tool. Anything sourced from the web needs checking against the installed package before it survives.
+      Your focus: machinery the installed engine already has that no pipeline here can ask for — lifecycle, recovery, concurrency, the shapes a workflow may take
 
-      Second: already done. A capability this library reaches today is not untapped. Check `src/ictus/` before agreeing that something is unused — `interfaces/conductor/` is where every engine-facing field is emitted, and `lints.py` keeps three tables saying which fields are wired and which are deliberately refused.
+      Round {{ round_number.output }} of 3. You are one of several people working this out together, speaking first. This is a conversation, not a survey: the others' words are below, and the point of your turn is to move the discussion rather than to restate where you stand.
 
-      For anything that survives both, say whether the provider this project actually runs would honour it. A capability the chosen provider ignores is worth knowing about and is not worth wiring.
+      So: answer the people you disagree with by name and say what would change your mind. Say plainly when somebody has changed yours, and which of them did. Where you have nothing to add to a point somebody else has already made properly, say that instead of making it again — agreement stated once is worth more than the same position restated by four people.
 
-      You are checking a report several people wrote after discussing something. Your job is to refute it, not to improve it. They may have read a summary rather than the thing itself, and agreement between them is no evidence at all — four people who read the same wrong page agree sooner, not later.
+      Put your contribution in `remark`. It is the only thing the others see of this turn, so it has to stand on its own.
 
-      Take every claim about how something behaves and check it against the thing itself. In `corrections`, list what does not survive: quote the claim, say what is actually the case, and cite where you looked. Say plainly when a claim is right — a correction list that strikes out everything is as useless as one that strikes out nothing.
+      Say plainly what you could not check. A lookup you failed to make is not evidence about the thing you were looking for, and at a table it is worth saying out loud: somebody else may be able to make it, and the write-up needs to know which claims rest on something nobody confirmed.
 
-      Set `sound` to true only if nothing material was wrong. A report whose central point rests on a claim you refuted is not sound, however well argued.
+      Set `agree` true when you would be content for the table to stop here — meaning the discussion has covered what you came with and your remaining disagreements, if any, are recorded rather than resolved. Setting it true because the conversation has become tiring is how a table agrees on something nobody checked.
 
-      Start with what they could not check. That list is where the unfounded claims are, and a lookup one voice failed at is usually one you can complete — a command run against the wrong path or the wrong interpreter fails in a way that looks identical to the thing being absent. Go and complete it. If several voices were stopped by the same obstacle, treat every conclusion downstream of it as unfounded until you have checked it yourself, however many of them agreed.
+      {% if workflow.input.charge %}--- what this is for ---
+      {{ workflow.input.charge }}
 
-      --- the report ---
-      {{ report.output.text }}
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
+      {{ workflow.input.intent }}
 
-      --- what they still contest ---
-      {{ report.output.dissent }}
+      {% endif %}--- what you made of it on your own ---
+      {{ study.outputs.engine_study.notes }}
 
-      --- what they could not check ---
-      {{ report.output.unverified }}
+      --- what has been said ---
+      {% if field is defined %}
+      **field** said:
+      {{ field.output.remark }}
+      {% endif %}{% if operator is defined %}
+      **operator** said:
+      {{ operator.output.remark }}
+      {% endif %}{% if extension is defined %}
+      **extension** said:
+      {{ extension.output.remark }}
+      {% endif %}{% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}
+      --- direction from the person overseeing this ---
+      {{ interject.output.additional_input.notes }}
+
+      This is not a vote you can outweigh. Take it as a constraint.
+      {% endif %}
+      --- the material ---
+      {{ workflow.input.subject }}
     system_prompt: |-
       You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
 
@@ -661,89 +403,414 @@ agents:
 
       You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
     max_agent_iterations: 200
-    session_key: untapped-review-verify
+    session_key: untapped-review-engine
     input:
-      - report.output.text
-      - report.output.dissent
-      - report.output.unverified
+      - workflow.input.subject
+      - workflow.input.charge?
+      - workflow.input.intent?
+      - round_number.output
+      - study.outputs.engine_study.notes
+      - field.output.remark?
+      - operator.output.remark?
+      - extension.output.remark?
+      - interject.output.additional_input.notes?
     output:
-      corrections:
+      remark:
         type: string
-        description: Claims that did not survive
-      sound:
+        description: What this person says this turn
+      agree:
         type: boolean
-        description: Whether it holds up
+        description: Whether they would stop here
+    routes:
+      - to: field
+  - name: field
+    description: what the project has shipped, announced or been asked for beyond the installed version, and which of it would change what this library can do
+    type: agent
+    prompt: |-
+      You have watched a dozen orchestration tools arrive and you judge them by what people actually build once they have them, not by the feature list. You read release notes, issues and other people's workflows before you form a view, because a capability nobody uses is usually telling you something.
+
+      Your focus: what the project has shipped, announced or been asked for beyond the installed version, and which of it would change what this library can do
+
+      Round {{ round_number.output }} of 3. You are one of several people working this out together, speaking 2 of 4. This is a conversation, not a survey: the others' words are below, and the point of your turn is to move the discussion rather than to restate where you stand.
+
+      So: answer the people you disagree with by name and say what would change your mind. Say plainly when somebody has changed yours, and which of them did. Where you have nothing to add to a point somebody else has already made properly, say that instead of making it again — agreement stated once is worth more than the same position restated by four people.
+
+      Put your contribution in `remark`. It is the only thing the others see of this turn, so it has to stand on its own.
+
+      Say plainly what you could not check. A lookup you failed to make is not evidence about the thing you were looking for, and at a table it is worth saying out loud: somebody else may be able to make it, and the write-up needs to know which claims rest on something nobody confirmed.
+
+      Set `agree` true when you would be content for the table to stop here — meaning the discussion has covered what you came with and your remaining disagreements, if any, are recorded rather than resolved. Setting it true because the conversation has become tiring is how a table agrees on something nobody checked.
+
+      {% if workflow.input.charge %}--- what this is for ---
+      {{ workflow.input.charge }}
+
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
+      {{ workflow.input.intent }}
+
+      {% endif %}--- what you made of it on your own ---
+      {{ study.outputs.field_study.notes }}
+
+      --- what has been said ---
+
+      **engine** said:
+      {{ engine.output.remark }}
+      {% if operator is defined %}
+      **operator** said:
+      {{ operator.output.remark }}
+      {% endif %}{% if extension is defined %}
+      **extension** said:
+      {{ extension.output.remark }}
+      {% endif %}{% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}
+      --- direction from the person overseeing this ---
+      {{ interject.output.additional_input.notes }}
+
+      This is not a vote you can outweigh. Take it as a constraint.
+      {% endif %}
+      --- the material ---
+      {{ workflow.input.subject }}
+    system_prompt: |-
+      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
+
+      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
+
+      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
+
+      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
+
+      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
+
+      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
+
+      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
+
+      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+    max_agent_iterations: 200
+    session_key: untapped-review-field
+    input:
+      - workflow.input.subject
+      - workflow.input.charge?
+      - workflow.input.intent?
+      - round_number.output
+      - study.outputs.field_study.notes
+      - engine.output.remark?
+      - operator.output.remark?
+      - extension.output.remark?
+      - interject.output.additional_input.notes?
+    output:
+      remark:
+        type: string
+        description: What this person says this turn
+      agree:
+        type: boolean
+        description: Whether they would stop here
+    routes:
+      - to: operator
+  - name: operator
+    description: what a person driving the engine directly can do that this library's command line does not let them do
+    type: agent
+    prompt: |-
+      You run other people's pipelines at three in the morning. What you value is not expressiveness but the ability to see what is happening, stop it, steer it, and pick it back up — and you know that a wrapper which hides the engine's own controls has taken something away.
+
+      Your focus: what a person driving the engine directly can do that this library's command line does not let them do
+
+      Round {{ round_number.output }} of 3. You are one of several people working this out together, speaking 3 of 4. This is a conversation, not a survey: the others' words are below, and the point of your turn is to move the discussion rather than to restate where you stand.
+
+      So: answer the people you disagree with by name and say what would change your mind. Say plainly when somebody has changed yours, and which of them did. Where you have nothing to add to a point somebody else has already made properly, say that instead of making it again — agreement stated once is worth more than the same position restated by four people.
+
+      Put your contribution in `remark`. It is the only thing the others see of this turn, so it has to stand on its own.
+
+      Say plainly what you could not check. A lookup you failed to make is not evidence about the thing you were looking for, and at a table it is worth saying out loud: somebody else may be able to make it, and the write-up needs to know which claims rest on something nobody confirmed.
+
+      Set `agree` true when you would be content for the table to stop here — meaning the discussion has covered what you came with and your remaining disagreements, if any, are recorded rather than resolved. Setting it true because the conversation has become tiring is how a table agrees on something nobody checked.
+
+      {% if workflow.input.charge %}--- what this is for ---
+      {{ workflow.input.charge }}
+
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
+      {{ workflow.input.intent }}
+
+      {% endif %}--- what you made of it on your own ---
+      {{ study.outputs.operator_study.notes }}
+
+      --- what has been said ---
+
+      **engine** said:
+      {{ engine.output.remark }}
+
+      **field** said:
+      {{ field.output.remark }}
+      {% if extension is defined %}
+      **extension** said:
+      {{ extension.output.remark }}
+      {% endif %}{% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}
+      --- direction from the person overseeing this ---
+      {{ interject.output.additional_input.notes }}
+
+      This is not a vote you can outweigh. Take it as a constraint.
+      {% endif %}
+      --- the material ---
+      {{ workflow.input.subject }}
+    system_prompt: |-
+      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
+
+      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
+
+      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
+
+      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
+
+      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
+
+      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
+
+      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
+
+      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+    max_agent_iterations: 200
+    session_key: untapped-review-operator
+    input:
+      - workflow.input.subject
+      - workflow.input.charge?
+      - workflow.input.intent?
+      - round_number.output
+      - study.outputs.operator_study.notes
+      - engine.output.remark?
+      - field.output.remark?
+      - extension.output.remark?
+      - interject.output.additional_input.notes?
+    output:
+      remark:
+        type: string
+        description: What this person says this turn
+      agree:
+        type: boolean
+        description: Whether they would stop here
+    routes:
+      - to: extension
+  - name: extension
+    description: where the engine is extensible rather than merely featureful, and what this library could build on those seams instead of beside them
+    type: agent
+    prompt: |-
+      You build on top of other people's systems and you look first for the seams they left deliberately — the plugin loader, the registry, the protocol, the server mode. You would rather extend a system through a hook it documents than around it through one it does not.
+
+      Your focus: where the engine is extensible rather than merely featureful, and what this library could build on those seams instead of beside them
+
+      Round {{ round_number.output }} of 3. You are one of several people working this out together, speaking last. This is a conversation, not a survey: the others' words are below, and the point of your turn is to move the discussion rather than to restate where you stand.
+
+      So: answer the people you disagree with by name and say what would change your mind. Say plainly when somebody has changed yours, and which of them did. Where you have nothing to add to a point somebody else has already made properly, say that instead of making it again — agreement stated once is worth more than the same position restated by four people.
+
+      Put your contribution in `remark`. It is the only thing the others see of this turn, so it has to stand on its own.
+
+      Say plainly what you could not check. A lookup you failed to make is not evidence about the thing you were looking for, and at a table it is worth saying out loud: somebody else may be able to make it, and the write-up needs to know which claims rest on something nobody confirmed.
+
+      Set `agree` true when you would be content for the table to stop here — meaning the discussion has covered what you came with and your remaining disagreements, if any, are recorded rather than resolved. Setting it true because the conversation has become tiring is how a table agrees on something nobody checked.
+
+      {% if workflow.input.charge %}--- what this is for ---
+      {{ workflow.input.charge }}
+
+      {% endif %}{% if workflow.input.intent %}--- what this is meant to do ---
+      {{ workflow.input.intent }}
+
+      {% endif %}--- what you made of it on your own ---
+      {{ study.outputs.extension_study.notes }}
+
+      --- what has been said ---
+
+      **engine** said:
+      {{ engine.output.remark }}
+
+      **field** said:
+      {{ field.output.remark }}
+
+      **operator** said:
+      {{ operator.output.remark }}
+      {% if interject is defined and interject.output.additional_input is defined and interject.output.additional_input.notes is defined %}
+      --- direction from the person overseeing this ---
+      {{ interject.output.additional_input.notes }}
+
+      This is not a vote you can outweigh. Take it as a constraint.
+      {% endif %}
+      --- the material ---
+      {{ workflow.input.subject }}
+    system_prompt: |-
+      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
+
+      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
+
+      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
+
+      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
+
+      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
+
+      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
+
+      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
+
+      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+    max_agent_iterations: 200
+    session_key: untapped-review-extension
+    input:
+      - workflow.input.subject
+      - workflow.input.charge?
+      - workflow.input.intent?
+      - round_number.output
+      - study.outputs.extension_study.notes
+      - engine.output.remark?
+      - field.output.remark?
+      - operator.output.remark?
+      - interject.output.additional_input.notes?
+    output:
+      remark:
+        type: string
+        description: What this person says this turn
+      agree:
+        type: boolean
+        description: Whether they would stop here
     routes:
       - to: interject
+  - name: minutes
+    description: Write up what the table concluded
+    type: agent
+    prompt: |
+      A group of people have just finished talking something through. Write up what they concluded.
+
+      You were not in the room and you are not a participant: report the discussion, do not continue it. Where they agreed, say what they agreed and on whose argument. Where they did not, put it in `dissent` naming who holds what — a disagreement recorded as a disagreement is useful, and one smoothed into consensus is a decision made by omission.
+
+      Collect what nobody could check into `unverified`, naming who tried and what stopped them. Do not tidy it away and do not promote it into the conclusion: a claim resting on a lookup that failed is not a finding, however many people repeated it afterwards.
+
+      Say what changed during the conversation. A position somebody arrived with and abandoned, and why, is usually the most informative thing that happened, and it is the part a transcript buries.
+
+      Sort what the table settled on by what it would cost to take up: a field to emit, a command to wrap, a stdlib constructor to write, a change upstream, or a decision nobody has made. Say plainly which items are *deliberately* not taken up rather than merely unused — a wrapper that exposed everything underneath it would be a worse tool than one that chose.
+
+      Where a capability is real but the provider this project runs ignores it, keep it and mark it: that is a finding about the roadmap, not about today.
+
+      --- the last thing each person said ---
+
+      **engine**:
+      {{ engine.output.remark }}
+
+      **field**:
+      {{ field.output.remark }}
+
+      **operator**:
+      {{ operator.output.remark }}
+
+      **extension**:
+      {{ extension.output.remark }}
+    system_prompt: |-
+      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
+
+      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
+
+      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
+
+      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
+
+      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
+
+      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
+
+      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
+
+      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+    input:
+      - engine.output.remark
+      - engine.output.agree
+      - field.output.remark
+      - field.output.agree
+      - operator.output.remark
+      - operator.output.agree
+      - extension.output.remark
+      - extension.output.agree
+      - round_number.output
+      - interject.output.selected?
+    output:
+      text:
+        type: string
+        description: What the table concluded
+      dissent:
+        type: string
+        description: What is still contested, and by whom
+      unverified:
+        type: string
+        description: Claims nobody at the table could confirm
+    routes:
+      - to: halted
+        when: "{{ interject.output.selected == 'stop' }}"
+      - to: agreed
+        when: '{{ engine.output.agree and field.output.agree and operator.output.agree and extension.output.agree }}'
+      - to: unresolved
   - name: agreed
     type: terminate
     status: success
-    reason: Every voice is satisfied
+    reason: The table agreed
     output_template:
       outcome: agreed
-      report: '{{ report.output.text }}'
-      dissent: '{{ report.output.dissent }}'
-      unverified: '{{ report.output.unverified }}'
+      minutes: '{{ minutes.output.text }}'
+      dissent: '{{ minutes.output.dissent }}'
+      unverified: '{{ minutes.output.unverified }}'
       rounds: '{{ round_number.output }}'
-      corrections: '{{ verify.output.corrections }}'
     input:
-      - report.output.text
-      - report.output.dissent
-      - report.output.unverified
+      - minutes.output.text
+      - minutes.output.dissent
+      - minutes.output.unverified
       - round_number.output
-      - verify.output.corrections
   - name: unresolved
     type: terminate
     status: success
     reason: Still contested after 3 round(s)
     output_template:
       outcome: unresolved
-      report: '{{ report.output.text }}'
-      dissent: '{{ report.output.dissent }}'
-      unverified: '{{ report.output.unverified }}'
+      minutes: '{{ minutes.output.text }}'
+      dissent: '{{ minutes.output.dissent }}'
+      unverified: '{{ minutes.output.unverified }}'
       rounds: '{{ round_number.output }}'
-      corrections: '{{ verify.output.corrections }}'
     input:
-      - report.output.text
-      - report.output.dissent
-      - report.output.unverified
+      - minutes.output.text
+      - minutes.output.dissent
+      - minutes.output.unverified
       - round_number.output
-      - verify.output.corrections
   - name: interject
-    description: Read this round and steer it
+    description: Read the round and steer it
     type: human_gate
-    prompt: |-
+    prompt: |
       Round {{ round_number.output }} of 3.
 
       **Where it stands**
 
-      - `engine` satisfied: {{ voices.outputs.engine.satisfied }}
-      - `field` satisfied: {{ voices.outputs.field.satisfied }}
-      - `operator` satisfied: {{ voices.outputs.operator.satisfied }}
-      - `extension` satisfied: {{ voices.outputs.extension.satisfied }}
-      - report survived checking: {{ verify.output.sound }}
+      - `engine` would stop here: {{ engine.output.agree }}
+      - `field` would stop here: {{ field.output.agree }}
+      - `operator` would stop here: {{ operator.output.agree }}
+      - `extension` would stop here: {{ extension.output.agree }}
 
-      Choosing to carry on hands it back to the council, which then finishes if every voice is satisfied and the report survived checking, or runs another round — up to 3.
+      Carrying on hands it back to the table, which finishes when everyone would stop, or runs another round — up to 3.
 
-      {{ report.output.text }}
+      --- the last thing each person said ---
 
-      --- still contested ---
-      {{ report.output.dissent }}
+      **engine**:
+      {{ engine.output.remark }}
 
-      --- what did not survive checking ---
-      {{ verify.output.corrections }}
+      **field**:
+      {{ field.output.remark }}
+
+      **operator**:
+      {{ operator.output.remark }}
+
+      **extension**:
+      {{ extension.output.remark }}
     input:
-      - verify.output.corrections
-      - report.output.text
-      - report.output.dissent
+      - engine.output.remark
+      - engine.output.agree
+      - field.output.remark
+      - field.output.agree
+      - operator.output.remark
+      - operator.output.agree
+      - extension.output.remark
+      - extension.output.agree
       - round_number.output
-      - voices.outputs.engine.satisfied
-      - voices.outputs.field.satisfied
-      - voices.outputs.operator.satisfied
-      - voices.outputs.extension.satisfied
-      - verify.output.sound
     options:
-      - label: Hand it back to the council
+      - label: Hand it back to the table
         value: continue
         route: tallied
       - label: Hand it back, with direction they must follow
@@ -751,53 +818,49 @@ agents:
         route: tallied
         prompt_for: notes
         multiline: true
-      - label: Stop now and take this report as it is
+      - label: Stop here and write it up
         value: stop
-        route: halted
-  - name: halted
-    type: terminate
-    status: success
-    reason: Stopped by the person overseeing the council
-    output_template:
-      outcome: halted
-      report: '{{ report.output.text }}'
-      dissent: '{{ report.output.dissent }}'
-      unverified: '{{ report.output.unverified }}'
-      rounds: '{{ round_number.output }}'
-      corrections: '{{ verify.output.corrections }}'
-    input:
-      - report.output.text
-      - report.output.dissent
-      - report.output.unverified
-      - round_number.output
-      - verify.output.corrections
+        route: minutes
   - name: tallied
-    description: Decide whether the council is finished
+    description: Where the round left it
     type: set
-    value: continuing
+    value: continue
     output_type: string
     input:
       - interject.output.selected
       - round_number.output
-      - voices.outputs.engine.satisfied
-      - voices.outputs.field.satisfied
-      - voices.outputs.operator.satisfied
-      - voices.outputs.extension.satisfied
-      - verify.output.sound
+      - engine.output.agree
+      - field.output.agree
+      - operator.output.agree
+      - extension.output.agree
     routes:
-      - to: agreed
-        when: '{{ voices.outputs.engine.satisfied and voices.outputs.field.satisfied and voices.outputs.operator.satisfied and voices.outputs.extension.satisfied and verify.output.sound }}'
-      - to: unresolved
+      - to: minutes
+        when: '{{ engine.output.agree and field.output.agree and operator.output.agree and extension.output.agree }}'
+      - to: minutes
         when: '{{ round_number.output | int >= 3 }}'
       - to: round_number
+  - name: halted
+    type: terminate
+    status: success
+    reason: Stopped by the person overseeing the table
+    output_template:
+      outcome: halted
+      minutes: '{{ minutes.output.text }}'
+      dissent: '{{ minutes.output.dissent }}'
+      unverified: ''
+      rounds: '{{ round_number.output }}'
+    input:
+      - minutes.output.text
+      - minutes.output.dissent
+      - round_number.output
 parallel:
-  - name: voices
+  - name: study
     agents:
-      - engine
-      - field
-      - operator
-      - extension
+      - engine_study
+      - field_study
+      - operator_study
+      - extension_study
     failure_mode: fail_fast
-    description: 4 voices, at once
+    description: 4 reading, at once
     routes:
-      - to: report
+      - to: round_number
