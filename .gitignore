@@ -12,3 +12,8 @@ checkpoints/
 .env
 .env.local
 .DS_Store
+
+# Run output: `needs-council` writes its report here on every run.
+needs-review.md
+# Personal editor/permission state, not project configuration.
+.claude/settings.local.json

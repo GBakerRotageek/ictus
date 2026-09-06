@@ -50,6 +50,85 @@ class NodeKind(StrEnum):
 NODE_KINDS = frozenset(NodeKind)
 
 
+class Backoff(StrEnum):
+    """How the wait between attempts grows."""
+
+    FIXED = "fixed"
+    EXPONENTIAL = "exponential"
+
+
+class RetryOn(StrEnum):
+    """A category of failure worth attempting again.
+
+    Deliberately narrow. A wrong answer is not a transient failure and retrying
+    it just buys the same answer twice; these are the two the engine can tell
+    apart from outside the model.
+    """
+
+    PROVIDER_ERROR = "provider_error"
+    TIMEOUT = "timeout"
+
+
+class ReasoningEffort(StrEnum):
+    """How much thinking a step is allowed before it answers.
+
+    The levels are a budget, not a dial on quality: on Anthropic each maps to a
+    number of thinking tokens the model may spend — roughly 2k, 8k, 16k, 32k and
+    60k — which is charged whether or not the step needed them. That is per
+    call, so a council of four voices over three rounds at ``MAX`` is a
+    different order of spend from the same council at ``LOW``.
+
+    Worth setting per node rather than per workflow for exactly that reason: the
+    step that synthesises is usually the one that needs it, and the steps either
+    side of it usually do not.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
+class ContextTier(StrEnum):
+    """Which context window a step asks for, on models that offer a choice."""
+
+    DEFAULT = "default"
+    LONG = "long_context"
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """What a step does about a transient failure.
+
+    Transient means the provider fell over or the call timed out — not that the
+    answer was wrong. Re-running a step that produced a bad answer produces
+    another bad answer at full price, which is what ``converge`` is for.
+
+    ``attempts`` counts the first try, so 1 means no retry at all and is the
+    engine's default.
+    """
+
+    attempts: int = 3
+    backoff: Backoff = Backoff.EXPONENTIAL
+    first_delay_seconds: float | None = None
+    on: tuple[RetryOn, ...] = ()
+    """Which failures to attempt again. Empty leaves the engine's own set."""
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.attempts <= 10:
+            raise CompositionError(
+                f"a retry policy allows 1 to 10 attempts, got {self.attempts}. One means "
+                "no retry; past ten you are waiting on something that is not coming back."
+            )
+        if self.first_delay_seconds is not None and self.first_delay_seconds <= 0:
+            raise CompositionError(
+                f"retry first_delay_seconds must be positive, got {self.first_delay_seconds}"
+            )
+        if len(set(self.on)) != len(self.on):
+            raise CompositionError(f"retry policy repeats a failure category: {list(self.on)}")
+
+
 def _has_text(prompt: str | Template) -> bool:
     """Whether a prompt says anything at all."""
     if isinstance(prompt, Template):
@@ -219,6 +298,40 @@ class Node(ABC):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Validator:
+    """Judge a step's output against a rubric, and revise it once if it fails.
+
+    A second model call, after the step, asking whether the output meets
+    ``criteria``. It is about *content*, which is what makes it different from
+    the two checks that already exist: ``declared_outputs`` fixes the shape, and
+    ``retry`` covers a call that fell over. This one catches an answer that is
+    well-formed, delivered successfully, and wrong.
+
+    It is not free. Budget two model calls per step where you set it, and three
+    where the revision fires.
+    """
+
+    criteria: str
+    model: str | None = None
+    """A cheaper model for the grading pass. Unset reuses the step's own."""
+
+    revise: bool = True
+    """Whether a failed check re-runs the step once with the feedback attached.
+
+    A bool rather than a count because the engine hard-caps it at one: past a
+    single feedback-driven attempt you are fighting the prompt, not noise. Off,
+    the check still runs and still reports — it just does not act.
+    """
+
+    def __post_init__(self) -> None:
+        if not self.criteria.strip():
+            raise CompositionError(
+                "a validator needs criteria; an empty rubric is a second billable call "
+                "that asks the model whether it is happy with itself"
+            )
+
+
 @dataclass(frozen=True, kw_only=True, eq=False)
 class AgentNode(Node):
     """An LLM step. Conductor ``type: agent`` (the default)."""
@@ -237,6 +350,113 @@ class AgentNode(Node):
     """
 
     declared_outputs: tuple[OutputPort, ...] = ()
+    max_turns: int | None = None
+    """How many tool-use rounds this step may take before the engine stops it.
+
+    Unset means the engine's default, which is fifty. A step that reaches it is
+    not throttled — it is killed: the provider raises rather than returning what
+    it had, and the error is *not* one a scope can turn into an outcome, so it
+    detonates the whole run. Raise it for a step whose job is to go and check
+    things, and expect to.
+    """
+
+    reasoning: ReasoningEffort | None = None
+    """How much thinking this step may do before answering.
+
+    Unset leaves the workflow's own default, which is usually none at all.
+
+    Not every provider takes it, and the one these pipelines use is currently
+    among those that do not: ``claude-agent-sdk`` declares
+    ``capabilities.reasoning_effort=None``, so ``conductor validate`` refuses a
+    workflow that sets this against it. That refusal is the whole feedback loop
+    — ictus does not repeat the check, because Conductor's message names the
+    provider and the levels it would accept, which is more than ictus knows.
+
+    The gap is one assignment upstream rather than a missing capability: the CLI
+    takes ``--effort``, the SDK exposes ``ClaudeAgentOptions.effort`` and maps it
+    straight to that flag, and Conductor's provider reads neither. When that
+    lands this field starts working with no change here.
+    """
+
+    timeout_seconds: float | None = None
+    """Wall-clock ceiling on this step, enforced by the engine from outside.
+
+    The engine cancels the call and raises; nothing partial comes back, and the
+    error is not one a scope can turn into an outcome. Distinct from
+    ``max_turns``, which counts tool-use rounds rather than time, and from
+    ``max_session_seconds``, which asks the *provider* to bound its own session
+    rather than being cut off from outside.
+    """
+
+    max_session_seconds: float | None = None
+    """How long the provider may keep this step's session open.
+
+    The provider's own budget, as against ``timeout_seconds``, which is the
+    engine cancelling from outside. Setting it at or above ``timeout_seconds``
+    makes it unreachable — the engine gets there first — which is refused rather
+    than left as a number that reads like a limit and is not.
+    """
+
+    validator: Validator | None = None
+    """A second model call that judges this step's answer before the run moves on.
+
+    Off by default because it costs a second call every time and a third when it
+    revises. Worth it on a step whose output later steps cannot sanity-check.
+    """
+
+    working_dir: str | None = None
+    """Where this step reads and writes, overriding the run's own directory.
+
+    A relative path is resolved against the *workflow file's* directory, which
+    for ictus is the pipeline's ``build/`` — emitted output that ``ictus emit``
+    prunes. That is never what an author means, so the conductor lint refuses
+    it: use an absolute path, ``~/...``, or a template resolved at run time.
+
+    On ``claude-agent-sdk`` this moves the step's stdio MCP servers with it.
+    They inherit the cwd from the session subprocess rather than being
+    configured individually, so there is no way to move one and not the other.
+    """
+
+    skills: tuple[str, ...] | None = None
+    """Which skills this step may load. Three states, like ``tools``.
+
+    ``None`` takes the workflow's default set, an empty tuple denies every
+    skill, and a non-empty one names exactly what to load. Entries are either a
+    registered built-in name or a path — Conductor treats an entry as a path
+    when it starts with ``~`` or ``.``, or contains a separator — and a relative
+    path resolves against ``build/``, so the lint refuses it the same way it
+    refuses a relative ``working_dir``.
+
+    Not every provider can load one, and on ``claude-agent-sdk`` a skill must
+    live under a plugin root: naming a bare ``.claude/skills/x`` raises at run
+    time rather than loading. Reach for ``plugins`` there instead.
+    """
+
+    plugins: tuple[str, ...] | None = None
+    """Whole plugins this step may use — their skills, subagents and MCP servers.
+
+    Same three states and the same path rule as ``skills``. A plugin is the unit
+    a person installs, and enabling one brings all three of the things it ships;
+    that is why it is the route to a skill on a provider that will not load a
+    loose one.
+    """
+
+    retry: RetryPolicy | None = None
+    """What to do when the *call* fails, as against when the answer is wrong.
+
+    Not every provider acts on it. Conductor's schema accepts it on any agent,
+    and ``claude-agent-sdk`` — the provider these pipelines use — never reads it,
+    so the conductor lint refuses the combination rather than letting a workflow
+    carry a policy that silently does nothing.
+    """
+
+    context_tier: ContextTier | None = None
+    """Which context window to ask for, where the model offers a choice.
+
+    Honoured by ``copilot`` and ``aca`` only. Refused on the rest by the
+    conductor lint, for the same reason as ``retry``.
+    """
+
     session_key: str | None = None
     dialog_trigger: str | None = None
     """When set, the node may pause after running and converse with the person.
@@ -252,6 +472,25 @@ class AgentNode(Node):
             raise CompositionError(
                 f"agent node {self.node_id!r} requires a non-empty prompt; "
                 "an agent with no prompt is a billable call that says nothing"
+            )
+        for field_name in ("timeout_seconds", "max_session_seconds"):
+            seconds = getattr(self, field_name)
+            if seconds is not None and seconds < 1:
+                raise CompositionError(
+                    f"agent node {self.node_id!r} sets {field_name}={seconds}; the engine "
+                    "requires at least one second, and a sub-second ceiling on a model "
+                    "call is a step that never gets to start"
+                )
+        if (
+            self.max_session_seconds is not None
+            and self.timeout_seconds is not None
+            and self.max_session_seconds >= self.timeout_seconds
+        ):
+            raise CompositionError(
+                f"agent node {self.node_id!r} sets max_session_seconds="
+                f"{self.max_session_seconds} at or above timeout_seconds="
+                f"{self.timeout_seconds}, so the engine cancels the call before the "
+                "provider's own budget can ever fire. Lower one, or drop the other."
             )
         super().__post_init__()
 

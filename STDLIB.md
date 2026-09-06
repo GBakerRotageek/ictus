@@ -20,7 +20,7 @@ failure that kills the caller.
 | --- | --- | --- | --- |
 | `briefing` | Summarise upstream output for a person to decide on | `subject`, `source`, `output_name` | `summary: string` |
 | `verdict` | Answer a yes/no question as a boolean a route can test | `question`, `source`, `output_name` | `verdict: boolean`, `rationale: string` |
-| `voice` | One standpoint's assessment — persona plus focus | `persona`, `focus`, `subject`, `intent`, `prior`, `direction`, `tools` | `satisfied: boolean`, `position: string`, `concerns: string` |
+| `voice` | One standpoint's assessment — persona plus focus | `persona`, `focus`, `subject`, `intent`, `prior`, `direction`, `tools`, `max_turns` | `satisfied: boolean`, `position: string`, `concerns: string`, `unchecked: string` |
 | `validate_mcp` | Prove an MCP server is reachable by calling a read-only tool | `server` | `available: boolean`, `detail: string` |
 | `remediate` | Work through a blockage with the person at the terminal | `problem`, `subject` | `resolved: boolean`, `summary: string` |
 
@@ -72,10 +72,15 @@ No provider call, still 1 iteration each.
 | Constructor | Use | Options | Outcomes | Carries |
 | --- | --- | --- | --- | --- |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
-| `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `rounds`, `interject`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `rounds` |
+| `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `verify`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
 
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
-reading the last. `Voice(node_id, persona, focus, tools=)`.
+reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
+
+`verify=` adds a step that tries to **refute** each round's report against the
+thing it describes, and gates agreement on the result. Without it the exit
+condition is "all voices satisfied", which measures convergence between them and
+nothing else — four models given the same wrong material agree sooner, not later.
 
 `judge=` picks who decides: `"model"` (an agent emits `approved` + `notes`),
 `"human"` (an approval gate), `"self"` (the attempt declares the verdict itself —
@@ -106,7 +111,7 @@ Built from references so they stay correct when what they were derived from chan
 A pipeline is a folder. Three files, three questions.
 
 ```
-pipelines/code-council/
+pipelines/needs-council/
   pipeline.py     what the graph is
   config.yaml     how it runs
   input.md        what to run it on
@@ -121,6 +126,8 @@ project has already shipped once.
 | --- | --- | --- |
 | `provider` | none — required | who answers the model calls: `claude-agent-sdk`, `claude`, `copilot`, `openai`, `hermes`, `aca` |
 | `default_model` | the provider's | the model every step uses unless it says otherwise |
+| `system_prompt` | ictus's baseline | what every model call is told about how to work; a path, literal text, or `none` |
+| `instructions` | none | project context prepended to every prompt; paths relative to the folder |
 | `start_gate` | `true` | hold at a confirmation gate before anything runs |
 | `budget_usd` / `budget_mode` | none / `audit` | |
 | `max_iterations` | derived from the graph | |
@@ -134,10 +141,10 @@ pipeline declares with `prose=True`.
 
 ```markdown
 ---
-target: HEAD~1..HEAD
-repo: ../../some-project     # optional; relative to this file
+scope: the stdlib and the CLI      # a declared input
+repo: ../../some-project           # optional; relative to this file
 ---
-Ship it Friday behind a flag. Prefer reversible over ideal.
+The body feeds the input declared with prose=True.
 ```
 
 The run works in the directory you invoke it from unless `repo:` or `--repo`
@@ -152,10 +159,11 @@ kill and resume but no start, so this is the only way to look before you leap.
 ictus init pipelines/my-thing               # scaffold the three files
 
 cd ~/work/my-service
-ictus run ~/pipelines/code-council          # input.md supplies the rest
-ictus run ~/pipelines/code-council -i target=HEAD~5..HEAD   # override one key
-ictus run ~/pipelines/code-council -f other-input.md
+ictus run ~/pipelines/needs-council          # input.md supplies the rest
+ictus run ~/pipelines/needs-council -i scope='the stdlib'   # override one key
+ictus run ~/pipelines/needs-council -f other-input.md
 
+ictus trace pipelines/my-thing # what each step of the last run actually did
 ictus lint pipelines/          # composition problems
 ictus emit pipelines/          # each folder's build/
 ictus validate pipelines/      # Conductor's own validator
@@ -164,12 +172,103 @@ ictus preflight pipelines/     # MCP servers, env vars, tokens
 
 Run both `lint` and `validate` — neither is sufficient alone.
 
+`trace` reads the engine's event log and reports, per step, how many tool calls
+it made that were not just emitting its answer. A step that assessed something
+it was only shown a summary of, without opening anything, shows up as a `looked`
+count of zero — which is the difference between a considered answer and a
+plausible one.
+
 ## Gotchas
 
 - **Never `fail` inside a stage or scope.** A failed terminal raises past every
   route its caller declared. Use a scope outcome.
 - **`voice` has no tools by default.** Four voices with tools is four agents
-  hunting the same file. Pass `tools=None` for the workflow default.
+  hunting the same file. Pass `tools=None` for the workflow default — and then
+  `max_turns` too, which `voice` refuses to be given tools without.
+- **A voice reports what it could not check in `unchecked`, not in `concerns`.**
+  A lookup that failed is not evidence about the thing being looked for, and a
+  blocked voice with nowhere to say so writes a confident recommendation
+  instead. The report collects them into `unverified`; `verify` starts there.
+- **A step is not a Claude Code session, and the gap is mostly context.** The
+  provider pins `setting_sources=[]`, so no `CLAUDE.md`, no settings, no ambient
+  skills. `ictus run` passes `--workspace-instructions` by default, which reads
+  the *target project's* `AGENTS.md` / `CLAUDE.md` / `.github/instructions/`
+  walking up to its git root. `workspace_instructions: false` in `config.yaml`
+  turns it off for a run that must behave identically against any checkout.
+  What still cannot be recovered is Claude Code's own system prompt — Conductor
+  types `system_prompt` as `str | None` and the SDK needs a mapping to name the
+  preset, so `ictus.baseline.AGENT_BASELINE` stands in for it.
+- **A field the provider ignores is refused, not emitted.** Conductor's schema
+  accepts these on any agent; only some providers read them. There is no
+  engine-side check, so a workflow setting one on the wrong provider loads,
+  validates, runs and does nothing. `lints.HONOURED_BY` is the table and the
+  conductor lint refuses the combination, naming who would honour it.
+
+  | Field | Honoured by |
+  | --- | --- |
+  | `retry` | aca, claude, copilot, hermes, openai |
+  | `reasoning` | aca, claude, copilot, hermes, openai |
+  | `context_tier` | aca, copilot |
+  | `working_dir` | claude-agent-sdk, claude, copilot, openai |
+  | `skills` | claude-agent-sdk, claude, copilot, hermes, openai |
+  | `plugins` | claude-agent-sdk, copilot |
+  | `output_mode` | copilot |
+
+  `timeout_seconds` and `validator` are engine-level and `max_session_seconds`
+  is declared by every provider, so all three hold anywhere — `HONOURED_EVERYWHERE`
+  records that so nobody re-derives it, and all three are wired.
+
+  `reasoning` and `sandbox` are restricted too, but **Conductor refuses them
+  itself** with a message naming the provider and the levels it would accept.
+  They live in `VALIDATED_UPSTREAM` and are deliberately *not* linted: repeating
+  an upstream check is how you end up maintaining a per-provider level table
+  that drifts. The entry criterion for `HONOURED_BY` is that the failure is
+  **silent**, not merely that the field is restricted.
+- **Three different ways for a step to be bounded, and they are not shades of
+  one thing.** `max_turns` counts tool-use rounds; `timeout_seconds` is the
+  engine cancelling from outside on wall-clock; `max_session_seconds` asks the
+  provider to bound its own session. Setting the last at or above the middle one
+  is refused, because the engine gets there first and the number could never
+  fire.
+- **`reasoning` is per node, and each level is a bill.** `low`/`medium`/`high`/
+  `xhigh`/`max` map to roughly 2k/8k/16k/32k/60k thinking tokens *per call*,
+  charged whether the step needed them. Per node rather than per workflow
+  because the step that synthesises usually needs it and the ones either side
+  usually do not. **`claude-agent-sdk` does not support it yet** — Conductor
+  refuses the workflow at `ictus validate`, naming the provider, so you find out
+  before spending anything. The gap is one assignment upstream: the CLI takes
+  `--effort`, the SDK exposes `ClaudeAgentOptions.effort` and maps it to that
+  flag, and Conductor's provider reads neither.
+- **`validator` catches a wrong answer, not a failed call.** `declared_outputs`
+  fixes the shape and `retry` covers a call that fell over; this is the one for
+  output that is well-formed, delivered, and wrong. Budget two model calls per
+  step where you set it and three where the revision fires. `revise=False` runs
+  the check and reports without acting.
+
+  **`claude-agent-sdk` — every demo pipeline's provider — drops `retry` and
+  `reasoning`,** the two most-requested items on the wiring backlog. It takes
+  `working_dir`, `skills` and `plugins`, which is why those three are the ones
+  `AgentNode` exposes.
+- **`skills` and `plugins` are tri-state, like `tools`.** Unset takes the
+  workflow's default set, `()` denies every one, and a non-empty tuple names
+  exactly what to load. An omitted key and `[]` are different instructions.
+- **A relative path on an *agent* resolves against `build/`.** `working_dir`,
+  and any path entry in `skills` or `plugins`, are resolved against the emitted
+  workflow's own directory — which ictus rewrites and prunes. The lint refuses
+  them; use an absolute path, a `~/` one, or a template resolved at run time.
+  A `shell` step is the exception and keeps its relative `working_dir`: that one
+  goes straight to the subprocess and resolves against the directory you
+  launched from.
+- **A skill on `claude-agent-sdk` must come from a plugin.** The provider raises
+  on a skill that lives under no plugin root, so a bare `.claude/skills/x` fails
+  at run time. Name it through `plugins` instead.
+- **`retry` is for a failed *call*, not a wrong answer.** Re-running a step that
+  answered badly buys the same answer twice at full price; that is what
+  `converge` is for.
+- **Declare the tools a step checks against.** `pipeline.require_executable(
+  Executable(name=, purpose=, probe=, setup_hint=))` makes `ictus preflight`
+  refuse the launch. A missing reference tool does not crash a step — the step
+  concludes the thing is absent, at full price.
 - **Set `constant`'s `output_type`** unless the value is free text — `"no"` comes
   back `False`, `"3"` an integer.
 - **`bindings` types are ictus's, not the engine's.** Each binding's runtime type
@@ -181,6 +280,15 @@ Run both `lint` and `validate` — neither is sufficient alone.
 - **`working_dir` resolves differently for scripts and agents.** A relative one
   on a model call is resolved against the workflow file; on a `shell` step it
   goes straight to the subprocess, so it resolves against the cwd you ran from.
+- **Running out of turns kills the run.** The engine allows 50 tool-use rounds
+  and then *raises* rather than returning what the step had — and that error is
+  not one a scope can turn into an outcome. Set `AgentNode(max_turns=...)` on any
+  step whose job is to go and look. `ictus trace` flags a step that hit it.
+- **An unset `system_prompt` is an *empty* one, not a default one.** Conductor
+  forwards `None` and the SDK sends `--system-prompt ""`, so ictus supplies a
+  baseline instead. Set `none` only if you mean a step with no discipline at all.
+- **A council without `verify=` can only measure consensus.** Its voices read
+  what you hand them; if that is a summary, they review the summary.
 - **`council` needs `rounds >= 2`.** A voice is satisfied when the report states
   its position; the first round has no report to accept.
 - **A gate's free-text field only exists on the branch that asked for one.** ictus

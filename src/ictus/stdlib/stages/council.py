@@ -30,7 +30,7 @@ from ictus.graph.node import AgentNode, ComputeNode, GateChoice, GateNode
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import at_least, every, ref_to, tpl
 from ictus.graph.scope import Scope, outcome_scope
-from ictus.stdlib.agents.voice import SATISFIED, voice
+from ictus.stdlib.agents.voice import SATISFIED, UNCHECKED, voice
 from ictus.stdlib.steps.counter import counter as counter_step
 
 if TYPE_CHECKING:
@@ -50,6 +50,7 @@ REPORT = "report"
 PANEL = "voices"
 INTERJECT = "interject"
 TALLY = "tallied"
+VERIFY = "verify"
 DIRECTION = "direction"
 
 STR, NUM = PortType.STRING, PortType.NUMBER
@@ -69,7 +70,21 @@ class Voice:
     focus: str
     description: str = ""
     tools: tuple[str, ...] | None = ()
-    """What this voice may call. Empty denies tools; ``None`` takes the default."""
+    """What this voice may call.
+
+    ``()`` denies tools; ``None`` gives it the engine's default, which on
+    ``claude-agent-sdk`` is a full Claude Code session — filesystem, bash, web,
+    up to fifty turns. Naming individual tools is refused at composition.
+    """
+
+    max_turns: int | None = None
+    """This voice's ceiling on tool-use rounds.
+
+    Only meaningful with ``tools=None``. Fifty is the engine's default and it
+    is a kill rather than a throttle, so a voice that has been told to go and
+    look needs its own number. The conductor lint refuses the combination of
+    tools and no ceiling.
+    """
 
 
 def council(
@@ -78,8 +93,11 @@ def council(
     voices: Sequence[Voice],
     subject: str = "What the council is assessing",
     charge: str = "What this assessment is for",
+    verify: str = "",
+    verify_turns: int = 200,
     rounds: int = 3,
     interject: bool = False,
+    remember: bool = True,
     synthesis: str = "",
     description: str = "",
 ) -> Scope:
@@ -89,6 +107,14 @@ def council(
     ``interject`` is on and a person stops it. All three carry the last report,
     what was still contested, and how many rounds it took, so a caller can act
     on a council that did not converge instead of only learning that it didn't.
+
+    ``verify_turns`` is the checker's ceiling, well above the engine's default
+    because it is the step most likely to reach it and reaching it fails the run.
+
+    ``remember`` keeps each voice's session across rounds, so round two argues
+    from what it worked out in round one rather than from a summary of it. It
+    needs a provider that can resume a session; the lint says so if yours
+    cannot.
 
     ``agreed`` means the voices converged on a *report* — not that they liked
     what they read. A council assessing something with a real defect in it
@@ -126,7 +152,13 @@ def council(
         carry={
             REPORT: OutputPort(REPORT, STR, "The last round's synthesis"),
             "dissent": OutputPort("dissent", STR, "What was still contested"),
+            "unverified": OutputPort("unverified", STR, "What the round could not check"),
             "rounds": OutputPort("rounds", NUM, "How many rounds it took"),
+            **(
+                {"corrections": OutputPort("corrections", STR, "What verification struck out")}
+                if verify
+                else {}
+            ),
         },
         description=description or f"Council of {len(voices)}: {subject}",
         loop_passes=rounds,
@@ -148,6 +180,7 @@ def council(
     # first round's voices are prompted. The compiler adds the first-pass guard.
     prior = ref_to(REPORT, "text", STR)
     steer = ref_to(INTERJECT, "notes", STR) if interject else None
+    checked = ref_to(VERIFY, "corrections", STR) if verify else None
 
     seats = [
         body.add(
@@ -157,16 +190,26 @@ def council(
                 focus=spec.focus,
                 description=spec.description,
                 tools=spec.tools,
+                max_turns=spec.max_turns,
+                # Its own key: voices run at once, and a session cannot be
+                # shared by concurrent steps.
+                remember=f"{stage_id}-{spec.node_id}" if remember else None,
                 subject=material.ref(),
                 charge=charge_in.ref(),
                 intent=intent.ref(),
                 prior=prior,
+                checked=checked,
                 direction=steer,
                 inputs=(
                     InputPort("subject", STR),
                     InputPort("charge", STR, optional=True),
                     InputPort("intent", STR, optional=True),
                     InputPort(REPORT, STR, "The last round", optional=True),
+                    *(
+                        (InputPort(VERIFY, STR, "What was struck out", optional=True),)
+                        if verify
+                        else ()
+                    ),
                     *(
                         (InputPort(DIRECTION, STR, "Human direction", optional=True),)
                         if interject
@@ -196,6 +239,7 @@ def council(
                     for port in (
                         InputPort(f"{seat.node_id}__position", STR),
                         InputPort(f"{seat.node_id}__concerns", STR),
+                        InputPort(f"{seat.node_id}__unchecked", STR),
                         InputPort(f"{seat.node_id}__ok", PortType.BOOLEAN),
                     )
                 ),
@@ -204,6 +248,7 @@ def council(
             declared_outputs=(
                 OutputPort("text", STR, "The round's report"),
                 OutputPort("dissent", STR, "What is still contested, and by whom"),
+                OutputPort("unverified", STR, "Claims resting on something nobody could check"),
             ),
         )
     )
@@ -217,6 +262,7 @@ def council(
     for seat in seats:
         body.feed(seat, "position", report, f"{seat.node_id}__position")
         body.feed(seat, "concerns", report, f"{seat.node_id}__concerns")
+        body.feed(seat, UNCHECKED, report, f"{seat.node_id}__unchecked")
         body.feed(seat, SATISFIED, report, f"{seat.node_id}__ok")
     body.feed(counter, "value", report, ROUND)
     # The edge that makes the next round a deliberation rather than a re-poll.
@@ -224,13 +270,80 @@ def council(
         body.feed(report, "text", seat, REPORT)
     body.route(panel, report)
 
+    checker: AgentNode | None = None
+    if verify:
+        checker = body.add(
+            AgentNode(
+                node_id=VERIFY,
+                description="Check the report against the thing itself",
+                inputs=(
+                    InputPort("text", STR),
+                    InputPort("dissent", STR),
+                    InputPort("unverified", STR),
+                ),
+                # The engine's default tools: a verifier that cannot go and look
+                # is another voice with an opinion, which is what it exists to
+                # correct.
+                tools=None,
+                # Checking a report against the thing it describes is the most
+                # tool-hungry step in the council by construction, and running
+                # out of turns is fatal rather than throttling: the provider
+                # raises, the scope cannot catch it, and the run dies with
+                # nothing to show. Observed at the default fifty.
+                max_turns=verify_turns,
+                session_key=f"{stage_id}-{VERIFY}" if remember else None,
+                prompt=tpl(
+                    verify.strip(),
+                    "\n\nYou are checking a report several people wrote after "
+                    "discussing something. Your job is to refute it, not to improve "
+                    "it. They may have read a summary rather than the thing itself, "
+                    "and agreement between them is no evidence at all — four people "
+                    "who read the same wrong page agree sooner, not later.\n\n"
+                    "Take every claim about how something behaves and check it "
+                    "against the thing itself. In `corrections`, list what does not "
+                    "survive: quote the claim, say what is actually the case, and "
+                    "cite where you looked. Say plainly when a claim is right — a "
+                    "correction list that strikes out everything is as useless as "
+                    "one that strikes out nothing.\n\n"
+                    "Set `sound` to true only if nothing material was wrong. A "
+                    "report whose central point rests on a claim you refuted is not "
+                    "sound, however well argued.\n\n"
+                    "Start with what they could not check. That list is where the "
+                    "unfounded claims are, and a lookup one voice failed at is "
+                    "usually one you can complete — a command run against the wrong "
+                    "path or the wrong interpreter fails in a way that looks "
+                    "identical to the thing being absent. Go and complete it. If "
+                    "several voices were stopped by the same obstacle, treat every "
+                    "conclusion downstream of it as unfounded until you have checked "
+                    "it yourself, however many of them agreed.\n\n"
+                    "--- the report ---\n",
+                    report.ref("text"),
+                    "\n\n--- what they still contest ---\n",
+                    report.ref("dissent"),
+                    "\n\n--- what they could not check ---\n",
+                    report.ref("unverified"),
+                ),
+                declared_outputs=(
+                    OutputPort("corrections", STR, "Claims that did not survive"),
+                    OutputPort("sound", PortType.BOOLEAN, "Whether it holds up"),
+                ),
+            )
+        )
+        body.connect(report, "text", checker, "text")
+        body.feed(report, "dissent", checker, "dissent")
+        body.feed(report, "unverified", checker, "unverified")
+        for seat in seats:
+            body.feed(checker, "corrections", seat, VERIFY)
+
     agreed = scope.exit(
         node_id="agreed",
         outcome=AGREED,
         reason="Every voice is satisfied",
         report=report.ref("text"),
         dissent=report.ref("dissent"),
+        unverified=report.ref("unverified"),
         rounds=counter.ref("value"),
+        **({"corrections": checker.ref("corrections")} if checker is not None else {}),
     )
     unresolved = scope.exit(
         node_id="unresolved",
@@ -238,13 +351,21 @@ def council(
         reason=f"Still contested after {rounds} round(s)",
         report=report.ref("text"),
         dissent=report.ref("dissent"),
+        unverified=report.ref("unverified"),
         rounds=counter.ref("value"),
+        **({"corrections": checker.ref("corrections")} if checker is not None else {}),
     )
 
-    settled = every(*(seat.ref(SATISFIED) for seat in seats))
+    # Agreement is not enough. Consensus measures how much four models converged,
+    # which is a fact about them; soundness measures whether the thing they
+    # converged on survives contact with what it describes.
+    verdicts = [seat.ref(SATISFIED) for seat in seats]
+    if checker is not None:
+        verdicts.append(checker.ref("sound"))
+    settled = every(*verdicts)
     spent = at_least(counter.ref("value"), rounds)
 
-    decides: Node = report
+    decides: Node = checker if checker is not None else report
     if interject:
         gate = body.add(
             GateNode(
@@ -254,37 +375,74 @@ def council(
                     InputPort("text", STR),
                     InputPort("dissent", STR),
                     InputPort(ROUND, NUM, "Which round"),
+                    *(
+                        (InputPort("corrections", STR), InputPort("sound", PortType.BOOLEAN))
+                        if checker is not None
+                        else ()
+                    ),
+                    *(InputPort(f"{seat.node_id}__ok", PortType.BOOLEAN) for seat in seats),
                 ),
                 prompt=tpl(
                     "Round ",
                     counter.ref("value"),
-                    " of the council.\n\n",
+                    f" of {rounds}.\n\n",
+                    # What carrying on will actually do. Without this the person
+                    # is asked to choose between three options whose outcomes
+                    # depend on state they cannot see.
+                    "**Where it stands**\n\n",
+                    *_standing(seats, checker),
+                    "\nChoosing to carry on hands it back to the council, which "
+                    "then finishes if every voice is satisfied and the report "
+                    f"survived checking, or runs another round — up to {rounds}.\n\n",
                     report.ref("text"),
                     "\n\n--- still contested ---\n",
                     report.ref("dissent"),
+                    *(
+                        (
+                            "\n\n--- what did not survive checking ---\n",
+                            checker.ref("corrections"),
+                        )
+                        if checker is not None
+                        else ()
+                    ),
                 ),
                 choices=(
-                    GateChoice("continue", "Let them carry on"),
+                    GateChoice("continue", "Hand it back to the council"),
                     GateChoice(
                         "steer",
-                        "Carry on — with direction",
+                        "Hand it back, with direction they must follow",
                         prompt_for="notes",
                         multiline=True,
                     ),
-                    GateChoice("stop", "Stop here and take this report"),
+                    GateChoice("stop", "Stop now and take this report as it is"),
                 ),
             )
         )
-        body.connect(report, "text", gate, "text")
+        # The gate sits after verification when there is one: a person deciding
+        # whether to carry on wants the corrections in front of them, and the
+        # report cannot have two unconditional routes out of it.
+        if checker is not None:
+            body.connect(checker, "corrections", gate, "corrections")
+            body.feed(report, "text", gate, "text")
+        else:
+            body.connect(report, "text", gate, "text")
         body.feed(report, "dissent", gate, "dissent")
         body.feed(counter, "value", gate, ROUND)
+        # Everything the standing block reads. A gate showing state it does not
+        # declare renders it empty, which is worse than not showing it.
+        for seat in seats:
+            body.feed(seat, SATISFIED, gate, f"{seat.node_id}__ok")
+        if checker is not None:
+            body.feed(checker, "sound", gate, "sound")
         halted = scope.exit(
             node_id="halted",
             outcome=HALTED,
             reason="Stopped by the person overseeing the council",
             report=report.ref("text"),
             dissent=report.ref("dissent"),
+            unverified=report.ref("unverified"),
             rounds=counter.ref("value"),
+            **({"corrections": checker.ref("corrections")} if checker is not None else {}),
         )
         # A gate's branches are the human's buttons, so it cannot test whether
         # the voices agreed. The tally is one zero-cost step later, which is
@@ -293,7 +451,7 @@ def council(
         decides = body.add(
             ComputeNode(
                 node_id=TALLY,
-                description="Carry on; check where the council stands",
+                description="Decide whether the council is finished",
                 value="continuing",
                 value_type=STR,
                 # Whatever a route condition reads has to be in scope where the
@@ -303,6 +461,7 @@ def council(
                     InputPort("choice", STR),
                     InputPort(ROUND, NUM, "Which round"),
                     *(InputPort(f"{seat.node_id}__ok", PortType.BOOLEAN) for seat in seats),
+                    *((InputPort("sound", PortType.BOOLEAN),) if checker is not None else ()),
                 ),
                 declared_outputs=(OutputPort("value", STR, "Marker"),),
             )
@@ -311,6 +470,8 @@ def council(
         body.feed(counter, "value", decides, ROUND)
         for seat in seats:
             body.feed(seat, SATISFIED, decides, f"{seat.node_id}__ok")
+        if checker is not None:
+            body.feed(checker, "sound", decides, "sound")
         body.branch(gate, {"continue": decides, "steer": decides, "stop": halted})
         for seat in seats:
             body.feed(gate, "notes", seat, DIRECTION)
@@ -319,6 +480,20 @@ def council(
     body.route(decides, unresolved, when=spent)
     body.route(decides, counter)
     return scope
+
+
+def _standing(seats: Sequence[AgentNode], checker: AgentNode | None) -> list[TemplatePart]:
+    """Each voice's verdict and the check's, so a choice is an informed one."""
+    out: list[TemplatePart] = []
+    for seat in seats:
+        out += [
+            f"- `{seat.node_id}` satisfied: ",
+            tpl(seat.ref(SATISFIED)),
+            "\n",
+        ]
+    if checker is not None:
+        out += ["- report survived checking: ", tpl(checker.ref("sound")), "\n"]
+    return out
 
 
 def _synthesis(extra: str, seats: Sequence[AgentNode]) -> list[TemplatePart]:
@@ -331,7 +506,18 @@ def _synthesis(extra: str, seats: Sequence[AgentNode]) -> list[TemplatePart]:
         "smoothed into consensus is a decision made by omission. Where a concern "
         "from one voice would be answered by another's suggestion, say so.\n\n"
         "Put anything still contested in `dissent`, naming the voices. Leave it "
-        "empty only when nothing is.\n",
+        "empty only when nothing is.\n\n"
+        "Each voice also reports what it could not check. Collect all of it into "
+        "`unverified`, naming the voice and what blocked it. This is the one part "
+        "of the report you must not tidy away: a finding that rests on a lookup "
+        "nobody managed to perform is not a finding, and it must be visible as "
+        "such rather than written up in the same voice as a checked one. Where a "
+        "voice put a claim in `concerns` that its own `unchecked` shows it could "
+        "not verify, say so in `unverified` rather than repeating the claim.\n\n"
+        "Voices agreeing is not evidence. Several voices blocked by the same "
+        "failed lookup will reach the same wrong conclusion independently and "
+        "look like consensus; if their `unchecked` entries name the same "
+        "obstacle, say that plainly — it is the most useful thing in the round.\n",
     ]
     if extra:
         parts.append(f"\n{extra.strip()}\n")
@@ -341,6 +527,8 @@ def _synthesis(extra: str, seats: Sequence[AgentNode]) -> list[TemplatePart]:
             seat.ref("position"),
             "\nconcerns:\n",
             seat.ref("concerns"),
+            "\ncould not check:\n",
+            seat.ref(UNCHECKED),
             "\n",
         ]
     return parts

@@ -88,7 +88,7 @@ def _question(pipeline: Pipeline, node: Node, question: Question) -> YamlDict:
     return out
 
 
-def kind_fields(pipeline: Pipeline, node: Node) -> YamlDict:
+def kind_fields(pipeline: Pipeline, node: Node, system_prompt: str | None) -> YamlDict:
     """Conductor's per-type keys for one node.
 
     The whole of ``AgentDef``'s spelling lives in this function. The graph
@@ -99,14 +99,62 @@ def kind_fields(pipeline: Pipeline, node: Node) -> YamlDict:
     match node:
         case AgentNode():
             fields: YamlDict = {"prompt": render(pipeline, node, node.prompt)}
-            if node.system_prompt is not None:
-                fields["system_prompt"] = node.system_prompt
+            # Falling back rather than omitting: an omitted system prompt is
+            # not a default one, it is an empty one. The SDK turns None into
+            # `--system-prompt ""`, so a step with nothing set runs with no
+            # working discipline at all.
+            baseline = node.system_prompt or system_prompt
+            if baseline is not None:
+                fields["system_prompt"] = baseline
             if node.model is not None:
                 fields["model"] = node.model
             if node.provider is not None:
                 fields["provider"] = node.provider
             if node.tools is not None:
                 fields["tools"] = list(node.tools)
+            if node.max_turns is not None:
+                fields["max_agent_iterations"] = node.max_turns
+            if node.reasoning is not None:
+                fields["reasoning"] = {"effort": node.reasoning.value}
+            if node.timeout_seconds is not None:
+                fields["timeout_seconds"] = node.timeout_seconds
+            if node.max_session_seconds is not None:
+                fields["max_session_seconds"] = node.max_session_seconds
+            if node.validator is not None:
+                # `max_retries` is emitted either way rather than left to the
+                # engine's default: it is the difference between two model calls
+                # and three, which is not a thing to leave implicit.
+                validator: YamlDict = {
+                    "criteria": node.validator.criteria,
+                    "max_retries": 1 if node.validator.revise else 0,
+                }
+                if node.validator.model is not None:
+                    validator["model"] = node.validator.model
+                fields["validator"] = validator
+            if node.working_dir is not None:
+                fields["working_dir"] = node.working_dir
+            # Emitted for an empty tuple as well: `[]` is "deny every skill",
+            # which is a different instruction from the omitted key's "take the
+            # workflow's default set". The same three states as `tools`.
+            if node.skills is not None:
+                fields["skills"] = list(node.skills)
+            if node.plugins is not None:
+                fields["plugins"] = list(node.plugins)
+            if node.retry is not None:
+                # Conductor's spelling, not ours: `attempts` counts the first
+                # try the same way `max_attempts` does, and an empty `on` leaves
+                # the key off so the engine keeps its own categories.
+                retry: YamlDict = {
+                    "max_attempts": node.retry.attempts,
+                    "backoff": node.retry.backoff.value,
+                }
+                if node.retry.first_delay_seconds is not None:
+                    retry["delay_seconds"] = node.retry.first_delay_seconds
+                if node.retry.on:
+                    retry["retry_on"] = [category.value for category in node.retry.on]
+                fields["retry"] = retry
+            if node.context_tier is not None:
+                fields["context_tier"] = node.context_tier.value
             if node.session_key is not None:
                 fields["session_key"] = node.session_key
             if node.dialog_trigger is not None:
@@ -180,12 +228,12 @@ def route_target(edge: Edge) -> str:
     return END_MARKER if target is None else target.node_id
 
 
-def agent_entry(pipeline: Pipeline, node: Node) -> YamlDict:
+def agent_entry(pipeline: Pipeline, node: Node, system_prompt: str | None = None) -> YamlDict:
     agent: YamlDict = {"name": node.node_id}
     if node.description:
         agent["description"] = node.description
     agent["type"] = CONDUCTOR_TYPE[node.kind]
-    agent.update(kind_fields(pipeline, node))
+    agent.update(kind_fields(pipeline, node, system_prompt))
 
     refs = input_refs(pipeline, node)
     if refs:

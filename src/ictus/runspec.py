@@ -2,7 +2,7 @@
 
 A pipeline is a folder, not a module::
 
-    code-council/
+    needs-council/
       pipeline.py     the composition
       input.md        what to run it on
       build/          emitted YAML, committed so a diff shows what changed
@@ -116,7 +116,7 @@ class PipelineFolder:
 
         A folder holding ``pipeline.py`` is one; anything else is a container of
         them. That makes ``ictus lint pipelines/`` and ``ictus lint
-        pipelines/code-council`` both mean the obvious thing.
+        pipelines/needs-council`` both mean the obvious thing.
         """
         root = path.expanduser().resolve()
         if not root.is_dir():

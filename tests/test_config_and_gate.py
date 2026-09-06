@@ -8,20 +8,25 @@ that is true of pipelines nobody remembered to add one to.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
 from ictus import END, AgentNode, InputPort, OutputPort, Pipeline, PortType, tpl
+from ictus.baseline import AGENT_BASELINE
 from ictus.config import MINIMAL, ConfigError, read_config
 from ictus.errors import CompositionError
 from ictus.gate import CANCELLED_ID, GATE_ID, add_start_gate
-from ictus.interfaces.conductor import conductor
+from ictus.graph.mapping import Item
+from ictus.interfaces.conductor import ConductorBackend, conductor
 from ictus.lint import lint_pipeline
+from ictus.stdlib import Voice, council
+from ictus.stdlib.terminals import succeed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from ictus.graph.values import YamlDict
 
@@ -194,3 +199,299 @@ def test_it_costs_one_iteration_and_no_provider_call() -> None:
     assert isinstance(before, dict) and isinstance(after, dict)
     # The gate and its terminal: two steps, neither of which calls a provider.
     assert after["max_iterations"] == before["max_iterations"] + 2  # type: ignore[operator]
+
+
+def _fan_out() -> Pipeline:
+    """Three nodes, one of which fans out over six items: eight step executions."""
+    p = Pipeline(pipeline_id="fan", provider="claude-agent-sdk")
+    brief = p.declare_input("brief", STR)
+    split = p.add(
+        AgentNode(
+            node_id="split",
+            inputs=(InputPort("brief", STR),),
+            prompt=tpl("Split ", brief.ref()),
+            declared_outputs=(OutputPort("pieces", PortType.ARRAY, element={"repo": STR}),),
+        )
+    )
+    piece = Item(name="piece", fields={"repo": STR})
+    work = p.add(
+        AgentNode(
+            node_id="work",
+            prompt=tpl("Do ", piece.ref("repo")),
+            declared_outputs=(OutputPort("summary", STR),),
+        )
+    )
+    fanout = p.map_over(
+        "workers", source=split.ref("pieces"), item=piece, body=work, expect_items=6
+    )
+    done = p.add(succeed(node_id="done", reason="done"))
+    p.set_entry(split)
+    p.connect_input(brief, split, "brief")
+    p.route(split, fanout)
+    p.route(fanout, done)
+    return p
+
+
+def _looping() -> Pipeline:
+    p = Pipeline(pipeline_id="loop", provider="claude-agent-sdk", loop_passes=3)
+    a = p.add(
+        AgentNode(
+            node_id="a",
+            inputs=(InputPort("in", STR, optional=True),),
+            prompt="work",
+            declared_outputs=(OutputPort("out", STR),),
+        )
+    )
+    b = p.add(
+        AgentNode(
+            node_id="b",
+            inputs=(InputPort("in", STR),),
+            prompt="check",
+            declared_outputs=(OutputPort("out", STR),),
+        )
+    )
+    p.set_entry(a)
+    p.connect(a, "out", b, "in")
+    p.connect(b, "out", a, "in")
+    return p
+
+
+def test_the_gate_prices_a_fan_out_by_what_it_spends() -> None:
+    """`len(nodes)` reads like a step count and is not one: it prices this at three."""
+    pipeline = _fan_out()
+    assert len(pipeline.nodes) == 3
+    prompt = _agent(add_start_gate(pipeline), GATE_ID)["prompt"]
+    assert isinstance(prompt, str)
+    assert "8 step(s)" in prompt
+
+
+def test_the_gate_says_what_a_loop_can_cost() -> None:
+    """One pass is what usually happens; the budget is what the person is approving."""
+    prompt = _agent(add_start_gate(_looping()), GATE_ID)["prompt"]
+    assert isinstance(prompt, str)
+    assert "2 step(s) on one pass, up to 6 with loops" in prompt
+
+
+@pytest.mark.parametrize("build", [_fan_out, _looping])
+def test_the_quoted_cost_and_the_compiled_limit_come_from_one_place(
+    build: Callable[[], Pipeline],
+) -> None:
+    """A gate quoting a number the emitted budget contradicts is worse than no number."""
+    pipeline = add_start_gate(build())
+    workflow = conductor.document(pipeline)["workflow"]
+    assert isinstance(workflow, dict)
+    limits = workflow["limits"]
+    assert isinstance(limits, dict)
+    assert limits["max_iterations"] == pipeline.budget_cost()
+
+
+class TestWorkspaceInstructions:
+    """Conductor runs agents with no settings sources — no CLAUDE.md, no skills.
+
+    So a step arrives knowing nothing about the project beyond its own prompt,
+    which is most of the gap between what a node produces and what the same
+    model produces in a session that has been reading the repo for an hour.
+    """
+
+    def test_instructions_reach_every_step(self, tmp_path: Path) -> None:
+        (tmp_path / "context.md").write_text("This project is a thing.\n")
+        settings = read_config(
+            _config(tmp_path, "provider: claude\ninstructions:\n  - ./context.md\n")
+        )
+        pipeline = _pipeline()
+        settings.apply(pipeline, where="config.yaml")
+        workflow = conductor.document(pipeline)["workflow"]
+        assert isinstance(workflow, dict)
+        assert workflow["instructions"] == ["This project is a thing.\n"]
+
+    def test_a_path_that_is_not_there_is_refused(self, tmp_path: Path) -> None:
+        """Silently prepending nothing to every prompt is not noticed until later."""
+        with pytest.raises(ConfigError, match="is not a file"):
+            read_config(_config(tmp_path, "provider: claude\ninstructions:\n  - ./missing.md\n"))
+
+    def test_literal_text_is_taken_as_written(self, tmp_path: Path) -> None:
+        settings = read_config(
+            _config(tmp_path, "provider: claude\ninstructions:\n  - Be terse.\n")
+        )
+        assert settings.instructions == ("Be terse.",)
+
+    def test_an_env_reference_in_instructions_is_refused(self, tmp_path: Path) -> None:
+        """Expanded at load: unset it refuses the workflow, set it leaks the value.
+
+        The value would be prepended to every prompt and sent to the provider.
+        """
+        (tmp_path / "c.md").write_text("Use ${GITHUB_TOKEN:-} for auth.\n")
+        settings = read_config(_config(tmp_path, "provider: claude\ninstructions:\n  - ./c.md\n"))
+        pipeline = _pipeline()
+        settings.apply(pipeline, where="config.yaml")
+        problems = lint_pipeline(pipeline, backend=conductor)
+        assert any("GITHUB_TOKEN" in p and "every prompt" in p for p in problems), problems
+
+
+class TestRemembering:
+    """A step that starts cold has read nothing, whatever it read last round."""
+
+    def test_council_voices_keep_their_own_session(self) -> None:
+        body = council(
+            stage_id="panel",
+            voices=(Voice("a", "p", "f"), Voice("b", "p", "f")),
+        ).body
+        keys = {
+            n.node_id: getattr(n, "session_key", None)
+            for n in body.nodes
+            if getattr(n, "session_key", None) is not None
+        }
+        assert keys == {"a": "panel-a", "b": "panel-b"}
+
+    def test_the_keys_differ_because_voices_run_at_once(self) -> None:
+        """A session cannot be shared by concurrent steps."""
+        body = council(
+            stage_id="panel",
+            voices=(Voice("a", "p", "f"), Voice("b", "p", "f")),
+        ).body
+        keys = [
+            getattr(n, "session_key", None) for n in body.nodes if getattr(n, "session_key", None)
+        ]
+        assert len(keys) == len(set(keys))
+
+    def test_remembering_can_be_turned_off(self) -> None:
+        body = council(
+            stage_id="panel",
+            voices=(Voice("a", "p", "f"), Voice("b", "p", "f")),
+            remember=False,
+        ).body
+        assert not any(getattr(n, "session_key", None) for n in body.nodes)
+
+    def test_a_provider_that_cannot_resume_is_caught_at_composition(self) -> None:
+        """Conductor refuses the workflow; better to hear it before emitting."""
+        scope = council(stage_id="panel", voices=(Voice("a", "p", "f"), Voice("b", "p", "f")))
+        scope.body.provider = "copilot"
+        problems = lint_pipeline(scope.body, backend=conductor)
+        assert any("cannot do" in p and "copilot" in p for p in problems), problems
+
+
+class TestSystemPrompt:
+    """An unset system prompt is an empty one, not a default one.
+
+    Conductor forwards `AgentDef.system_prompt` to the SDK, which turns `None`
+    into `--system-prompt ""`. A step then has the model and the tools and none
+    of the working discipline — which is why one had to be told, in its own
+    prompt, to check a claim before making it.
+    """
+
+    @staticmethod
+    def _emitted(pipeline: Pipeline) -> str:
+        agents = conductor.document(pipeline)["agents"]
+        assert isinstance(agents, list)
+        entry = next(a for a in agents if isinstance(a, dict) and a["name"] == "work")
+        return str(entry.get("system_prompt", ""))
+
+    def test_every_model_call_gets_one_by_default(self, tmp_path: Path) -> None:
+        settings = read_config(_config(tmp_path, MINIMAL))
+        pipeline = _pipeline()
+        settings.apply(pipeline, where="config.yaml")
+        assert "Check before you assert" in self._emitted(pipeline)
+
+    def test_it_reaches_a_nested_stage(self, tmp_path: Path) -> None:
+        """A stage is its own file; a baseline that stopped at the top is no baseline."""
+        settings = read_config(_config(tmp_path, MINIMAL))
+        scope = council(stage_id="panel", voices=(Voice("a", "p", "f"), Voice("b", "p", "f")))
+        parent = Pipeline(pipeline_id="host")
+        seat = scope.instantiate(parent, node_id="panel")
+        parent.set_entry(seat)
+        settings.apply(parent, where="config.yaml")
+        agents = conductor.document(scope.body)["agents"]
+        assert isinstance(agents, list)
+        voice_a = next(a for a in agents if isinstance(a, dict) and a["name"] == "a")
+        assert "Check before you assert" in str(voice_a["system_prompt"])
+
+    def test_a_step_can_override_it(self, tmp_path: Path) -> None:
+        settings = read_config(_config(tmp_path, MINIMAL))
+        pipeline = _pipeline()
+        work = next(n for n in pipeline.nodes if n.node_id == "work")
+        object.__setattr__(work, "system_prompt", "Be a pirate.")
+        settings.apply(pipeline, where="config.yaml")
+        assert self._emitted(pipeline) == "Be a pirate."
+
+    def test_it_can_be_switched_off_deliberately(self, tmp_path: Path) -> None:
+        settings = read_config(_config(tmp_path, "provider: claude\nsystem_prompt: none\n"))
+        pipeline = _pipeline()
+        settings.apply(pipeline, where="config.yaml")
+        assert self._emitted(pipeline) == ""
+
+    def test_a_file_replaces_it(self, tmp_path: Path) -> None:
+        (tmp_path / "house.md").write_text("House style: terse.\n")
+        settings = read_config(_config(tmp_path, "provider: claude\nsystem_prompt: ./house.md\n"))
+        pipeline = _pipeline()
+        settings.apply(pipeline, where="config.yaml")
+        assert self._emitted(pipeline) == "House style: terse.\n"
+
+
+class TestProjectInstructionDiscovery:
+    """A step must arrive knowing what the target project says about itself.
+
+    The provider pins ``setting_sources=[]``, so no CLAUDE.md, no settings and
+    no ambient skills reach a step — the single biggest difference between a
+    node's output and the same model in a session opened on that repository.
+    ``--workspace-instructions`` is the engine's own opt-in and the only route
+    to those files that ictus can take.
+    """
+
+    def test_it_is_on_unless_the_folder_says_otherwise(self, tmp_path: Path) -> None:
+        assert read_config(_config(tmp_path, "provider: claude\n")).workspace_instructions
+
+    def test_a_folder_can_turn_it_off(self, tmp_path: Path) -> None:
+        """A run that must behave identically against any checkout."""
+        settings = read_config(
+            _config(tmp_path, "provider: claude\nworkspace_instructions: false\n")
+        )
+        assert settings.workspace_instructions is False
+
+    def test_the_flag_reaches_the_engine(self) -> None:
+        backend = ConductorBackend()
+        with patch("subprocess.run") as ran:
+            ran.return_value.returncode = 0
+            backend.run(Path("w.yaml"), inputs={}, dashboard=False, workspace_instructions=True)
+        assert "--workspace-instructions" in ran.call_args[0][0]
+
+    def test_and_is_absent_when_off(self) -> None:
+        """Off must mean off: the flag has no negative form on the engine side."""
+        backend = ConductorBackend()
+        with patch("subprocess.run") as ran:
+            ran.return_value.returncode = 0
+            backend.run(Path("w.yaml"), inputs={}, dashboard=False, workspace_instructions=False)
+        assert "--workspace-instructions" not in ran.call_args[0][0]
+
+
+class TestBaselineDiscipline:
+    """The baseline stands in for a system prompt Conductor cannot ask for.
+
+    ``AgentDef.system_prompt`` is ``str | None`` and the SDK needs a mapping to
+    name the ``claude_code`` preset, so a step cannot be given Claude Code's own
+    prompt. Each rule below replaces one that would have carried, and each was
+    added after a real report got the corresponding thing wrong.
+    """
+
+    def test_a_two_case_claim_must_be_checked_in_both(self) -> None:
+        """A verify step struck a true finding by reading one case's docstring."""
+        assert "has to be checked in both" in AGENT_BASELINE
+
+    def test_missing_means_looked_for_first(self) -> None:
+        """`checkpoint` was reported unwired while ictus was emitting it."""
+        assert "look for where it would already be handled" in AGENT_BASELINE
+
+    def test_a_failed_tool_is_not_evidence_about_the_target(self) -> None:
+        """Four voices read one ModuleNotFoundError as four missing features."""
+        assert "tells you about this environment" in AGENT_BASELINE
+
+    def test_it_says_to_batch_lookups_rather_than_naming_absent_tools(self) -> None:
+        """`Grep` and `Glob` are not registered in an SDK session.
+
+        An earlier version of this told steps to prefer the dedicated search
+        tools. A live probe's ``init`` event lists what a session built with
+        Conductor's flags actually offers, and neither is in it — so the advice
+        that survives is about the ceiling, which is what a step runs out of.
+        """
+        assert "Send independent lookups together" in AGENT_BASELINE
+        assert "Grep" not in AGENT_BASELINE
+        assert "Glob" not in AGENT_BASELINE

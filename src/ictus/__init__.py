@@ -5,15 +5,21 @@ from __future__ import annotations
 from ictus.errors import CompositionError, EmitError, LintError, PortTypeError, UnknownPortError
 from ictus.graph.node import (
     AgentNode,
+    Backoff,
     ComputeNode,
+    ContextTier,
     GateChoice,
     GateNode,
     Node,
     Question,
     QuestionsNode,
+    ReasoningEffort,
+    RetryOn,
+    RetryPolicy,
     ScriptNode,
     SubGraphNode,
     TerminateNode,
+    Validator,
     WaitNode,
     slugify,
 )
@@ -31,18 +37,21 @@ from ictus.graph.ref import (
     ref_to,
     tpl,
 )
-from ictus.graph.requirements import EnvVar, McpServer, McpTransport
+from ictus.graph.requirements import EnvVar, Executable, McpServer, McpTransport
 from ictus.graph.scope import Scope, ScopeNode, outcome_scope
 from ictus.graph.stage import Stage
 
 __all__ = [
     "END",
     "AgentNode",
+    "Backoff",
     "CompositionError",
     "ComputeNode",
+    "ContextTier",
     "Edge",
     "EmitError",
     "EnvVar",
+    "Executable",
     "GateChoice",
     "GateNode",
     "InputPort",
@@ -57,7 +66,10 @@ __all__ = [
     "PortTypeError",
     "Question",
     "QuestionsNode",
+    "ReasoningEffort",
     "Ref",
+    "RetryOn",
+    "RetryPolicy",
     "Scope",
     "ScopeNode",
     "ScriptNode",
@@ -66,6 +78,7 @@ __all__ = [
     "Template",
     "TerminateNode",
     "UnknownPortError",
+    "Validator",
     "WaitNode",
     "WorkflowInput",
     "at_least",

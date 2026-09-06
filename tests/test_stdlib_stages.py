@@ -208,7 +208,9 @@ class TestConverge:
 
     def test_it_loads_in_conductor(self, validates: Callable[[Pipeline], None]) -> None:
         for judged in ("model", "human"):
-            parent = Pipeline(pipeline_id=f"c-{judged}")
+            # A provider that can resume a session: converge keeps each
+            # attempt's, so pass two revises rather than starting again.
+            parent = Pipeline(pipeline_id=f"c-{judged}", provider="claude-agent-sdk")
             brief = parent.declare_input("brief", STR)
             node = _converge(stage_id=f"loop-{judged}", judge=judged).instantiate(parent)
             parent.set_entry(node)

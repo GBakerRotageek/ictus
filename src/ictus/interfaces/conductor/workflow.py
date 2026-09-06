@@ -39,14 +39,11 @@ def max_iterations(pipeline: Pipeline) -> int:
     if pipeline.max_iterations is not None:
         return _within_ceiling(pipeline, pipeline.max_iterations)
     pipeline.require_loop_bound()
-    # A map body is one node in the graph and up to `max_items` executions in
-    # the engine: Conductor records the group's cost as the number of items it
-    # actually spawned.
-    fanout = sum(group.expect_items - 1 for group in pipeline.maps)
-    base = len(pipeline.nodes) + fanout
-    if not pipeline.has_cycle():
-        return _within_ceiling(pipeline, max(1, base))
-    return _within_ceiling(pipeline, max(1, base + pipeline.loop_cost(pipeline.loop_passes or 1)))
+    # Conductor charges a group's whole fan-out against this budget and records
+    # a map group's cost as the number of items it actually spawned, which is
+    # what `budget_cost` prices. Derived there rather than here so the start
+    # gate quotes the same number this compiles in.
+    return _within_ceiling(pipeline, pipeline.budget_cost())
 
 
 def _within_ceiling(pipeline: Pipeline, wanted: int) -> int:
@@ -82,12 +79,14 @@ class Inherited:
 
     provider: str | None = None
     default_model: str | None = None
+    system_prompt: str | None = None
 
     def under(self, parent: Pipeline) -> Inherited:
         """What a child of ``parent`` should inherit, parent's own choice first."""
         return Inherited(
             provider=parent.provider or self.provider,
             default_model=parent.default_model or self.default_model,
+            system_prompt=parent.system_prompt or self.system_prompt,
         )
 
 
@@ -99,6 +98,8 @@ def workflow_block(pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED)
     if pipeline.description:
         block["description"] = pipeline.description
     block["version"] = pipeline.version
+    if pipeline.instructions:
+        block["instructions"] = list(pipeline.instructions)
     block["entry_point"] = pipeline.entry().node_id
 
     runtime: YamlDict = {

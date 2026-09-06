@@ -34,6 +34,9 @@ from ictus.lint import lint_pipeline
 from ictus.stdlib import approval_gate, succeed
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ictus.graph.ref import Ref
     from ictus.graph.values import YamlDict
 
 STR, NUM, BOOL = PortType.STRING, PortType.NUMBER, PortType.BOOLEAN
@@ -408,3 +411,102 @@ class TestConditionsAreFalseNotFatal:
 
     def test_it_is_lint_clean(self) -> None:
         assert lint_pipeline(self._pipeline(), backend=conductor) == []
+
+
+class TestSettledStructures:
+    """A value Conductor reads back with ``json.loads`` has to be rendered as JSON.
+
+    ``| tojson`` is what makes that round trip lossless. A fallback used to opt
+    the reference out of it, so the branch that had a value emitted a Python
+    repr — single quotes, parse fails, and what survives is a string that looks
+    like data.
+    """
+
+    @staticmethod
+    def _pipeline(*, fallback: bool) -> Pipeline:
+        p = Pipeline(pipeline_id="carry")
+        gate = p.add(approval_gate(node_id="ask", prompt="Search?"))
+        search = p.add(
+            AgentNode(
+                node_id="search",
+                prompt="find things",
+                declared_outputs=(OutputPort("hits", PortType.ARRAY),),
+            )
+        )
+        hits = search.ref("hits")
+        done = p.add(
+            succeed(
+                node_id="done",
+                reason="done",
+                inputs=(InputPort("hits", PortType.ARRAY, optional=True),),
+                result={"hits": tpl(hits.or_else("[]") if fallback else hits)},
+            )
+        )
+        p.set_entry(gate)
+        p.branch(gate, {"approved": search, "rejected": done})
+        p.route(search, done)
+        p.feed(search, "hits", done, "hits")
+        return p
+
+    def _template(self, *, fallback: bool) -> YamlDict:
+        agents = conductor.document(self._pipeline(fallback=fallback))["agents"]
+        assert isinstance(agents, list)
+        done = next(a for a in agents if isinstance(a, dict) and a["name"] == "done")
+        template = done["output_template"]
+        assert isinstance(template, dict)
+        return template
+
+    def test_a_lone_structured_reference_round_trips(self) -> None:
+        assert self._template(fallback=False)["hits"] == (
+            "{% if search is defined %}{{ search.output.hits | tojson }}{% endif %}"
+        )
+
+    def test_a_fallback_does_not_opt_the_value_out_of_json(self) -> None:
+        """The guard, not `| default()`: the attribute chain raises before a filter runs."""
+        assert self._template(fallback=True)["hits"] == (
+            "{% if search is defined %}{{ search.output.hits | tojson }}{% else %}[]{% endif %}"
+        )
+
+    def test_it_is_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        pipeline = self._pipeline(fallback=True)
+        assert lint_pipeline(pipeline, backend=conductor) == []
+        validates(pipeline)
+
+
+class TestTerminalResults:
+    """``result`` typed the reference out: only a hand-written "{{ ... }}" fitted.
+
+    That is the one spelling no reference lint can see — ``settled_refs`` walks
+    ``Template``s — so the demos taught the form the README's opening claim
+    forbids, because it was the only one that type-checked.
+    """
+
+    @staticmethod
+    def _pipeline(value: Ref) -> Pipeline:
+        p = Pipeline(pipeline_id="t")
+        work = p.add(_producer("work"))
+        done = p.add(
+            succeed(
+                node_id="done",
+                reason="ok",
+                inputs=(InputPort("v", STR),),
+                result={"v": value},
+            )
+        )
+        p.set_entry(work)
+        p.route(work, done)
+        p.feed(work, "v", done, "v")
+        return p
+
+    def test_a_result_takes_a_reference(self) -> None:
+        p = self._pipeline(_producer("work").ref("v"))
+        agents = conductor.document(p)["agents"]
+        assert isinstance(agents, list)
+        done = next(a for a in agents if isinstance(a, dict) and a["name"] == "done")
+        template = done["output_template"]
+        assert isinstance(template, dict)
+        assert template["v"] == "{{ work.output.v }}"
+
+    def test_a_reference_in_a_result_is_checked_like_any_other(self) -> None:
+        p = self._pipeline(ref_to("ghost", "v", STR))
+        assert any("unknown node 'ghost'" in problem for problem in lint_pipeline(p))

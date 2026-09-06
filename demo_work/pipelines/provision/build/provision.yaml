@@ -80,7 +80,7 @@ agents:
 
       Reset a database, then gate going live on a human.
 
-      5 step(s), beginning with `check_connections`.
+      5 step(s) on one pass, up to 9 with loops, beginning with `check_connections`.
 
       ---
 

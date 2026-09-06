@@ -21,16 +21,16 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from ictus.baseline import AGENT_BASELINE, NO_BASELINE
 from ictus.errors import IctusError
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from ictus.graph.pipeline import Pipeline
 
 __all__ = ["CONFIG_FILE", "MINIMAL", "ConfigError", "PipelineConfig", "read_config"]
@@ -50,6 +50,9 @@ _KNOWN = frozenset(
         "budget_mode",
         "max_iterations",
         "dashboard",
+        "instructions",
+        "workspace_instructions",
+        "system_prompt",
     }
 )
 
@@ -73,13 +76,63 @@ class PipelineConfig:
     dashboard: bool = True
     """Whether ``ictus run`` serves the dashboard. A gated run needs one."""
 
+    system_prompt: str | None = AGENT_BASELINE
+    """What every model call is told about how to work, unless it sets its own.
+
+    Defaulted rather than omitted because omitting it does not mean "the
+    provider's default" — Conductor forwards ``None`` and the SDK turns that into
+    an *empty* system prompt. A step then has the model and the tools and none of
+    the discipline, which is how a council once agreed on a report whose claims
+    nobody had checked.
+
+    ``none`` in the file switches it off; a path or literal text replaces it."""
+
+    workspace_instructions: bool = True
+    """Whether the run picks up the target project's own instruction files.
+
+    A Claude Code session opened in a repository reads its ``CLAUDE.md`` before
+    it does anything. A Conductor step does not: the provider pins
+    ``setting_sources=[]``, so no ``CLAUDE.md``, no settings, no ambient skills
+    reach it. The engine's own opt-in for this is the ``--workspace-instructions``
+    flag, which walks up from the run's working directory to the git root and
+    prepends what it finds — ``AGENTS.md``, ``.github/copilot-instructions.md``,
+    ``CLAUDE.md``, ``.github/instructions/*.instructions.md``.
+
+    On by default, because the alternative is a step reasoning about a project
+    whose stated conventions it has never seen, and because the thing being
+    picked up is committed to the repository being worked on rather than
+    ambient to the machine. Set false for a run that must behave identically
+    against any checkout.
+
+    This is the *project's* instructions, not the operator's: a personal
+    ``~/.claude/CLAUDE.md`` is a user setting and stays out either way.
+    """
+
+    instructions: tuple[str, ...] = ()
+    """Text prepended to every step's prompt: what the project is, and how to
+    work on it.
+
+    Conductor runs its agents with no settings sources — no CLAUDE.md, no
+    ambient skills, no hooks — so a step arrives knowing nothing about the
+    project beyond its own prompt. That is most of the difference between a
+    step's output and what the same model produces in a session that has been
+    reading the repository for an hour. Paths are read relative to the pipeline
+    folder; anything that is not a readable path is used as literal text."""
+
     def apply(self, pipeline: Pipeline, *, where: str) -> None:
-        """Put this policy on ``pipeline``.
+        """Put this policy on ``pipeline`` and everything nested inside it.
+
+        Descendants too, because a stage is its own workflow file and a lint
+        reading it in isolation would otherwise see no provider and assume the
+        engine's default — which is how a check meant to catch "this provider
+        cannot do that" reported the wrong provider.
 
         A value set in both places and set *differently* is refused rather than
         silently resolved: two sources of truth that disagree is exactly the
         state where whichever one you read is the wrong one.
         """
+        for child in pipeline.children.values():
+            self.apply(child, where=where)
         for field, value in (
             ("provider", self.provider),
             ("default_model", self.default_model),
@@ -96,6 +149,10 @@ class PipelineConfig:
                 )
             setattr(pipeline, field, value)
         pipeline.budget_mode = self.budget_mode  # type: ignore[assignment]
+        if self.instructions and not pipeline.instructions:
+            pipeline.instructions = list(self.instructions)
+        if pipeline.system_prompt is None:
+            pipeline.system_prompt = self.system_prompt
 
 
 def read_config(path: Path) -> PipelineConfig:
@@ -142,7 +199,60 @@ def read_config(path: Path) -> PipelineConfig:
         budget_mode=mode,
         max_iterations=_optional_int(loaded, "max_iterations", where),
         dashboard=_flag(loaded, "dashboard", where, default=True),
+        instructions=_instructions(loaded, where, beside=path.parent),
+        workspace_instructions=_flag(loaded, "workspace_instructions", where, default=True),
+        system_prompt=_system_prompt(loaded, where, beside=path.parent),
     )
+
+
+def _system_prompt(data: dict[str, object], where: str, *, beside: Path) -> str | None:
+    """The baseline, a replacement for it, or nothing at all."""
+    raw = data.get("system_prompt")
+    if raw is None:
+        return AGENT_BASELINE
+    if not isinstance(raw, str):
+        raise ConfigError(f"{where}: system_prompt must be text, a path, or {NO_BASELINE!r}")
+    if raw.strip() == NO_BASELINE:
+        return None
+    if raw.endswith((".md", ".txt")) or raw.startswith(("./", "../", "~")):
+        target = Path(raw).expanduser() if raw.startswith("~") else (beside / raw).expanduser()
+        if not target.is_file():
+            raise ConfigError(f"{where}: system_prompt names {raw!r}, which is not a file")
+        return target.read_text(encoding="utf-8")
+    return raw
+
+
+def _instructions(data: dict[str, object], where: str, *, beside: Path) -> tuple[str, ...]:
+    """Read the instruction entries, resolving paths against the folder.
+
+    A path is read; anything else is taken literally. A path that looks like one
+    and is not there is an error rather than prose — silently prepending
+    ``./CONTRIBUTING.md`` to every prompt is the sort of thing nobody notices
+    until the output is subtly wrong.
+    """
+    raw = data.get("instructions")
+    if raw is None:
+        return ()
+    entries = [raw] if isinstance(raw, str) else raw
+    if not isinstance(entries, list):
+        raise ConfigError(f"{where}: instructions must be text or a list of text")
+    out: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise ConfigError(f"{where}: every instruction must be text, got {entry!r}")
+        looks_like_path = entry.endswith((".md", ".txt")) or entry.startswith(("./", "../", "~"))
+        if not looks_like_path:
+            out.append(entry)
+            continue
+        target = (
+            Path(entry).expanduser() if entry.startswith("~") else (beside / entry).expanduser()
+        )
+        if not target.is_file():
+            raise ConfigError(
+                f"{where}: instructions names {entry!r}, which is not a file ({target})"
+            )
+        out.append(target.read_text(encoding="utf-8"))
+    return tuple(out)
 
 
 def _flag(data: dict[str, object], key: str, where: str, *, default: bool) -> bool:

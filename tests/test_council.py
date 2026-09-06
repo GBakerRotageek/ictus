@@ -188,7 +188,7 @@ class TestCouncil:
         for name in ("agreed", "unresolved"):
             template = _agent(_council().body, name)["output_template"]
             assert isinstance(template, dict)
-            assert set(template) == {"outcome", "report", "dissent", "rounds"}
+            assert set(template) == {"outcome", "report", "dissent", "unverified", "rounds"}
 
     def test_the_synthesis_records_disagreement_rather_than_averaging_it(self) -> None:
         prompt = str(_agent(_council().body, "report")["prompt"])
@@ -332,10 +332,6 @@ class TestVoiceCost:
         )
         assert _agent(_council(voices=looks).body, "deps")["tools"] == ["read_file", "grep"]
 
-    def test_the_workflow_default_is_still_reachable(self) -> None:
-        free = (Voice(node_id="a", persona="p", focus="f", tools=None), SPEAKERS[0])
-        assert "tools" not in _agent(_council(voices=free).body, "a")
-
 
 class TestCharge:
     """One instruction every voice receives, settable per run."""
@@ -362,3 +358,149 @@ class TestCharge:
         assert "{% if workflow.input.charge %}" in prompt
         assert "{% if workflow.input.intent %}" in prompt
         assert "is defined" not in prompt.split("--- the material ---")[0]
+
+
+class TestVerification:
+    """Agreement measures convergence between voices. It is not evidence.
+
+    Four models given the same wrong material agree sooner, not later. A council
+    that ran on a project's own docs once produced a confident report in which a
+    third of the findings were already implemented — every voice agreed, and
+    every voice had read the same summary instead of the thing it described.
+    """
+
+    @staticmethod
+    def _checked() -> Scope:
+        return _council(verify="Check every claim against the source.")
+
+    def test_agreement_alone_does_not_end_it(self) -> None:
+        routes = _agent(self._checked().body, "verify")["routes"]
+        assert isinstance(routes, list)
+        agreed = routes[0]
+        assert isinstance(agreed, dict)
+        assert "verify.output.sound" in str(agreed["when"])
+        assert str(agreed["to"]) == "agreed"
+
+    def test_without_verification_agreement_is_the_only_test(self) -> None:
+        routes = _agent(_council().body, "report")["routes"]
+        assert isinstance(routes, list)
+        first = routes[0]
+        assert isinstance(first, dict)
+        assert "sound" not in str(first["when"])
+
+    def test_the_checker_can_go_and_look(self) -> None:
+        """A verifier that cannot read the source is another voice with an opinion."""
+        assert "tools" not in _agent(self._checked().body, "verify")
+
+    def test_it_is_told_to_refute_rather_than_improve(self) -> None:
+        prompt = str(_agent(self._checked().body, "verify")["prompt"])
+        assert "refute it, not to improve it" in prompt
+        assert "agreement between them is no evidence" in prompt
+
+    def test_corrections_reach_the_next_round(self) -> None:
+        """Otherwise the same refuted claim is argued again, with more confidence."""
+        deps = [(d.source.node_id, d.target.node_id) for d in self._checked().body.data_deps]
+        assert ("verify", "perf") in deps
+        prompt = str(_agent(self._checked().body, "perf")["prompt"])
+        assert "{% if verify is defined %}" in prompt
+        assert "did not survive being checked" in prompt
+
+    def test_what_was_struck_out_leaves_with_the_report(self) -> None:
+        template = _agent(self._checked().body, "agreed")["output_template"]
+        assert isinstance(template, dict)
+        assert set(template) == {
+            "outcome",
+            "report",
+            "dissent",
+            "unverified",
+            "rounds",
+            "corrections",
+        }
+
+    def test_voices_must_ground_their_claims(self) -> None:
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "A claim you have not checked is not a finding" in prompt
+
+    def test_the_checker_is_handed_what_nobody_could_verify(self) -> None:
+        """It is the shortest list of falsifiable claims in the round."""
+        body = self._checked().body
+        prompt = str(_agent(body, "verify")["prompt"])
+        assert "--- what they could not check ---" in prompt
+        assert "{{ report.output.unverified }}" in prompt
+        deps = [
+            (d.source.node_id, d.target.node_id, d.connection.target.name) for d in body.data_deps
+        ]
+        assert ("report", "verify", "unverified") in deps
+
+    def test_it_is_lint_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        parent = _host(self._checked())
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+class TestUnverifiedClaims:
+    """A lookup a voice could not perform must not leave as a finding.
+
+    The council that prompted this asserted four engine limitations that were
+    unwired fields; every voice had given up after one failed import, and the
+    output contract gave a blocked voice nowhere to say so except `concerns`,
+    which the report then read as a change request.
+    """
+
+    def test_a_voice_declares_somewhere_to_put_a_failed_lookup(self) -> None:
+        seat = _agent(_council().body, "perf")
+        assert isinstance(seat["output"], dict)
+        assert "unchecked" in seat["output"]
+
+    def test_a_voice_is_told_not_to_launder_it_into_concerns(self) -> None:
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "put it in `unchecked`" in prompt
+        assert "Do not route it into `concerns`" in prompt
+        assert "fact about this environment, not about" in prompt
+
+    def test_every_voice_reaches_the_report_with_it(self) -> None:
+        body = _council().body
+        deps = {(d.source.node_id, d.connection.target.name) for d in body.data_deps}
+        for spec in SPEAKERS:
+            assert (spec.node_id, f"{spec.node_id}__unchecked") in deps
+
+    def test_the_report_must_not_tidy_it_away(self) -> None:
+        report = _agent(_council().body, "report")
+        assert isinstance(report["output"], dict)
+        assert "unverified" in report["output"]
+        prompt = str(report["prompt"])
+        assert "must not tidy away" in prompt
+        assert "Voices agreeing is not evidence" in prompt
+
+    def test_it_leaves_with_every_outcome(self) -> None:
+        for name in ("agreed", "unresolved"):
+            template = _agent(_council().body, name)["output_template"]
+            assert isinstance(template, dict)
+            assert template["unverified"] == "{{ report.output.unverified }}"
+
+
+class TestVoiceTurnBudget:
+    """A voice with tools and the default ceiling dies rather than throttling."""
+
+    def test_a_voice_carries_its_own_ceiling_to_the_engine(self) -> None:
+        speakers = (
+            Voice(node_id="perf", persona="Paged once.", focus="io", tools=None, max_turns=250),
+            Voice(node_id="shape", persona="Maintains it.", focus="fit", tools=None, max_turns=90),
+        )
+        body = _council(voices=speakers).body
+        assert _agent(body, "perf")["max_agent_iterations"] == 250
+        assert _agent(body, "shape")["max_agent_iterations"] == 90
+
+    def test_a_voice_without_tools_needs_no_ceiling(self) -> None:
+        """It cannot spend turns it has no way to spend."""
+        assert "max_agent_iterations" not in _agent(_council().body, "perf")
+
+    def test_tools_without_a_ceiling_is_refused_at_composition(self) -> None:
+        """The failure it prevents costs a whole council to discover at run time."""
+        with pytest.raises(CompositionError, match="tools but no max_turns"):
+            _council(
+                voices=(
+                    Voice(node_id="perf", persona="Paged once.", focus="io", tools=None),
+                    Voice(node_id="shape", persona="Maintains it.", focus="fit"),
+                )
+            )

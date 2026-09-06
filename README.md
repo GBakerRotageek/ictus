@@ -265,7 +265,7 @@ time it mattered nobody read it either.
 
 A pipeline is a folder, not a module — three files, three questions:
 
-    pipelines/code-council/
+    pipelines/needs-council/
       pipeline.py            what the graph is       (composition)
       config.yaml            how it runs             (policy)
       input.md               what to run it on       (this run's values)
@@ -288,12 +288,12 @@ both tools. Frontmatter holds the short values; the body is the long one, and
 which input it feeds is declared once with `declare_input(..., prose=True)`.
 
     ---
-    target: HEAD~1..HEAD
-    repo: ../../some-project     # optional; relative to this file
+    scope: the stdlib and the CLI      # a declared input
+    repo: ../../some-project           # optional; relative to this file
     ---
-    Ship it Friday behind a flag. Prefer reversible over ideal.
+    The body feeds the input declared with prose=True.
 
-A key matching no declared input is refused rather than ignored: `targt:` doing
+A key matching no declared input is refused rather than ignored: `scpoe:` doing
 nothing quietly is how a run does the default thing and nobody notices until the
 output is wrong.
 
@@ -325,9 +325,9 @@ should not have to treat "a person looked at it and said no" as an error.
     make run WF=smoke-test     # run that folder, dashboard on
 
     cd ~/work/my-service
-    ictus run ~/pipelines/code-council            # input.md supplies the inputs
-    ictus run ~/pipelines/code-council -i target=HEAD~5..HEAD
-    ictus run ~/pipelines/code-council -f release-review.md
+    ictus run ~/pipelines/needs-council            # input.md supplies the inputs
+    ictus run ~/pipelines/needs-council -i scope='the stdlib and the CLI'
+    ictus run ~/pipelines/needs-council -f focused-review.md
 
     ictus emit pipelines/      # each folder's own build/
     ictus lint pipelines/      # composition rules only, writes nothing

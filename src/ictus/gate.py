@@ -59,7 +59,16 @@ def add_start_gate(pipeline: Pipeline) -> Pipeline:
     ]
     if pipeline.description:
         parts.append(f"{pipeline.description}\n\n")
-    parts.append(f"{pipeline.node_count()} step(s), beginning with `{entry.node_id}`.\n")
+    # Counted before the gate's own two nodes are added: the person is deciding
+    # whether to spend the work, and the gate is not part of it.
+    once, budget = pipeline.total_cost(), pipeline.budget_cost()
+    if budget > once:
+        parts.append(
+            f"{once} step(s) on one pass, up to {budget} with loops, "
+            f"beginning with `{entry.node_id}`.\n"
+        )
+    else:
+        parts.append(f"{once} step(s), beginning with `{entry.node_id}`.\n")
 
     declared = pipeline.workflow_inputs
     if declared:

@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError, LintError
 from ictus.graph.node import SubGraphNode
-from ictus.lint.rules import group_routing_problems, node_problems, stage_contract_problems
+from ictus.lint.rules import (
+    describe,
+    group_routing_problems,
+    node_problems,
+    placeholder_problems,
+    stage_contract_problems,
+)
 
 if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline, RouteEnd
@@ -53,10 +59,10 @@ def lint_pipeline(
     except CompositionError as exc:
         return [f"{where}: {exc}"]
 
-    problems: list[str] = []
+    problems: list[str] = placeholder_problems(pipeline, where)
     reachable = pipeline.reachable_from_entry()
     problems.extend(
-        f"{where}: agent {node.node_id!r} is unreachable from entry point "
+        f"{where}: {describe(node)} is unreachable from entry point "
         f"{entry.node_id!r} and will never run"
         for node in pipeline.nodes
         if node.node_id not in reachable

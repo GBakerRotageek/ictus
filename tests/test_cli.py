@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import itertools
+import os
+import subprocess
+import sys
+from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+from ictus import cli
 from ictus.cli import app
 from ictus.config import MINIMAL as MINIMAL_CONFIG
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from ictus.interfaces.conductor import ConductorBackend
 
 runner = CliRunner()
 
@@ -142,15 +146,12 @@ def test_run_says_what_the_input_file_is_missing(tmp_path: Path) -> None:
     assert "input.md" in result.output
 
 
-def test_init_scaffolds_a_folder_that_actually_works(tmp_path: Path) -> None:
-    """A scaffold that does not lint and emit is a trap, not a starting point."""
+def test_init_writes_the_files_a_folder_needs(tmp_path: Path) -> None:
     folder = tmp_path / "fresh"
     assert runner.invoke(app, ["init", str(folder)]).exit_code == 0
     assert (folder / "config.yaml").is_file()
     assert (folder / "input.md").is_file()
-    assert runner.invoke(app, ["lint", str(folder)]).exit_code == 0
-    assert runner.invoke(app, ["emit", str(folder)]).exit_code == 0
-    assert (folder / "build").is_dir()
+    assert (folder / "pipeline.py").is_file()
 
 
 def test_init_keeps_what_is_already_there(tmp_path: Path) -> None:
@@ -175,9 +176,38 @@ def test_a_folder_without_a_config_says_what_to_write(tmp_path: Path) -> None:
     src = tmp_path / "pipelines"
     folder = _write(src, "demo", MINIMAL.format(pid="demo"))
     (folder / "config.yaml").unlink()
-    result = runner.invoke(app, ["lint", str(folder)])
+    result = runner.invoke(app, ["emit", str(folder)])
     assert result.exit_code == 1
     assert "provider: claude-agent-sdk" in result.output
+
+
+def test_lint_checks_the_graph_even_with_no_config(tmp_path: Path) -> None:
+    """The one command whose job is finding graph problems reported only a file."""
+    src = tmp_path / "pipelines"
+    folder = _write(src, "broken", BROKEN)
+    (folder / "config.yaml").unlink()
+    result = runner.invoke(app, ["lint", str(folder)])
+    assert result.exit_code == 1
+    assert "never_wired" in result.output
+    assert "does not exist" in result.output
+
+
+def test_a_clean_graph_with_no_config_still_lints(tmp_path: Path) -> None:
+    src = tmp_path / "pipelines"
+    folder = _write(src, "demo", MINIMAL.format(pid="demo"))
+    (folder / "config.yaml").unlink()
+    result = runner.invoke(app, ["lint", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert "warning" in result.output
+
+
+def test_a_malformed_config_still_fails_the_lint(tmp_path: Path) -> None:
+    """Absent is a decision not yet made; malformed is an error to fix."""
+    src = tmp_path / "pipelines"
+    folder = _write(src, "demo", MINIMAL.format(pid="demo"), config="provider: []\n")
+    result = runner.invoke(app, ["lint", str(folder)])
+    assert result.exit_code == 1
+    assert "needs a `provider`" in result.output
 
 
 def test_the_start_gate_is_on_by_default(tmp_path: Path) -> None:
@@ -209,3 +239,196 @@ def test_a_misspelled_provider_is_caught_where_it_is_written(tmp_path: Path) -> 
     assert result.exit_code == 1
     assert "is not a provider" in result.output
     assert "claude-agent-sdk" in result.output
+
+
+LOADS_TWICE = """
+from pathlib import Path
+from ictus import AgentNode, END, OutputPort, Pipeline, PortType
+marker = Path(__file__).with_name("loads.txt")
+seen = len(marker.read_text()) if marker.exists() else 0
+marker.write_text("x" * (seen + 1))
+demo = Pipeline(pipeline_id="demo")
+node = demo.add(AgentNode(node_id="only" if seen == 0 else "reloaded", prompt="hello",
+                          declared_outputs=(OutputPort("v", PortType.STRING),)))
+demo.route(node, END)
+"""
+
+
+@pytest.fixture
+def launched(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Intercept the launch, so a CLI test never starts a real Conductor process.
+
+    Not a convenience: `conductor` is on PATH in this repo's environment, so
+    without this a test of the run path spends money.
+    """
+    calls: list[dict[str, object]] = []
+
+    def _fake(_self: ConductorBackend, path: Path, **kwargs: object) -> int:
+        calls.append({"path": path, **kwargs})
+        return 0
+
+    monkeypatch.setattr(ConductorBackend, "run", _fake)
+    return calls
+
+
+def test_run_lints_before_it_writes_or_launches(
+    tmp_path: Path, launched: list[dict[str, object]]
+) -> None:
+    """`run` consulted no lint, and `--reemit` is on: it compiled and launched anyway."""
+    folder = _write(tmp_path / "pipelines", "broken", BROKEN)
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight"])
+    assert result.exit_code == 1
+    assert "never_wired" in result.output
+    assert not (folder / "build").exists()
+    assert not launched
+
+
+def test_run_does_not_overwrite_an_artifact_it_cannot_check(
+    tmp_path: Path, launched: list[dict[str, object]]
+) -> None:
+    """build/ is committed; a run that cannot lint the source must not rewrite it."""
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    assert runner.invoke(app, ["emit", str(folder)]).exit_code == 0
+    committed = (folder / "build" / "demo.yaml").read_text()
+    (folder / "pipeline.py").write_text(BROKEN)
+
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight"])
+    assert result.exit_code == 1
+    assert (folder / "build" / "demo.yaml").read_text() == committed
+    assert not launched
+
+
+def test_emit_writes_the_graph_it_checked(tmp_path: Path) -> None:
+    """emit linted the pipelines it loaded, then wrote pipelines it loaded again."""
+    folder = _write(tmp_path / "pipelines", "demo", LOADS_TWICE)
+    assert runner.invoke(app, ["emit", str(folder)]).exit_code == 0
+    assert "reloaded" not in (folder / "build" / "demo.yaml").read_text()
+    assert (folder / "loads.txt").read_text() == "x"
+
+
+def test_emit_says_whether_the_committed_bytes_moved(tmp_path: Path) -> None:
+    """ "emitted" for an identical recompile hides the writes that are real changes."""
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    first = runner.invoke(app, ["emit", str(folder)])
+    assert first.exit_code == 0, first.output
+    assert "wrote" in first.output
+
+    second = runner.invoke(app, ["emit", str(folder)])
+    assert second.exit_code == 0, second.output
+    assert "same" in second.output
+    assert "updated" not in second.output
+
+
+def test_reemit_reports_what_it_changed_and_prunes(
+    tmp_path: Path, launched: list[dict[str, object]]
+) -> None:
+    """A silent reemit rewrote committed YAML and left YAML nothing claims beside it."""
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    assert runner.invoke(app, ["emit", str(folder)]).exit_code == 0
+    stale = folder / "build" / "renamed-last-week.yaml"
+    stale.write_text("workflow: {}\n")
+    (folder / "pipeline.py").write_text(MINIMAL.format(pid="demo").replace("hello", "goodbye"))
+
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight"])
+    assert result.exit_code == 0, result.output
+    assert "updated" in result.output
+    assert "renamed-last-week" in result.output
+    assert not stale.exists()
+    assert launched
+
+
+def test_a_quiet_reemit_means_the_artifact_already_matched(
+    tmp_path: Path, launched: list[dict[str, object]]
+) -> None:
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    assert runner.invoke(app, ["emit", str(folder)]).exit_code == 0
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight"])
+    assert result.exit_code == 0, result.output
+    assert "updated" not in result.output
+    assert "pruned" not in result.output
+    assert launched
+
+
+def test_background_without_a_dashboard_is_refused(
+    tmp_path: Path, launched: list[dict[str, object]]
+) -> None:
+    """`--web-bg` is what detaches, so --no-web -b served a port and said nothing."""
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    result = runner.invoke(app, ["run", str(folder), "-b", "--no-web", "--skip-preflight"])
+    assert result.exit_code == 1
+    assert "--background" in result.output
+    assert not launched
+
+
+def test_init_does_not_tell_you_to_run_the_placeholder(tmp_path: Path) -> None:
+    """Following the closing line launched a real, billable run on untouched scaffold."""
+    folder = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert "ictus lint" in result.output
+    assert "ictus run" not in result.output
+
+
+def test_the_untouched_scaffold_does_not_lint(tmp_path: Path) -> None:
+    folder = tmp_path / "fresh"
+    assert runner.invoke(app, ["init", str(folder)]).exit_code == 0
+    result = runner.invoke(app, ["lint", str(folder)])
+    assert result.exit_code == 1
+    assert "CHANGE-ME" in result.output
+
+
+def test_the_scaffold_works_once_the_decisions_are_made(tmp_path: Path) -> None:
+    """A scaffold that does not lint and emit after editing is a trap, not a start."""
+    folder = tmp_path / "fresh"
+    assert runner.invoke(app, ["init", str(folder)]).exit_code == 0
+    source = folder / "pipeline.py"
+    source.write_text(source.read_text().replace("CHANGE-ME", "my-pipeline"))
+    assert runner.invoke(app, ["lint", str(folder)]).exit_code == 0
+    assert runner.invoke(app, ["emit", str(folder)]).exit_code == 0
+    assert (folder / "build" / "my-pipeline.yaml").is_file()
+
+
+class TestEveryCommandIsReachable:
+    """Both entry points must offer the same commands.
+
+    `python -m ictus.cli` *executes* the module, so an `if __name__` guard
+    written above a command stops the module before that decorator runs and the
+    command does not exist. The console script imports the module instead and
+    registers everything, so the two disagree. `trace` sat below the guard for a
+    release: `ictus trace` worked, `python -m ictus.cli trace` did not, and the
+    documentation looked wrong rather than the code.
+
+    This has to run the module as `__main__` in a subprocess. Importing it —
+    which is what every other test here does — makes the guard false and every
+    decorator run, so an in-process check passes with the bug still present.
+    """
+
+    def _declared(self) -> set[str]:
+        source = Path(cli.__file__).read_text(encoding="utf-8").splitlines()
+        return {
+            line.split("def ", 1)[1].split("(", 1)[0]
+            for prev, line in itertools.pairwise(source)
+            if prev.strip() == "@app.command()" and line.startswith("def ")
+        }
+
+    def _as_main(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "ictus.cli", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "COLUMNS": "200"},
+        )
+
+    def test_running_as_main_offers_every_command(self) -> None:
+        listed = self._as_main("--help").stdout
+        missing = sorted(name for name in self._declared() if f" {name} " not in listed)
+        assert not missing, (
+            f"{missing} decorated with @app.command() but absent from "
+            "`python -m ictus.cli --help` — the `if __name__ == '__main__'` guard "
+            "must stay below every command in cli.py"
+        )
+
+    def test_trace_is_the_one_that_caught_it(self) -> None:
+        assert "trace" in self._declared()
+        assert self._as_main("trace", "--help").returncode == 0

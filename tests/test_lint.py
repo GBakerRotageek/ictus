@@ -10,8 +10,9 @@ from __future__ import annotations
 import pytest
 
 from ictus import END, AgentNode, InputPort, LintError, OutputPort, Pipeline, PortType, Stage
+from ictus.graph.node import ScriptNode
 from ictus.lint import check, lint_pipeline
-from ictus.stdlib import succeed
+from ictus.stdlib import approval_gate, succeed
 
 S, N = PortType.STRING, PortType.NUMBER
 
@@ -146,3 +147,41 @@ def test_check_raises_with_every_violation_listed() -> None:
         check(p)
     assert len(excinfo.value.violations) >= 1
     assert "required input 'missing'" in str(excinfo.value)
+
+
+def test_a_violation_names_the_kind_of_node_it_found() -> None:
+    """Every violation said "agent", so a script's unwired input read as an agent's."""
+    p = Pipeline(pipeline_id="t")
+    start = p.add(AgentNode(node_id="start", prompt="go", declared_outputs=(OutputPort("v", S),)))
+    script = p.add(
+        ScriptNode(node_id="build", command="make", inputs=(InputPort("never_wired", S),))
+    )
+    p.set_entry(start)
+    p.route(start, script)
+    p.route(script, END)
+    assert _matching(p, "script 'build' declares required input")
+    assert not _matching(p, "agent 'build'")
+
+
+def test_a_gate_that_dead_ends_is_called_a_gate() -> None:
+    p = Pipeline(pipeline_id="t")
+    gate = p.add(approval_gate(node_id="ask", prompt="go?"))
+    p.set_entry(gate)
+    assert _matching(p, "gate 'ask' has no outgoing route")
+
+
+def test_scaffold_placeholders_are_a_violation() -> None:
+    """`init` writes CHANGE-ME where a decision goes; running it spends money on one."""
+    p = Pipeline(pipeline_id="CHANGE-ME")
+    work = p.add(AgentNode(node_id="work", prompt="do it"))
+    p.set_entry(work)
+    p.route(work, END)
+    assert _matching(p, "pipeline_id is still 'CHANGE-ME'")
+
+
+def test_a_placeholder_left_in_a_prompt_is_a_violation() -> None:
+    p = Pipeline(pipeline_id="t")
+    work = p.add(AgentNode(node_id="work", prompt="Review CHANGE-ME and report"))
+    p.set_entry(work)
+    p.route(work, END)
+    assert _matching(p, "CHANGE-ME in its prompt")

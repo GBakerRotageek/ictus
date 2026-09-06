@@ -1,0 +1,225 @@
+workflow:
+  name: needs-council
+  description: Work out what a library can do, then ask four voices what it still needs
+  version: '1'
+  instructions:
+    - |
+      # What this review is
+
+      A review of a *change* and a review of a *codebase's needs* are different jobs.
+      A change arrives with an intent you can judge it against; a codebase does not.
+      So this council is not asked whether the code is good — it is asked what the
+      library still cannot do, and which of those gaps are worth closing.
+
+      The material is a repository. It does not fit in a prompt, and you have tools:
+      read what your own focus needs rather than forming a view from the summary you
+      were handed.
+
+      ## What the project itself says
+
+      You are running inside the repository under review, so its own account of
+      itself — `AGENTS.md` at the root, and anything else the workspace carries — is
+      already in front of you. Read it before deciding what is missing. It says where
+      the ground truth for the execution engine lives and how to reach it; that is the
+      difference between a finding and a guess.
+
+      Do not restate it back as a finding. "The project is a typed composition layer"
+      is not a gap.
+
+      ## Take as settled
+
+      - **Composition-time checking is the point.** A proposal that moves a failure
+        from run time to authoring time is aligned; one that merely relocates a
+        failure is not an improvement.
+      - **The engine boundary is deliberate.** ictus does not reimplement what the
+        executor does. "ictus should execute this itself" is out of scope.
+      - **Determinism over ambience.** A pipeline is committed and re-runnable. A
+        proposal that makes the same YAML behave differently on a different machine
+        needs to say why that is worth it.
+
+      ## Separate the two kinds of gap
+
+      A capability can be missing from **the library** or missing from **the engine**,
+      and they cost completely different amounts to close. Before calling something
+      missing, establish which one it is:
+
+      - present in the engine, absent from `src/ictus` — a wiring gap, cheap, and the
+        most useful thing this council can find;
+      - absent from both — a real feature request, and worth saying so explicitly;
+      - present in both — not a finding.
+
+      A claim you could not settle goes in `unchecked`, with what you tried. It is not
+      a lesser answer than a finding; it is the one thing the next round cannot
+      reconstruct for itself.
+  entry_point: confirm_start
+  runtime:
+    provider:
+      name: claude-agent-sdk
+    checkpoint:
+      every_agent: true
+  input:
+    scope:
+      type: string
+      required: false
+      description: Narrow the survey, e.g. 'the stdlib and the CLI'. Empty means everything.
+    charge:
+      type: string
+      required: false
+      description: Standing instruction every voice receives
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 7
+agents:
+  - name: survey
+    description: Work out what this library can do today
+    type: agent
+    prompt: |-
+      You are looking at a codebase in the current working directory. Work out what it can do today, for someone who is about to be asked what it still needs.
+
+      In `inventory`, write what exists: the concepts it models, what its standard library covers, what its command line offers, what it guarantees and refuses. Be concrete — name the constructs. Where you can see a gap plainly, say so, but do not editorialise; that is somebody else's job.
+
+      In `purpose`, state what the project is for and who it serves, taken from its own README and code rather than from what you would like it to be. The voices judge needs against this, so a purpose you invented sends the whole review somewhere useless.
+
+      Read the README, the package layout, the standard library and the CLI. You do not need to read every file.
+      {% if workflow.input.scope %}
+      Narrow it to this and say so if the narrowing hides something the reviewers would need: {{ workflow.input.scope }}{% endif %}
+    system_prompt: |-
+      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
+
+      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
+
+      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
+
+      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
+
+      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
+
+      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
+
+      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
+
+      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+    input:
+      - workflow.input.scope?
+    output:
+      inventory:
+        type: string
+        description: What the library can do today
+      purpose:
+        type: string
+        description: What it is for, from its own account
+    routes:
+      - to: council
+  - name: council
+    description: Four standpoints on what this library still needs
+    type: workflow
+    workflow: ./needs-review.yaml
+    input:
+      - workflow.input.charge?
+      - survey.output.inventory
+      - survey.output.purpose?
+    input_mapping:
+      charge: '{{ workflow.input.charge }}'
+      subject: '{{ survey.output.inventory }}'
+      intent: '{% if survey is defined %}{{ survey.output.purpose }}{% else %}{% endif %}'
+    routes:
+      - to: write_report
+        when: "{{ council.output.outcome == 'agreed' }}"
+      - to: write_report
+        when: "{{ council.output.outcome == 'unresolved' }}"
+      - to: write_report
+        when: "{{ council.output.outcome == 'halted' }}"
+  - name: write_report
+    description: Write the council's report into the repository
+    type: script
+    command: sh
+    args:
+      - -c
+      - mkdir -p "$(dirname "$1")" && cat > "$1" && printf '{"path":"%s"}' "$(printf %s "$1" | sed 's/\\/\\\\/g;s/"/\\"/g')"
+      - sh
+      - needs-review.md
+    stdin: |-
+      {{ council.output.report }}
+
+      ---
+
+      ## Still contested
+
+      {{ council.output.dissent }}
+
+      ## Did not survive checking
+
+      {{ council.output.corrections }}
+    input:
+      - council.output.report
+      - council.output.dissent
+      - council.output.corrections
+    output:
+      path:
+        type: string
+        description: The file that was written
+    routes:
+      - to: contested
+        when: "{{ council.output.outcome != 'agreed' }}"
+      - to: reported
+  - name: reported
+    type: terminate
+    status: success
+    reason: The council agreed on what this needs
+    output_template:
+      report: '{{ write_report.output.path }}'
+      rounds: '{{ council.output.rounds }}'
+    input:
+      - write_report.output.path
+      - council.output.rounds
+  - name: contested
+    type: terminate
+    status: success
+    reason: The council did not converge; a person should read the disagreement
+    output_template:
+      report: '{{ write_report.output.path }}'
+      dissent: '{{ council.output.dissent }}'
+    input:
+      - write_report.output.path
+      - council.output.dissent
+  - name: confirm_start
+    description: Confirm before anything runs
+    type: human_gate
+    prompt: |-
+      Start **needs-council**?
+
+      Work out what a library can do, then ask four voices what it still needs
+
+      5 step(s), beginning with `survey`.
+
+      ---
+      {% if workflow.input.scope %}
+      **scope**
+
+      ```
+      {{ workflow.input.scope }}
+      ```
+      {% endif %}{% if workflow.input.charge %}
+      **charge**
+
+      ```
+      {{ workflow.input.charge }}
+      ```
+      {% endif %}
+    input:
+      - workflow.input.scope?
+      - workflow.input.charge?
+    options:
+      - label: Start the run
+        value: start
+        route: survey
+      - label: Stop — do not run
+        value: cancel
+        route: not_started
+  - name: not_started
+    type: terminate
+    status: success
+    reason: Stopped at the start gate; nothing was run.
+    output_template:
+      started: 'false'

@@ -33,7 +33,7 @@ from ictus.graph.ref import Origin, Ref, Template, equals
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from ictus.graph.requirements import McpServer
+    from ictus.graph.requirements import Executable, McpServer
     from ictus.graph.values import YamlScalar
 
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
@@ -208,6 +208,8 @@ class Pipeline:
         budget_mode: BudgetMode = "audit",
         max_iterations: int | None = None,
         metadata: Mapping[str, str] | None = None,
+        instructions: Sequence[str] = (),
+        system_prompt: str | None = None,
     ) -> None:
         if not pipeline_id:
             raise CompositionError("pipeline_id cannot be empty")
@@ -228,6 +230,14 @@ class Pipeline:
         self.budget_mode: BudgetMode = budget_mode
         self.max_iterations = max_iterations
         self.metadata: dict[str, str] = dict(metadata or {})
+        # Prepended to every step's prompt. The engine runs its agents with no
+        # settings sources at all — no CLAUDE.md, no ambient skills, no hooks —
+        # so a step knows nothing about the project it is working on beyond what
+        # its prompt says. This is where that context goes back in.
+        self.instructions: list[str] = list(instructions)
+        # Applied to every model call that does not set its own. Left unset the
+        # engine sends an *empty* system prompt, not a default one.
+        self.system_prompt = system_prompt
 
         self._nodes: list[Node] = []
         self._by_id: dict[str, Node] = {}
@@ -240,6 +250,7 @@ class Pipeline:
         self._groups: dict[str, ParallelGroup] = {}
         self._maps: dict[str, MapGroup] = {}
         self._mcp: dict[str, McpServer] = {}
+        self._executables: dict[str, Executable] = {}
         self._entry: RouteEnd | None = None
 
     # -- construction ----------------------------------------------------
@@ -418,6 +429,39 @@ class Pipeline:
     def mcp_servers(self) -> tuple[McpServer, ...]:
         """Every MCP server this pipeline declares, in declaration order."""
         return tuple(self._mcp.values())
+
+    def require_executable(self, tool: Executable) -> Executable:
+        """Declare a command that must be reachable before this pipeline runs.
+
+        For a step whose job is to check something against a tool: if the tool
+        is not there, the step does not crash, it concludes. Refusing at the
+        launch is the difference between a free failure and a paid one.
+        """
+        existing = self._executables.get(tool.name)
+        if existing is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already requires an executable named "
+                f"{tool.name!r}; a command is addressed by its name and must be unique"
+            )
+        self._executables[tool.name] = tool
+        return tool
+
+    @property
+    def executables(self) -> tuple[Executable, ...]:
+        """Every command this pipeline declares, in declaration order."""
+        return tuple(self._executables.values())
+
+    def all_executables(self) -> tuple[Executable, ...]:
+        """This pipeline's commands and those of every stage it contains.
+
+        A stage runs in the same environment as its caller, so its requirement
+        is the caller's problem too — the same reasoning as ``all_mcp_servers``.
+        """
+        seen: dict[str, Executable] = dict(self._executables)
+        for child in self._children.values():
+            for tool in child.all_executables():
+                seen.setdefault(tool.name, tool)
+        return tuple(seen.values())
 
     def all_mcp_servers(self) -> tuple[McpServer, ...]:
         """This pipeline's servers and those of every stage it contains.
@@ -1030,9 +1074,36 @@ class Pipeline:
                 "explicit max_iterations) so the bound is a decision, not an accident."
             )
 
-    def node_count(self) -> int:
-        """How many steps this graph contains, for a backend pricing the run."""
-        return len(self._nodes)
+    def total_cost(self) -> int:
+        """Every step in this graph, run once.
+
+        Executions, not nodes: a parallel group costs one per member and a map
+        group up to one per item, because the engine charges a group's whole
+        fan-out against the same budget as a single step. ``len(nodes)`` is the
+        number that reads like a step count and is not one — it prices a
+        four-node fan-out over ten items at four.
+        """
+        grouped = {m.node_id for g in self._groups.values() for m in g.members}
+        grouped |= {m.body.node_id for m in self._maps.values()}
+        loose = sum(1 for n in self._nodes if n.node_id not in grouped)
+        collections: tuple[RouteEnd, ...] = (*self.groups, *self.maps)
+        return loose + sum(self.step_cost(g) for g in collections)
+
+    def budget_cost(self) -> int:
+        """Step executions this graph can reach, loops included.
+
+        What a run has to be allowed to spend, as opposed to what it usually
+        will. Derived here rather than in a backend so the number a person is
+        shown before starting and the number compiled into the workflow's own
+        limit come from one place and cannot drift apart.
+
+        Callers that need the bound to be a decision rather than a default
+        should call ``require_loop_bound`` first; this treats an unbounded loop
+        as a single pass.
+        """
+        if not self.has_cycle():
+            return max(1, self.total_cost())
+        return max(1, self.total_cost() + self.loop_cost(self.loop_passes or 1))
 
     def loop_cost(self, passes: int) -> int:
         """Extra step executions the graph's loops buy beyond one pass each.
@@ -1127,7 +1198,7 @@ class Pipeline:
             current, cost, seen = stack.pop()
             visits += 1
             if visits > self._PATH_BUDGET:
-                return self._total_cost(), frozenset(n.node_id for n in self._nodes)
+                return self.total_cost(), frozenset(n.node_id for n in self._nodes)
             if current is goal:
                 if cost > best:
                     best, span = cost, seen
@@ -1137,14 +1208,6 @@ class Pipeline:
                     continue
                 stack.append((nxt, cost + self.step_cost(nxt), seen | {nxt.node_id}))
         return (best or self.step_cost(goal)), span
-
-    def _total_cost(self) -> int:
-        """Every step in the graph, run once."""
-        grouped = {m.node_id for g in self._groups.values() for m in g.members}
-        grouped |= {m.body.node_id for m in self._maps.values()}
-        loose = sum(1 for n in self._nodes if n.node_id not in grouped)
-        collections: tuple[RouteEnd, ...] = (*self.groups, *self.maps)
-        return loose + sum(self.step_cost(g) for g in collections)
 
     def _route_successors(self, end: RouteEnd) -> Iterable[RouteEnd]:
         """What runs after ``end``, following routes only.

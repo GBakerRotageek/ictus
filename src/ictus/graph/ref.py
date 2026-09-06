@@ -34,6 +34,7 @@ __all__ = [
     "Ref",
     "Template",
     "TemplatePart",
+    "as_template",
     "at_least",
     "equals",
     "every",
@@ -223,6 +224,17 @@ def ref_to(node_id: str, port: str, port_type: PortType) -> Ref:
 def tpl(*parts: TemplatePart) -> Template:
     """Build a template from literal text and references."""
     return Template(tuple(parts))
+
+
+def as_template(value: str | Template | Ref) -> str | Template:
+    """A bare reference, wrapped so every reader downstream sees one shape.
+
+    Authors reach for ``node.ref("x")`` first, and it is the only spelling a
+    reference lint can see: a hand-written ``{{ ... }}`` is opaque text. So the
+    constructors accept a ``Ref`` and narrow here, rather than making the string
+    the only form that fits.
+    """
+    return tpl(value) if isinstance(value, Ref) else value
 
 
 def equals(ref: Ref, value: str) -> Template:
