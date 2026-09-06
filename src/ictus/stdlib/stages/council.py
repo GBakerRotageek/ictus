@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ictus.graph.node import Node
-    from ictus.graph.ref import TemplatePart
+    from ictus.graph.ref import Ref, TemplatePart
 
 __all__ = ["AGREED", "HALTED", "UNRESOLVED", "Voice", "council"]
 
@@ -51,6 +51,8 @@ PANEL = "voices"
 INTERJECT = "interject"
 TALLY = "tallied"
 VERIFY = "verify"
+CHECKS = "checks"
+CHECK_SUFFIX = "_check"
 DIRECTION = "direction"
 
 STR, NUM = PortType.STRING, PortType.NUMBER
@@ -94,6 +96,7 @@ def council(
     subject: str = "What the council is assessing",
     charge: str = "What this assessment is for",
     verify: str = "",
+    verify_each: str = "",
     verify_turns: int = 200,
     rounds: int = 3,
     interject: bool = False,
@@ -108,8 +111,26 @@ def council(
     what was still contested, and how many rounds it took, so a caller can act
     on a council that did not converge instead of only learning that it didn't.
 
-    ``verify_turns`` is the checker's ceiling, well above the engine's default
-    because it is the step most likely to reach it and reaching it fails the run.
+    ``verify_each`` puts a checker behind every voice, running at once, before
+    the round is written up. It is off by default because it doubles the model
+    calls in a round; it earns that where a voice's claims are numerous enough
+    that one checker reading the finished report has to triage.
+
+    That triage is the failure it exists to remove. A single checker facing a
+    report of thirty claims spends about one lookup on each, which buys the
+    docstring and not the code underneath it — observed on a live run, where the
+    group checker struck out a true finding after reading one of the two cases
+    it covered. A per-voice checker has the same budget for a quarter of the
+    material.
+
+    With ``verify_each`` on, a voice reads its *own* checker's corrections next
+    round rather than the group checker's. The group check is about the report
+    and stays that way; this one is about what a single voice claimed, which is
+    the thing that voice can actually act on.
+
+    ``verify_turns`` is the ceiling for every checker, group and per-voice, well
+    above the engine's default because they are the steps most likely to reach
+    it and reaching it fails the run.
 
     ``remember`` keeps each voice's session across rounds, so round two argues
     from what it worked out in round one rather than from a summary of it. It
@@ -180,7 +201,14 @@ def council(
     # first round's voices are prompted. The compiler adds the first-pass guard.
     prior = ref_to(REPORT, "text", STR)
     steer = ref_to(INTERJECT, "notes", STR) if interject else None
-    checked = ref_to(VERIFY, "corrections", STR) if verify else None
+
+    # Which corrections a voice reads next round. Its own checker's when there
+    # is one, because a voice can act on "this claim of yours did not survive"
+    # and can only nod at a correction aimed at the synthesis.
+    def _checked_for(node_id: str) -> Ref | None:
+        if verify_each:
+            return ref_to(f"{node_id}{CHECK_SUFFIX}", "corrections", STR)
+        return ref_to(VERIFY, "corrections", STR) if verify else None
 
     seats = [
         body.add(
@@ -198,7 +226,7 @@ def council(
                 charge=charge_in.ref(),
                 intent=intent.ref(),
                 prior=prior,
-                checked=checked,
+                checked=_checked_for(spec.node_id),
                 direction=steer,
                 inputs=(
                     InputPort("subject", STR),
@@ -207,7 +235,7 @@ def council(
                     InputPort(REPORT, STR, "The last round", optional=True),
                     *(
                         (InputPort(VERIFY, STR, "What was struck out", optional=True),)
-                        if verify
+                        if (verify or verify_each)
                         else ()
                     ),
                     *(
@@ -221,6 +249,68 @@ def council(
         for spec in voices
     ]
     panel = body.parallel(PANEL, seats, description=f"{len(seats)} voices, at once")
+
+    # One checker per voice, each facing a quarter of the material a single
+    # group checker would have to triage.
+    guards: list[AgentNode] = []
+    for seat in seats:
+        if not verify_each:
+            break
+        guards.append(
+            body.add(
+                AgentNode(
+                    node_id=f"{seat.node_id}{CHECK_SUFFIX}",
+                    description=f"Check what {seat.node_id!r} claimed",
+                    inputs=(
+                        InputPort("position", STR),
+                        InputPort("concerns", STR),
+                        InputPort(UNCHECKED, STR),
+                    ),
+                    # A checker that cannot go and look is another voice with an
+                    # opinion, which is the thing it exists to correct.
+                    tools=None,
+                    max_turns=verify_turns,
+                    session_key=(f"{stage_id}-{seat.node_id}{CHECK_SUFFIX}" if remember else None),
+                    prompt=tpl(
+                        verify_each.strip(),
+                        "\n\nOne voice on a panel has just assessed something. Check "
+                        "what it claimed, against the thing itself rather than against "
+                        "how well it argues. You are not assessing the material and you "
+                        "are not another voice: your entire job is to find which of "
+                        "these claims does not survive being looked up.\n\n"
+                        "Start with what it says it could not check. That list is where "
+                        "the unfounded claims are, and a lookup one voice failed at is "
+                        "usually one you can complete — a command run against the wrong "
+                        "path or the wrong interpreter fails in a way that looks "
+                        "identical to the thing being absent.\n\n"
+                        "In `corrections`, list what does not hold: quote the claim, say "
+                        "what is actually the case, and cite where you looked. Say "
+                        "plainly when a claim is right — a list that strikes out "
+                        "everything is as useless as one that strikes out nothing, and "
+                        "this voice reads yours before it speaks again.\n\n"
+                        "Set `sound` true only if nothing material was wrong.\n\n"
+                        "--- where it stands ---\n",
+                        seat.ref("position"),
+                        "\n\n--- what it would change ---\n",
+                        seat.ref("concerns"),
+                        "\n\n--- what it could not check ---\n",
+                        seat.ref(UNCHECKED),
+                    ),
+                    declared_outputs=(
+                        OutputPort("corrections", STR, "Claims that did not survive"),
+                        OutputPort("sound", PortType.BOOLEAN, "Whether this voice holds up"),
+                    ),
+                )
+            )
+        )
+        body.feed(seat, "position", guards[-1], "position")
+        body.feed(seat, "concerns", guards[-1], "concerns")
+        body.feed(seat, UNCHECKED, guards[-1], UNCHECKED)
+        # Back round the loop: next round this voice reads what its own checker
+        # struck out. `feed` rather than a declared port because a group
+        # member's output is addressed through its group, and only the edge
+        # knows that.
+        body.feed(guards[-1], "corrections", seat, VERIFY)
     for seat in seats:
         body.connect_input(material, seat, "subject")
         body.connect_input(charge_in, seat, "charge")
@@ -241,10 +331,11 @@ def council(
                         InputPort(f"{seat.node_id}__concerns", STR),
                         InputPort(f"{seat.node_id}__unchecked", STR),
                         InputPort(f"{seat.node_id}__ok", PortType.BOOLEAN),
+                        *((InputPort(f"{seat.node_id}__checked", STR),) if verify_each else ()),
                     )
                 ),
             ),
-            prompt=tpl(*_synthesis(synthesis, seats)),
+            prompt=tpl(*_synthesis(synthesis, seats, checked=bool(verify_each))),
             declared_outputs=(
                 OutputPort("text", STR, "The round's report"),
                 OutputPort("dissent", STR, "What is still contested, and by whom"),
@@ -264,11 +355,21 @@ def council(
         body.feed(seat, "concerns", report, f"{seat.node_id}__concerns")
         body.feed(seat, UNCHECKED, report, f"{seat.node_id}__unchecked")
         body.feed(seat, SATISFIED, report, f"{seat.node_id}__ok")
+    for guard in guards:
+        body.feed(guard, "corrections", report, f"{guard.node_id[: -len(CHECK_SUFFIX)]}__checked")
     body.feed(counter, "value", report, ROUND)
     # The edge that makes the next round a deliberation rather than a re-poll.
     for seat in seats:
         body.feed(report, "text", seat, REPORT)
-    body.route(panel, report)
+    if guards:
+        # A second group, not a chain: the checks are independent of one another
+        # exactly as the voices are, and running them in sequence would spend
+        # four steps' wall-clock to learn four unrelated things.
+        checks = body.parallel(CHECKS, guards, description=f"{len(guards)} checks, at once")
+        body.route(panel, checks)
+        body.route(checks, report)
+    else:
+        body.route(panel, report)
 
     checker: AgentNode | None = None
     if verify:
@@ -332,8 +433,13 @@ def council(
         body.connect(report, "text", checker, "text")
         body.feed(report, "dissent", checker, "dissent")
         body.feed(report, "unverified", checker, "unverified")
-        for seat in seats:
-            body.feed(checker, "corrections", seat, VERIFY)
+        if not guards:
+            # One source per port. With per-voice checkers on, each voice reads
+            # its own — the group check is about the report, and a voice can act
+            # on "this claim of yours did not hold" in a way it cannot act on a
+            # correction aimed at the synthesis.
+            for seat in seats:
+                body.feed(checker, "corrections", seat, VERIFY)
 
     agreed = scope.exit(
         node_id="agreed",
@@ -496,7 +602,9 @@ def _standing(seats: Sequence[AgentNode], checker: AgentNode | None) -> list[Tem
     return out
 
 
-def _synthesis(extra: str, seats: Sequence[AgentNode]) -> list[TemplatePart]:
+def _synthesis(
+    extra: str, seats: Sequence[AgentNode], *, checked: bool = False
+) -> list[TemplatePart]:
     """The report prompt: every voice's position, and what to do with them."""
     parts: list[TemplatePart] = [
         "Several voices have just assessed the same material, each watching for "
@@ -519,6 +627,14 @@ def _synthesis(extra: str, seats: Sequence[AgentNode]) -> list[TemplatePart]:
         "look like consensus; if their `unchecked` entries name the same "
         "obstacle, say that plainly — it is the most useful thing in the round.\n",
     ]
+    if checked:
+        parts.append(
+            "\nEach voice was checked on its own before you saw it. Where a claim did "
+            "not survive, it is struck out below its author: do not carry it into the "
+            "report, and do not quietly restate it in your own words. A voice whose "
+            "position rested on a struck claim has a weaker position than it thinks, "
+            "and saying so is the report's job.\n"
+        )
     if extra:
         parts.append(f"\n{extra.strip()}\n")
     for seat in seats:
@@ -531,4 +647,10 @@ def _synthesis(extra: str, seats: Sequence[AgentNode]) -> list[TemplatePart]:
             seat.ref(UNCHECKED),
             "\n",
         ]
+        if checked:
+            parts += [
+                "did not survive checking:\n",
+                ref_to(f"{seat.node_id}{CHECK_SUFFIX}", "corrections", STR),
+                "\n",
+            ]
     return parts

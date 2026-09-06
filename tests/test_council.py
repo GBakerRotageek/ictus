@@ -504,3 +504,87 @@ class TestVoiceTurnBudget:
                     Voice(node_id="shape", persona="Maintains it.", focus="fit"),
                 )
             )
+
+
+class TestPerVoiceChecking:
+    """`verify_each` puts a checker behind every voice, before the round is written.
+
+    The failure it removes is triage. One checker facing a report of thirty
+    claims spends about a lookup on each, which buys the docstring and not the
+    code under it — observed on a live run, where the group checker struck out a
+    true finding after reading one of the two cases it covered. Four checkers
+    running at once have the same budget for a quarter of the material each.
+    """
+
+    def _scope(self, **kwargs: object) -> Scope:
+        return _council(verify_each="Check what this voice claimed.", **kwargs)
+
+    def test_it_is_off_unless_asked_for(self) -> None:
+        """It doubles the model calls in a round, so it is never the default."""
+        names = {n.node_id for n in _council().body.nodes}
+        assert not [n for n in names if n.endswith("_check")]
+
+    def test_one_checker_per_voice(self) -> None:
+        names = {n.node_id for n in self._scope().body.nodes}
+        for spec in SPEAKERS:
+            assert f"{spec.node_id}_check" in names
+
+    def test_they_run_at_once_rather_than_in_sequence(self) -> None:
+        """Independent checks in a chain spend four steps to learn four things."""
+        body = self._scope().body
+        group = next(g for g in body.groups if g.node_id == "checks")
+        assert {m.node_id for m in group.members} == {f"{s.node_id}_check" for s in SPEAKERS}
+
+    def test_each_reads_only_its_own_voice(self) -> None:
+        deps = {
+            (d.source.node_id, d.target.node_id, d.connection.target.name)
+            for d in self._scope().body.data_deps
+        }
+        for spec in SPEAKERS:
+            guard = f"{spec.node_id}_check"
+            for port in ("position", "concerns", "unchecked"):
+                assert (spec.node_id, guard, port) in deps
+            others = [s.node_id for s in SPEAKERS if s.node_id != spec.node_id]
+            assert not [o for o in others if (o, guard, "position") in deps]
+
+    def test_what_they_strike_reaches_the_report(self) -> None:
+        deps = {(d.source.node_id, d.connection.target.name) for d in self._scope().body.data_deps}
+        for spec in SPEAKERS:
+            assert (f"{spec.node_id}_check", f"{spec.node_id}__checked") in deps
+
+    def test_a_voice_reads_its_own_checker_next_round(self) -> None:
+        """Not the panel's: a voice can act on a claim of its own being struck."""
+        prompt = str(_agent(self._scope().body, "perf")["prompt"])
+        assert "{{ checks.outputs.perf_check.corrections }}" in prompt
+        assert "shape_check" not in prompt
+
+    def test_the_group_check_stops_feeding_voices_when_each_has_its_own(self) -> None:
+        """One source per port, or the two corrections would collide on it."""
+        scope = self._scope(verify="Check the report.")
+        deps = [(d.source.node_id, d.target.node_id) for d in scope.body.data_deps]
+        assert ("verify", "perf") not in deps
+        assert ("perf_check", "perf") in deps
+
+    def test_the_group_check_still_feeds_voices_when_it_is_the_only_one(self) -> None:
+        """The existing shape has to keep working."""
+        deps = [
+            (d.source.node_id, d.target.node_id)
+            for d in _council(verify="Check the report.").body.data_deps
+        ]
+        assert ("verify", "perf") in deps
+
+    def test_the_report_is_told_not_to_carry_a_struck_claim(self) -> None:
+        prompt = str(_agent(self._scope().body, "report")["prompt"])
+        assert "did not survive checking" in prompt
+        assert "do not quietly restate it" in prompt
+
+    def test_a_checker_can_go_and_look(self) -> None:
+        """One that cannot is another voice with an opinion."""
+        emitted = _agent(self._scope().body, "perf_check")
+        assert "tools" not in emitted, "unset means the engine's full set"
+        assert emitted["max_agent_iterations"] == 200
+
+    def test_it_is_lint_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        parent = _host(self._scope(verify="Check the report."))
+        assert lint_pipeline(parent) == []
+        validates(parent)

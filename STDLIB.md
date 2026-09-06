@@ -72,10 +72,19 @@ No provider call, still 1 iteration each.
 | Constructor | Use | Options | Outcomes | Carries |
 | --- | --- | --- | --- | --- |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
-| `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `verify`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
+| `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
 
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
+
+`verify_each=` puts a checker behind every voice, all running at once, before
+the round is written up. Off by default — it doubles the model calls in a round.
+It earns that when one checker facing the finished report would have to triage:
+thirty claims and a fixed budget buys about a lookup each, which reaches the
+docstring and not the code under it. A per-voice checker has the same budget for
+a quarter of the material. With it on, a voice reads *its own* checker's
+corrections next round rather than the group's — a voice can act on "this claim
+of yours did not hold" and can only nod at one aimed at the synthesis.
 
 `verify=` adds a step that tries to **refute** each round's report against the
 thing it describes, and gates agreement on the result. Without it the exit
