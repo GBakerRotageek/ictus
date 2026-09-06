@@ -90,6 +90,14 @@ file plus a `type: workflow` agent in the parent. A **Scope** is a stage whose
 every exit is an outcome the caller routes on rather than an exception that
 kills it.
 
+Two scopes put several agents on one question and they are not interchangeable.
+`council` **polls**: its voices run at once, so none has heard the others when
+it speaks, and a synthesis step writes each round up for the next — breadth, and
+a round of lag nothing can remove from a parallel group. `roundtable` **talks**:
+everyone reads alone first, then speakers take turns, so the second has heard
+the first *this* round and the last has heard everyone. Order is part of its
+design, and the cost of arguing is wall-clock.
+
 ## The running contract
 
 A pipeline is a folder: `pipeline.py` (the graph), `config.yaml` (policy —
@@ -134,6 +142,11 @@ Conventions that are enforced rather than suggested:
   each cost a real run.
 - `.claude/skills/ictus-pipeline/SKILL.md` — authoring a new pipeline, and the
   environment limits that decide whether a node can reach anything.
+
+## Licence
+
+GPL-3.0-or-later, in `LICENSE`. Contributions are under the same terms; a change
+that adds a dependency needs one whose licence is compatible with it.
 
 ## What this is for
 

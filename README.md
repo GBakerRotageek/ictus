@@ -4,6 +4,9 @@ Typed composition, validation and linting for multi-stage agent pipelines.
 Pipelines are authored as Python, checked by mypy and by composition lints,
 emitted as Conductor YAML. Conductor executes.
 
+Free software under the **GNU General Public License v3 or later** — see
+[LICENSE](LICENSE). It comes with no warranty, to the extent permitted by law.
+
     src/ictus/               the library
       __init__.py            the one public surface
       errors.py              what ictus raises, and why
@@ -139,15 +142,30 @@ its options and what it produces.
 |---|---|---|
 | `gates/` | `human_gate`, `questions` | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
 | `agents/` | `agent` | `briefing`, `verdict`, `voice`, `validate_mcp`, `remediate` |
-| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `counter`, `wait`, `shell` |
+| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text` |
 | `terminals/` | `terminate` | `succeed`, `fail` |
-| `stages/` | `workflow` | `briefing_gate`, `resolve_unknowns`, `script_sequence`, `validate_mcps`, and the scopes `converge` and `council` |
+| `stages/` | `workflow` | `briefing_gate`, `resolve_unknowns`, `script_sequence`, `validate_mcps`, and the scopes `converge`, `council` and `roundtable` |
 
-Each stage is a whole sub-graph costing its caller one iteration. The last two are
-**scopes** — a stage whose every exit is an outcome the caller routes on, rather
-than a failure that raises past it. `converge` is a bounded try/judge loop;
-`council` runs several `voice` nodes at once and loops them over a synthesised
-report until they agree.
+Each stage is a whole sub-graph costing its caller one iteration. The last three
+are **scopes** — a stage whose every exit is an outcome the caller routes on,
+rather than a failure that raises past it.
+
+- `converge` is a bounded try/judge loop: produce, assess, revise, and exit
+  either way.
+- `council` **polls.** Several `voice` nodes assess at once and a synthesis step
+  writes each round up for the next. Its voices never hear each other directly —
+  they run concurrently — so they converge on a *record*, and the round-lag is
+  the best a parallel group can do.
+- `roundtable` **talks.** Everyone reads alone first, once, then `speaker` nodes
+  take turns: the second has heard the first *this* round, the last has heard
+  everyone, and the minutes are written once at the end rather than once a
+  round. No lag inside a round at all.
+
+Reach for `council` when the standpoints are independent and you want breadth,
+and for `roundtable` when you want them to argue. The cost of arguing is
+wall-clock — a round is the sum of its turns rather than the longest of them —
+and in a roundtable **order is part of the design**: whoever speaks last has
+heard everyone.
 
 ## Preflight
 
@@ -258,8 +276,13 @@ time it mattered nobody read it either.
   mean something at run time.
 - `runtime.provider` defaults to **copilot**. ictus always emits it, so the
   choice is visible in the diff rather than discovered on a failed run.
-- Checkpointing is failure-only by default. Any graph with a gate gets
-  `checkpoint.every_agent`, because the human may be hours away.
+- Checkpointing is failure-only by default, which covers the crash that raises
+  and none of the ones that do not — a hung provider, a killed process, a closed
+  laptop. ictus emits `checkpoint.every_agent` on every workflow so `conductor
+  resume` always has a point to go back to.
+- `limits.timeout_seconds` is unset, so nothing bounds elapsed time: a budget
+  bounds spend and `max_iterations` bounds step count, and a run can sit for
+  hours moving neither. `timeout_seconds` in `config.yaml` sets the ceiling.
 
 ## The running contract
 

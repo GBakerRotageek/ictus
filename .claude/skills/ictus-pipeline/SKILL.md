@@ -60,8 +60,13 @@ goes; `ictus lint` refuses to let that reach a billable run.
 ```yaml
 provider: claude-agent-sdk
 budget_usd: 5.0          # optional; budget_mode: enforce to stop at it
+timeout_seconds: 3600    # optional; the only thing that bounds elapsed time
 start_gate: true         # default — nothing launches without a person
 ```
+
+`ictus run --dry-run` prints the engine's execution plan and stops, so the shape
+of a run is checkable before it costs anything. `ictus run -l auto` writes the
+engine's full debug output to a temp file for the post-mortem.
 
 ## 3. Giving a node full power to reach the target project
 
@@ -293,8 +298,16 @@ Three tiers: a **Node** is one `agents:` entry; a **Stage** is its own YAML file
 plus a `type: workflow` agent in the parent; a **Scope** is a stage whose every
 exit is an outcome the caller routes on rather than an exception that kills it.
 
-Reach for `ictus.stdlib` before hand-rolling: `council`, `converge`,
-`briefing_gate`, `resolve_unknowns`, `validate_mcps`, `script_sequence`,
+**Several agents on one question: `council` polls, `roundtable` talks.** A
+council's voices run at once, so none has heard the others when it speaks and a
+synthesis step writes each round up — breadth, and a round of lag. A
+roundtable's speakers read alone first and then take turns, so the second has
+heard the first *this* round and they answer each other by name — argument, at
+the cost of wall-clock, and order matters because whoever speaks last has heard
+everyone. Both need `max_turns` on anyone given tools.
+
+Reach for `ictus.stdlib` before hand-rolling: `council`, `roundtable`,
+`converge`, `briefing_gate`, `resolve_unknowns`, `validate_mcps`, `script_sequence`,
 `approval_gate`, `choice_gate`, `ask_human`, `shell`, `save_text`, `constant`,
 `counter`, `wait`, `succeed`, `fail`.
 
