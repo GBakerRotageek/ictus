@@ -128,7 +128,9 @@ agents:
 
       You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+      In `notes`, write what you found, for yourself. Nobody else reads this.
+
+      In `opening`, state where you stand in a few sentences. This one everybody reads, and they read it before anybody has spoken — so it is the only view you will ever put down that nobody else has influenced. Commit to it. If you turn out to be wrong, being visibly wrong about something you actually thought is worth more to this table than having hedged.
 
       {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
@@ -164,6 +166,9 @@ agents:
       notes:
         type: string
         description: What this person found alone
+      opening:
+        type: string
+        description: Where they stood before anybody spoke
   - name: field_study
     description: What 'field' makes of it alone
     type: agent
@@ -184,7 +189,9 @@ agents:
 
       You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+      In `notes`, write what you found, for yourself. Nobody else reads this.
+
+      In `opening`, state where you stand in a few sentences. This one everybody reads, and they read it before anybody has spoken — so it is the only view you will ever put down that nobody else has influenced. Commit to it. If you turn out to be wrong, being visibly wrong about something you actually thought is worth more to this table than having hedged.
 
       {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
@@ -220,6 +227,9 @@ agents:
       notes:
         type: string
         description: What this person found alone
+      opening:
+        type: string
+        description: Where they stood before anybody spoke
   - name: operator_study
     description: What 'operator' makes of it alone
     type: agent
@@ -240,7 +250,9 @@ agents:
 
       You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+      In `notes`, write what you found, for yourself. Nobody else reads this.
+
+      In `opening`, state where you stand in a few sentences. This one everybody reads, and they read it before anybody has spoken — so it is the only view you will ever put down that nobody else has influenced. Commit to it. If you turn out to be wrong, being visibly wrong about something you actually thought is worth more to this table than having hedged.
 
       {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
@@ -276,6 +288,9 @@ agents:
       notes:
         type: string
         description: What this person found alone
+      opening:
+        type: string
+        description: Where they stood before anybody spoke
   - name: extension_study
     description: What 'extension' makes of it alone
     type: agent
@@ -296,7 +311,9 @@ agents:
 
       You are about to sit down with several other people and work this out together, and you are the only one who will have read it from your angle. Form your own view first — the discussion is worth having only if the people at it disagree for reasons they arrived at independently.
 
-      In `notes`, write what you found and where you stand, for yourself. Nobody else reads this.
+      In `notes`, write what you found, for yourself. Nobody else reads this.
+
+      In `opening`, state where you stand in a few sentences. This one everybody reads, and they read it before anybody has spoken — so it is the only view you will ever put down that nobody else has influenced. Commit to it. If you turn out to be wrong, being visibly wrong about something you actually thought is worth more to this table than having hedged.
 
       {% if workflow.input.charge %}--- what this is for ---
       {{ workflow.input.charge }}
@@ -332,6 +349,9 @@ agents:
       notes:
         type: string
         description: What this person found alone
+      opening:
+        type: string
+        description: Where they stood before anybody spoke
   - name: round_number
     description: Which round this is
     type: set
@@ -367,6 +387,22 @@ agents:
 
       {% endif %}--- what you made of it on your own ---
       {{ study.outputs.engine_study.notes }}
+
+      --- what each person came in with, before anybody spoke ---
+
+      **engine** opened with:
+      {{ study.outputs.engine_study.opening }}
+
+      **field** opened with:
+      {{ study.outputs.field_study.opening }}
+
+      **operator** opened with:
+      {{ study.outputs.operator_study.opening }}
+
+      **extension** opened with:
+      {{ study.outputs.extension_study.opening }}
+
+      These were formed independently — nobody had heard anybody. Where the conversation has drifted away from one of them, that is worth a sentence: either somebody made an argument that moved it, and you can say whose, or it drifted because the first person to speak framed it and nobody went back. The second happens quietly and is worth catching.
 
       --- what has been said ---
       {% if field is defined %}
@@ -410,6 +446,10 @@ agents:
       - workflow.input.intent?
       - round_number.output
       - study.outputs.engine_study.notes
+      - study.outputs.engine_study.opening?
+      - study.outputs.field_study.opening?
+      - study.outputs.operator_study.opening?
+      - study.outputs.extension_study.opening?
       - field.output.remark?
       - operator.output.remark?
       - extension.output.remark?
@@ -449,6 +489,22 @@ agents:
 
       {% endif %}--- what you made of it on your own ---
       {{ study.outputs.field_study.notes }}
+
+      --- what each person came in with, before anybody spoke ---
+
+      **engine** opened with:
+      {{ study.outputs.engine_study.opening }}
+
+      **field** opened with:
+      {{ study.outputs.field_study.opening }}
+
+      **operator** opened with:
+      {{ study.outputs.operator_study.opening }}
+
+      **extension** opened with:
+      {{ study.outputs.extension_study.opening }}
+
+      These were formed independently — nobody had heard anybody. Where the conversation has drifted away from one of them, that is worth a sentence: either somebody made an argument that moved it, and you can say whose, or it drifted because the first person to speak framed it and nobody went back. The second happens quietly and is worth catching.
 
       --- what has been said ---
 
@@ -492,6 +548,10 @@ agents:
       - workflow.input.intent?
       - round_number.output
       - study.outputs.field_study.notes
+      - study.outputs.engine_study.opening?
+      - study.outputs.field_study.opening?
+      - study.outputs.operator_study.opening?
+      - study.outputs.extension_study.opening?
       - engine.output.remark?
       - operator.output.remark?
       - extension.output.remark?
@@ -531,6 +591,22 @@ agents:
 
       {% endif %}--- what you made of it on your own ---
       {{ study.outputs.operator_study.notes }}
+
+      --- what each person came in with, before anybody spoke ---
+
+      **engine** opened with:
+      {{ study.outputs.engine_study.opening }}
+
+      **field** opened with:
+      {{ study.outputs.field_study.opening }}
+
+      **operator** opened with:
+      {{ study.outputs.operator_study.opening }}
+
+      **extension** opened with:
+      {{ study.outputs.extension_study.opening }}
+
+      These were formed independently — nobody had heard anybody. Where the conversation has drifted away from one of them, that is worth a sentence: either somebody made an argument that moved it, and you can say whose, or it drifted because the first person to speak framed it and nobody went back. The second happens quietly and is worth catching.
 
       --- what has been said ---
 
@@ -574,6 +650,10 @@ agents:
       - workflow.input.intent?
       - round_number.output
       - study.outputs.operator_study.notes
+      - study.outputs.engine_study.opening?
+      - study.outputs.field_study.opening?
+      - study.outputs.operator_study.opening?
+      - study.outputs.extension_study.opening?
       - engine.output.remark?
       - field.output.remark?
       - extension.output.remark?
@@ -613,6 +693,22 @@ agents:
 
       {% endif %}--- what you made of it on your own ---
       {{ study.outputs.extension_study.notes }}
+
+      --- what each person came in with, before anybody spoke ---
+
+      **engine** opened with:
+      {{ study.outputs.engine_study.opening }}
+
+      **field** opened with:
+      {{ study.outputs.field_study.opening }}
+
+      **operator** opened with:
+      {{ study.outputs.operator_study.opening }}
+
+      **extension** opened with:
+      {{ study.outputs.extension_study.opening }}
+
+      These were formed independently — nobody had heard anybody. Where the conversation has drifted away from one of them, that is worth a sentence: either somebody made an argument that moved it, and you can say whose, or it drifted because the first person to speak framed it and nobody went back. The second happens quietly and is worth catching.
 
       --- what has been said ---
 
@@ -656,6 +752,10 @@ agents:
       - workflow.input.intent?
       - round_number.output
       - study.outputs.extension_study.notes
+      - study.outputs.engine_study.opening?
+      - study.outputs.field_study.opening?
+      - study.outputs.operator_study.opening?
+      - study.outputs.extension_study.opening?
       - engine.output.remark?
       - field.output.remark?
       - operator.output.remark?
@@ -684,6 +784,22 @@ agents:
       Sort what the table settled on by what it would cost to take up: a field to emit, a command to wrap, a stdlib constructor to write, a change upstream, or a decision nobody has made. Say plainly which items are *deliberately* not taken up rather than merely unused — a wrapper that exposed everything underneath it would be a worse tool than one that chose.
 
       Where a capability is real but the provider this project runs ignores it, keep it and mark it: that is a finding about the roadmap, not about today.
+
+      --- what each person came in with, before anybody spoke ---
+
+      **engine** opened with:
+      {{ study.outputs.engine_study.opening }}
+
+      **field** opened with:
+      {{ study.outputs.field_study.opening }}
+
+      **operator** opened with:
+      {{ study.outputs.operator_study.opening }}
+
+      **extension** opened with:
+      {{ study.outputs.extension_study.opening }}
+
+      These were formed independently. Compare them with where each person ended: who moved, and on whose argument. A table whose openings differed and whose ending does not is either a conversation that worked or a first speaker who framed it and three people who followed — and those look identical in the final positions, which is why you are being handed both. If you cannot point to the argument that moved somebody, say so rather than crediting agreement.
 
       --- the last thing each person said ---
 
@@ -717,12 +833,16 @@ agents:
     input:
       - engine.output.remark
       - engine.output.agree
+      - study.outputs.engine_study.opening?
       - field.output.remark
       - field.output.agree
+      - study.outputs.field_study.opening?
       - operator.output.remark
       - operator.output.agree
+      - study.outputs.operator_study.opening?
       - extension.output.remark
       - extension.output.agree
+      - study.outputs.extension_study.opening?
       - round_number.output
       - interject.output.selected?
     output:

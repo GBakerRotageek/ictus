@@ -35,7 +35,7 @@ from ictus.graph.scope import Scope, outcome_scope
 from ictus.stdlib.steps.counter import counter as counter_step
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ictus.graph.node import Node
     from ictus.graph.pipeline import ParallelGroup
@@ -58,6 +58,7 @@ DIRECTION = "direction"
 REMARK = "remark"
 AGREE = "agree"
 NOTES = "notes"
+OPENING = "opening"
 
 STR, NUM, BOOL = PortType.STRING, PortType.NUMBER, PortType.BOOLEAN
 
@@ -99,11 +100,23 @@ def roundtable(
     ``interject`` is on and a person stops it. All three carry the minutes, what
     was still contested, and how many rounds it took.
 
-    ``study`` is what each person is told to do before anybody speaks. Those
-    steps run at once, once, outside the loop — reading is independent and
-    re-reading every round would be paid for every round. Leave it empty to send
-    people in cold, which is right when the material is short enough to sit in
-    the prompt.
+    ``study`` is what each person is told to do before anybody speaks, and it is
+    what stops this shape collapsing into agreement. Those steps run at once,
+    once, outside the loop, and each produces a public ``opening`` — a position
+    formed with nobody else heard.
+
+    Without them the table is anchored by construction: the first speaker is the
+    only one who ever states an independent view, and everybody after it speaks
+    into a frame somebody else set. Four people agreeing then means one person
+    plus three confirmations, and it is indistinguishable in the final positions
+    from four people who were convinced. With openings on the table the
+    difference is legible — the minutes are handed both ends and asked which
+    argument moved whom — and a speaker who drifts from what it came in with is
+    asked to say whose argument did it.
+
+    Leave it empty only for a table small enough that the ordering does not
+    matter, or where the material is short enough to sit in the prompt and the
+    point is speed rather than independence.
 
     ``rounds`` is turns each, not turns total: a table of four over three rounds
     is twelve model calls plus the study and the minutes.
@@ -195,14 +208,23 @@ def roundtable(
                         "read it from your angle. Form your own view first — the "
                         "discussion is worth having only if the people at it disagree "
                         "for reasons they arrived at independently.\n\n"
-                        "In `notes`, write what you found and where you stand, for "
-                        "yourself. Nobody else reads this.\n\n",
+                        "In `notes`, write what you found, for yourself. Nobody else "
+                        "reads this.\n\n"
+                        "In `opening`, state where you stand in a few sentences. This "
+                        "one everybody reads, and they read it before anybody has "
+                        "spoken — so it is the only view you will ever put down that "
+                        "nobody else has influenced. Commit to it. If you turn out to "
+                        "be wrong, being visibly wrong about something you actually "
+                        "thought is worth more to this table than having hedged.\n\n",
                         optional("--- what this is for ---\n", charge_in.ref(), "\n\n"),
                         optional("--- what this is meant to do ---\n", intent_in.ref(), "\n\n"),
                         "--- the material ---\n",
                         material.ref(),
                     ),
-                    declared_outputs=(OutputPort(NOTES, STR, "What this person found alone"),),
+                    declared_outputs=(
+                        OutputPort(NOTES, STR, "What this person found alone"),
+                        OutputPort(OPENING, STR, "Where they stood before anybody spoke"),
+                    ),
                 )
             )
         for desk in desks.values():
@@ -226,6 +248,28 @@ def roundtable(
     # --- the turns ----------------------------------------------------------
     seats: list[AgentNode] = []
     for index, spec in enumerate(speakers):
+        # What everybody committed to before hearing anybody, which is the only
+        # part of the record that is not downstream of whoever spoke first.
+        opened: list[TemplatePart] = []
+        if study:
+            opened.append("--- what each person came in with, before anybody spoke ---\n")
+            opened += [
+                optional(
+                    f"\n**{other.node_id}** opened with:\n",
+                    ref_to(f"{other.node_id}{STUDY_SUFFIX}", OPENING, STR),
+                    "\n",
+                )
+                for other in speakers
+            ]
+            opened.append(
+                "\nThese were formed independently — nobody had heard anybody. Where "
+                "the conversation has drifted away from one of them, that is worth a "
+                "sentence: either somebody made an argument that moved it, and you can "
+                "say whose, or it drifted because the first person to speak framed it "
+                "and nobody went back. The second happens quietly and is worth "
+                "catching.\n\n"
+            )
+
         heard: list[TemplatePart] = []
         for other in speakers:
             if other.node_id == spec.node_id:
@@ -246,6 +290,11 @@ def roundtable(
                         InputPort("intent", STR, optional=True),
                         InputPort(ROUND, NUM, "Which round this is"),
                         *((InputPort(NOTES, STR, "Your own reading"),) if study else ()),
+                        *(
+                            InputPort(f"{other.node_id}__opened", STR, optional=True)
+                            for other in speakers
+                            if study
+                        ),
                         *(
                             InputPort(f"{other.node_id}__said", STR, optional=True)
                             for other in speakers
@@ -300,6 +349,7 @@ def roundtable(
                             if study
                             else ()
                         ),
+                        *opened,
                         "--- what has been said ---\n",
                         *heard,
                         *(
@@ -332,6 +382,10 @@ def roundtable(
         body.feed(counter, "value", seat, ROUND)
         if study:
             body.feed(desks[seat.node_id], NOTES, seat, NOTES)
+            # Everyone's opening, including this speaker's own: what it came in
+            # with is the thing it has to justify moving away from.
+            for other in speakers:
+                body.feed(desks[other.node_id], OPENING, seat, f"{other.node_id}__opened")
 
     # Turn order, and the edges that make each turn hear the ones before it.
     body.route(counter, seats[0])
@@ -350,6 +404,7 @@ def roundtable(
         rounds=rounds,
         interject=interject,
         closing=closing,
+        desks=desks,
     )
 
 
@@ -369,6 +424,7 @@ def _close(
     rounds: int,
     interject: bool,
     closing: str,
+    desks: Mapping[str, AgentNode],
 ) -> Scope:
     """The end of a round: write it up if it is over, otherwise go round again.
 
@@ -389,6 +445,11 @@ def _close(
                 InputPort(ROUND, NUM, "Which round"),
                 *(InputPort(f"{seat.node_id}__said", STR) for seat in seats),
                 *(InputPort(f"{seat.node_id}__ok", BOOL) for seat in seats),
+                *(
+                    InputPort(f"{seat.node_id}__opened", STR, optional=True)
+                    for seat in seats
+                    if desks
+                ),
                 # Not read by the prompt: the route *out* of here tests which
                 # button the person pressed, and a condition needs its
                 # references in scope exactly as a template does.
@@ -411,6 +472,30 @@ def _close(
                 "arrived with and abandoned, and why, is usually the most informative "
                 "thing that happened, and it is the part a transcript buries.\n",
                 *((f"\n{closing.strip()}\n",) if closing else ()),
+                *(
+                    (
+                        "\n--- what each person came in with, before anybody spoke ---\n",
+                        *(
+                            part
+                            for seat in seats
+                            for part in (
+                                f"\n**{seat.node_id}** opened with:\n",
+                                ref_to(f"{seat.node_id}{STUDY_SUFFIX}", OPENING, STR),
+                                "\n",
+                            )
+                        ),
+                        "\nThese were formed independently. Compare them with where "
+                        "each person ended: who moved, and on whose argument. A table "
+                        "whose openings differed and whose ending does not is either a "
+                        "conversation that worked or a first speaker who framed it and "
+                        "three people who followed — and those look identical in the "
+                        "final positions, which is why you are being handed both. If "
+                        "you cannot point to the argument that moved somebody, say so "
+                        "rather than crediting agreement.\n",
+                    )
+                    if desks
+                    else ()
+                ),
                 "\n--- the last thing each person said ---\n",
                 *(
                     part
@@ -428,6 +513,8 @@ def _close(
     for seat in seats:
         body.feed(seat, REMARK, minutes, f"{seat.node_id}__said")
         body.feed(seat, AGREE, minutes, f"{seat.node_id}__ok")
+        if desks:
+            body.feed(desks[seat.node_id], OPENING, minutes, f"{seat.node_id}__opened")
     body.feed(counter, "value", minutes, ROUND)
 
     agreed = scope.exit(

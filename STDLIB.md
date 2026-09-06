@@ -79,6 +79,15 @@ No provider call, still 1 iteration each.
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
 `Speaker(node_id, persona, focus, tools=, max_turns=)`.
 
+- **A `roundtable` without `study` is anchored by construction.** Turns are
+  sequential, so only the first speaker ever states a view nobody influenced;
+  everyone after it speaks into a frame somebody else set, and four people
+  agreeing means one person plus three confirmations. `study=` makes each person
+  commit to a public `opening` before anybody speaks, so the minutes are handed
+  both ends and can say which argument moved whom — convergence and capitulation
+  are identical in the final positions and only distinguishable against the
+  openings.
+
 **`council` polls, `roundtable` talks.** A council's voices run at once, so none
 has heard the others when it speaks and a synthesis step has to write each round
 up for the next one; it converges on a *record*. A roundtable's speakers take

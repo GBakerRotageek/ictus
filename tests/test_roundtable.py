@@ -107,6 +107,45 @@ class TestTurnsAreSequential:
         assert "{{ round_number.output }}" in str(_agent(_table(), "alice")["prompt"])
 
 
+class TestIndependenceBeforeInfluence:
+    """Turn-taking anchors: only the first speaker is ever uninfluenced.
+
+    A live run of the converted `untapped` came back with four speakers agreeing
+    on everything, including a recommendation the source disqualified in the
+    file it would have to change — nobody re-read it after the first speaker
+    cited it. Four agreeing voices had approximated one voice and three
+    confirmations, which is what sequential turns produce unless something
+    forces a position down before anybody has been heard.
+    """
+
+    def test_study_states_a_position_and_not_only_notes(self) -> None:
+        study = _agent(_table(), "alice_study")
+        assert isinstance(study["output"], dict)
+        assert "opening" in study["output"]
+        assert "nobody else has influenced" in str(study["prompt"])
+
+    def test_every_speaker_sees_every_independent_opening(self) -> None:
+        heard = _inputs(_table(), "alice")
+        for who in ("alice", "bob", "carol"):
+            assert f"study.outputs.{who}_study.opening?" in heard
+
+    def test_a_speaker_is_asked_who_moved_it(self) -> None:
+        prompt = str(_agent(_table(), "carol")["prompt"])
+        assert "before anybody spoke" in prompt
+        assert "the first person to speak framed it and nobody went back" in prompt
+
+    def test_the_minutes_get_both_ends_of_the_conversation(self) -> None:
+        """Convergence and capitulation look identical in the final positions."""
+        minutes = str(_agent(_table(), "minutes")["prompt"])
+        assert "who moved, and on whose argument" in minutes
+        assert "three people who followed" in minutes
+        assert "study.outputs.alice_study.opening" in minutes
+
+    def test_without_study_there_are_no_openings_to_anchor_against(self) -> None:
+        """The docstring says so; this is the shape that makes it true."""
+        assert not [x for x in _inputs(_table(study=""), "alice") if "opening" in x]
+
+
 class TestReadingHappensOnceAndAtOnce:
     """Study is independent, so it parallelises; it is also not per round."""
 

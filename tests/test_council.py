@@ -578,6 +578,17 @@ class TestPerVoiceChecking:
         assert "did not survive checking" in prompt
         assert "do not quietly restate it" in prompt
 
+    def test_a_checker_is_told_that_a_citation_is_not_a_claim(self) -> None:
+        """Every citation in a report can be right and every inference wrong.
+
+        Observed: a table cited the correct class for a checkpoint field and
+        recommended wiring it, while the sentence disqualifying it sat in the
+        same docstring nobody re-opened.
+        """
+        prompt = str(_agent(self._scope().body, "perf_check")["prompt"])
+        assert "A correct citation is not a correct claim" in prompt
+        assert "whether anything nearby disqualifies the conclusion" in prompt
+
     def test_a_checker_can_go_and_look(self) -> None:
         """One that cannot is another voice with an opinion."""
         emitted = _agent(self._scope().body, "perf_check")
