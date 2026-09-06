@@ -72,10 +72,23 @@ No provider call, still 1 iteration each.
 | Constructor | Use | Options | Outcomes | Carries |
 | --- | --- | --- | --- | --- |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
+| `roundtable` | Several people taking turns, in order, until they agree | `speakers`, `subject`, `charge`, `rounds`, `study`, `interject`, `remember`, `closing` | `agreed`, `unresolved`, `halted` (with `interject`) | `minutes`, `dissent`, `rounds` |
 | `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `deliberate`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
 
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
+`Speaker(node_id, persona, focus, tools=, max_turns=)`.
+
+**`council` polls, `roundtable` talks.** A council's voices run at once, so none
+has heard the others when it speaks and a synthesis step has to write each round
+up for the next one; it converges on a *record*. A roundtable's speakers take
+turns, so the second has heard the first *this* round and there is no lag inside
+a round at all — they answer each other directly, and the minutes are written
+once at the end rather than once a round. The cost is wall-clock: a round takes
+the sum of its turns rather than the longest of them. Reach for `council` when
+the standpoints are independent and you want breadth; reach for `roundtable`
+when you want them to actually argue. Order is part of the design — whoever
+speaks last has heard everyone.
 
 `deliberate=` (on by default) hands every voice the others' positions and
 concerns from the last round, verbatim and attributed, and asks it to answer
