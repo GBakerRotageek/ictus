@@ -49,6 +49,7 @@ _KNOWN = frozenset(
         "budget_usd",
         "budget_mode",
         "max_iterations",
+        "timeout_seconds",
         "dashboard",
         "instructions",
         "workspace_instructions",
@@ -73,6 +74,16 @@ class PipelineConfig:
     budget_usd: float | None = None
     budget_mode: str = "audit"
     max_iterations: int | None = None
+    timeout_seconds: int | None = None
+    """A wall-clock ceiling on the whole run, in seconds.
+
+    Policy rather than composition for the same reason ``budget_usd`` is: how
+    long this run may take is a property of where it is being run, not of what
+    the graph does. Nothing else bounds elapsed time — a budget bounds spend and
+    ``max_iterations`` bounds step count, and a run can sit for hours moving
+    neither. Distinct from a step's own ``timeout_seconds``, which cancels one
+    model call and leaves the workflow to carry on."""
+
     dashboard: bool = True
     """Whether ``ictus run`` serves the dashboard. A gated run needs one."""
 
@@ -138,6 +149,7 @@ class PipelineConfig:
             ("default_model", self.default_model),
             ("budget_usd", self.budget_usd),
             ("max_iterations", self.max_iterations),
+            ("timeout_seconds", self.timeout_seconds),
         ):
             if value is None:
                 continue
@@ -190,6 +202,13 @@ def read_config(path: Path) -> PipelineConfig:
     mode = loaded.get("budget_mode", "audit")
     if mode not in _BUDGET_MODES:
         raise ConfigError(f"{where}: budget_mode must be one of {sorted(_BUDGET_MODES)}")
+    timeout_seconds = _optional_int(loaded, "timeout_seconds", where)
+    if timeout_seconds is not None and timeout_seconds < 1:
+        raise ConfigError(
+            f"{where}: timeout_seconds must be at least 1, got {timeout_seconds}. "
+            "Conductor's own bound; leave it out for no ceiling rather than "
+            "writing one it will refuse."
+        )
 
     return PipelineConfig(
         provider=provider,
@@ -198,6 +217,7 @@ def read_config(path: Path) -> PipelineConfig:
         budget_usd=_optional_number(loaded, "budget_usd", where),
         budget_mode=mode,
         max_iterations=_optional_int(loaded, "max_iterations", where),
+        timeout_seconds=timeout_seconds,
         dashboard=_flag(loaded, "dashboard", where, default=True),
         instructions=_instructions(loaded, where, beside=path.parent),
         workspace_instructions=_flag(loaded, "workspace_instructions", where, default=True),

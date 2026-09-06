@@ -112,6 +112,25 @@ def test_two_sources_of_truth_that_disagree_are_refused(tmp_path: Path) -> None:
         settings.apply(pipeline, where="config.yaml")
 
 
+def test_a_wall_clock_ceiling_is_policy_and_reaches_the_emitted_limits(tmp_path: Path) -> None:
+    """Where the run happens decides how long it may take; the graph has no view."""
+    settings = read_config(_config(tmp_path, "provider: claude\ntimeout_seconds: 900\n"))
+    pipeline = _pipeline()
+    settings.apply(pipeline, where="config.yaml")
+    assert pipeline.timeout_seconds == 900
+    workflow = conductor.document(pipeline)["workflow"]
+    assert isinstance(workflow, dict)
+    limits = workflow["limits"]
+    assert isinstance(limits, dict)
+    assert limits["timeout_seconds"] == 900
+
+
+def test_a_ceiling_conductor_would_refuse_is_refused_in_the_file(tmp_path: Path) -> None:
+    """Conductor bounds it at 1; a 0 here would load clean and fail at run time."""
+    with pytest.raises(ConfigError, match="timeout_seconds must be at least 1"):
+        read_config(_config(tmp_path, "provider: claude\ntimeout_seconds: 0\n"))
+
+
 def test_a_flag_must_be_a_flag(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="must be true or false"):
         read_config(_config(tmp_path, "provider: claude\nstart_gate: yes please\n"))

@@ -165,6 +165,7 @@ class ConductorBackend:
         background: bool = False,
         workspace_instructions: bool = True,
         working_dir: Path | None = None,
+        log_file: str | None = None,
     ) -> int:
         """Run a compiled workflow, serving the dashboard by default.
 
@@ -192,6 +193,10 @@ class ConductorBackend:
         command = [self._binary(), "run", str(path.resolve())]
         for name, value in inputs.items():
             command += ["-i", f"{name}={value}"]
+        if log_file is not None:
+            # Passed through verbatim: `auto` is Conductor's own spelling for a
+            # generated temp path, and anything else is taken as a file path.
+            command += ["--log-file", log_file]
         if workspace_instructions:
             # The provider runs every step with `setting_sources=[]` — no
             # CLAUDE.md, no settings, no ambient skills — so a step arrives
@@ -205,6 +210,19 @@ class ConductorBackend:
             command.append("--web-bg")
         elif dashboard:
             command.append("--web")
+        return subprocess.run(command, check=False, cwd=working_dir).returncode
+
+    def plan(self, path: Path, *, working_dir: Path | None = None) -> int:
+        """Print the engine's execution plan for a compiled workflow, running nothing.
+
+        Separate from ``run`` rather than a flag on it, because it is not a run:
+        ``conductor run --dry-run`` builds its plan from the workflow file alone
+        (``cli/run.py``, ``build_dry_run_plan``), so inputs are not substituted,
+        no provider is constructed and nothing is spent. Passing the run-shape
+        flags would mean accepting a dashboard port and a detach for something
+        that prints and exits.
+        """
+        command = [self._binary(), "run", str(path.resolve()), "--dry-run"]
         return subprocess.run(command, check=False, cwd=working_dir).returncode
 
     @staticmethod

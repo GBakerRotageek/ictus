@@ -28,6 +28,7 @@ from ictus import (
     ScriptNode,
     Validator,
 )
+from ictus.graph.pipeline import TrimStrategy
 from ictus.interfaces.conductor import conductor
 from ictus.interfaces.conductor.lints import (
     HONOURED_BY,
@@ -35,7 +36,7 @@ from ictus.interfaces.conductor.lints import (
     VALIDATED_UPSTREAM,
 )
 from ictus.lint import lint_pipeline
-from ictus.stdlib import approval_gate, succeed
+from ictus.stdlib import Voice, approval_gate, council, succeed
 
 if TYPE_CHECKING:
     from ictus.graph.values import YamlDict
@@ -624,3 +625,73 @@ class TestTheTwoTablesStayDistinct:
     def test_an_upstream_checked_field_is_never_linted(self) -> None:
         for field in VALIDATED_UPSTREAM:
             assert field not in HONOURED_BY, f"{field} would duplicate conductor validate"
+
+
+class TestContextCeiling:
+    """A soft cap on accumulated context, and the one strategy that survives it.
+
+    Trimming is the only thing in the engine that removes a step's output from a
+    run. A loop reads the previous pass through exactly those entries, and the
+    guard that lets a first pass render nothing cannot tell "not run yet" from
+    "deleted a moment ago" — both are an absent key. A council whose outputs get
+    dropped does not fail; it goes quiet and reads like a first round forever.
+    """
+
+    def _looping(self, **kwargs: object) -> Pipeline:
+        scope = council(
+            stage_id="panel",
+            voices=(
+                Voice(node_id="a", persona="p", focus="f"),
+                Voice(node_id="b", persona="q", focus="g"),
+            ),
+            rounds=3,
+        )
+        for key, value in kwargs.items():
+            setattr(scope.body, key, value)
+        scope.body.provider = "claude-agent-sdk"
+        return scope.body
+
+    def _flat(self, **kwargs: object) -> Pipeline:
+        p = _with("claude-agent-sdk")
+        for key, value in kwargs.items():
+            setattr(p, key, value)
+        return p
+
+    def test_a_ceiling_and_a_strategy_are_emitted_together(self) -> None:
+        p = self._flat(context_max_tokens=120_000, context_trim=TrimStrategy.TRUNCATE)
+        block = conductor.document(p)["workflow"]
+        assert isinstance(block, dict)
+        assert block["context"] == {
+            "mode": "explicit",
+            "max_tokens": 120_000,
+            "trim_strategy": "truncate",
+        }
+
+    def test_a_ceiling_with_no_strategy_is_refused(self) -> None:
+        """The engine does not leave it unset — it uses the most destructive one."""
+        problems = _problems(self._flat(context_max_tokens=120_000), "no context_trim")
+        assert problems
+        assert "drop_oldest" in problems[0]
+
+    def test_a_strategy_with_no_ceiling_is_refused(self) -> None:
+        """Nothing ever trims, so the strategy is never reached."""
+        p = self._flat(context_trim=TrimStrategy.TRUNCATE)
+        assert _problems(p, "context_max_tokens is not")
+
+    @pytest.mark.parametrize("strategy", [TrimStrategy.DROP_OLDEST, TrimStrategy.SUMMARIZE])
+    def test_a_deleting_strategy_is_refused_on_a_loop(self, strategy: TrimStrategy) -> None:
+        problems = _problems(
+            self._looping(context_max_tokens=120_000, context_trim=strategy), "graph that loops"
+        )
+        assert problems
+        assert "stops deliberating" in problems[0]
+
+    def test_truncate_is_allowed_on_a_loop(self) -> None:
+        """It shortens fields in place, so every reference still resolves."""
+        p = self._looping(context_max_tokens=120_000, context_trim=TrimStrategy.TRUNCATE)
+        assert not _problems(p, "context_max_tokens")
+
+    def test_a_deleting_strategy_is_fine_without_a_loop(self) -> None:
+        """Nothing reads a previous pass, so nothing can be emptied behind it."""
+        p = self._flat(context_max_tokens=120_000, context_trim=TrimStrategy.DROP_OLDEST)
+        assert not _problems(p, "graph that loops")

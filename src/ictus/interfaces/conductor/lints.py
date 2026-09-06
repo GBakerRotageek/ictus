@@ -53,6 +53,7 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
     problems: list[str] = []
 
     problems.extend(_instruction_problems(pipeline, where))
+    problems.extend(_context_trim_problems(pipeline, where))
     for node in pipeline.nodes:
         problems.extend(_deferred_reference_problems(pipeline, node, where))
         problems.extend(_tool_allowlist_problems(node, where))
@@ -260,6 +261,57 @@ def _relative_path_problems(node: Node, where: str) -> list[str]:
                 f"or a ~/ one, or name a registered entry instead of a path."
             )
     return problems
+
+
+#: The strategies that make room by deleting a step's output rather than
+#: shortening it. Read from `engine/context.py`: `_trim_drop_oldest` and
+#: `_trim_summarize` both `del self.agent_outputs[agent_name]`; `_trim_truncate`
+#: shortens fields in place and deletes nothing.
+_DELETING_STRATEGIES = frozenset({"drop_oldest", "summarize"})
+
+
+def _context_trim_problems(pipeline: Pipeline, where: str) -> list[str]:
+    """A context ceiling that makes room by deleting what a loop reads.
+
+    Trimming is the only thing in the engine that removes a step's output from
+    the run (`engine/context.py`, two `del agent_outputs[...]` sites). A loop
+    reads the pass before through exactly those entries, and the guard that lets
+    a first pass render nothing cannot tell "not run yet" from "deleted a moment
+    ago" — both are an absent key. So a deliberation whose outputs get trimmed
+    does not fail: it goes quiet and reads like a first round, every round,
+    for the rest of the run.
+
+    ``truncate`` is the one strategy that does not do this. It shortens fields
+    in place, so every reference still resolves — to less text, which is what a
+    ceiling is supposed to cost.
+    """
+    cap = pipeline.context_max_tokens
+    if cap is None:
+        if pipeline.context_trim is not None:
+            return [
+                f"{where}: context_trim is set but context_max_tokens is not, so nothing "
+                "ever trims and the strategy is never reached. Set a ceiling, or drop the "
+                "strategy."
+            ]
+        return []
+    if pipeline.context_trim is None:
+        return [
+            f"{where}: context_max_tokens is {cap} with no context_trim. The engine does "
+            "not leave that unset — it uses drop_oldest, which deletes whole step outputs "
+            "oldest first. Name the strategy you want rather than inheriting the most "
+            "destructive one by omission."
+        ]
+    if pipeline.context_trim.value in _DELETING_STRATEGIES and pipeline.has_cycle():
+        return [
+            f"{where}: context_max_tokens is set with trim_strategy "
+            f"{pipeline.context_trim.value!r} on a graph that loops. That strategy makes "
+            "room by deleting whole step outputs, and a loop reads the previous pass "
+            "through exactly those — once one is deleted the reference renders empty and "
+            "is indistinguishable from a first pass, so the loop keeps running and stops "
+            "deliberating. Use TrimStrategy.TRUNCATE, which shortens fields in place and "
+            "leaves every reference resolvable."
+        ]
+    return []
 
 
 def _tool_allowlist_problems(node: Node, where: str) -> list[str]:

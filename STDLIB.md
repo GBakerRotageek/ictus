@@ -79,6 +79,18 @@ No provider call, still 1 iteration each.
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
 `Speaker(node_id, persona, focus, tools=, max_turns=)`.
 
+- **A context ceiling is per *stage*, and only one strategy survives a loop.**
+  `Pipeline(context_max_tokens=, context_trim=)` emits `workflow.context`, and
+  a stage is its own workflow file — so a long council can be bounded without
+  bounding its caller. There is no per-node equivalent; the engine has no
+  per-agent context config. Trimming is the only thing that removes a step's
+  output from a run, and a loop reads the previous pass through exactly those
+  entries: once one is deleted the reference renders empty and is
+  indistinguishable from a first pass, so the loop keeps going and stops
+  deliberating. `TrimStrategy.TRUNCATE` shortens fields in place and leaves
+  every reference resolvable; the lint refuses `DROP_OLDEST` and `SUMMARIZE` on
+  a graph that loops, and refuses a ceiling with no strategy at all — the engine
+  does not leave that unset, it uses `drop_oldest`.
 - **A `roundtable` without `study` is anchored by construction.** Turns are
   sequential, so only the first speaker ever states a view nobody influenced;
   everyone after it speaks into a frame somebody else set, and four people
@@ -168,6 +180,7 @@ project has already shipped once.
 | `instructions` | none | project context prepended to every prompt; paths relative to the folder |
 | `start_gate` | `true` | hold at a confirmation gate before anything runs |
 | `budget_usd` / `budget_mode` | none / `audit` | |
+| `timeout_seconds` | none — unlimited | wall-clock ceiling on the whole run; the only setting that bounds elapsed time |
 | `max_iterations` | derived from the graph | |
 | `dashboard` | `true` | serve the web UI on `ictus run` |
 

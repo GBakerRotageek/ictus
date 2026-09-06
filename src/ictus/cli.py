@@ -426,6 +426,18 @@ def run(
         list[str] | None,
         typer.Option("--input", "-i", help="Override one input as name=value; repeatable"),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the execution plan and stop, spending nothing"),
+    ] = False,
+    log_file: Annotated[
+        str | None,
+        typer.Option(
+            "--log-file",
+            "-l",
+            help="Write full debug output here, or 'auto' for a generated temp file",
+        ),
+    ] = None,
 ) -> None:
     """Run a pipeline folder against a project.
 
@@ -488,7 +500,10 @@ def run(
         known = ", ".join(sorted(declared)) or "(none)"
         _fail(f"{unknown} are not inputs of {pipeline.pipeline_id!r}; declared: {known}")
     missing = sorted(n for n, d in declared.items() if d.required and n not in supplied)
-    if missing:
+    # A dry run substitutes nothing, so demanding values it will never spend
+    # would put the plan behind the very inputs you are reading it to decide.
+    # A *misspelled* one is still refused above: that is a defect either way.
+    if missing and not dry_run:
         hint = f" Add them to {source}," if source.is_file() else f" Create {target.input_file},"
         _fail(f"{pipeline.pipeline_id!r} requires {missing}.{hint} or pass -i name=value.")
 
@@ -516,6 +531,12 @@ def run(
     path = target.build / f"{pipeline.pipeline_id}.yaml"
     if not path.is_file():
         _fail(f"{path} does not exist; run `ictus emit {folder}` first")
+
+    if dry_run:
+        # Ahead of preflight, which opens real connections: a plan that spends
+        # nothing should not need a live environment to print.
+        typer.secho(f"{pipeline.pipeline_id}: plan only, nothing runs", fg=typer.colors.CYAN)
+        raise typer.Exit(code=BACKEND.plan(path, working_dir=working))
 
     if not skip_preflight:
         # Preflight reads the pipeline module, not the emitted file: the
@@ -557,6 +578,7 @@ def run(
             background=background,
             workspace_instructions=reads_project,
             working_dir=working,
+            log_file=log_file,
         )
     except FileNotFoundError as exc:
         _fail(str(exc))

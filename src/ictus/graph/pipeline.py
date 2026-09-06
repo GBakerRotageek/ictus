@@ -53,6 +53,20 @@ class FailureMode(StrEnum):
     ALL_OR_NOTHING = "all_or_nothing"
 
 
+class TrimStrategy(StrEnum):
+    """How an engine makes room when accumulated context hits its ceiling."""
+
+    TRUNCATE = "truncate"
+    """Shorten fields in place. The only one that leaves references resolvable."""
+
+    DROP_OLDEST = "drop_oldest"
+    """Delete whole step outputs, oldest first."""
+
+    SUMMARIZE = "summarize"
+    """Replace outputs with one short summary, deleting the originals — and fall
+    back to ``DROP_OLDEST`` where the engine cannot reach a model to write it."""
+
+
 @dataclass(frozen=True, eq=False)
 class ParallelGroup:
     """Members that run at once, addressed as one thing by the graph.
@@ -213,10 +227,13 @@ class Pipeline:
         provider: str | None = None,
         default_model: str | None = None,
         context_mode: ContextMode = "explicit",
+        context_max_tokens: int | None = None,
+        context_trim: TrimStrategy | None = None,
         loop_passes: int | None = None,
         budget_usd: float | None = None,
         budget_mode: BudgetMode = "audit",
         max_iterations: int | None = None,
+        timeout_seconds: int | None = None,
         metadata: Mapping[str, str] | None = None,
         instructions: Sequence[str] = (),
         system_prompt: str | None = None,
@@ -225,6 +242,8 @@ class Pipeline:
             raise CompositionError("pipeline_id cannot be empty")
         if loop_passes is not None and loop_passes < 1:
             raise CompositionError(f"loop_passes must be >= 1, got {loop_passes}")
+        if timeout_seconds is not None and timeout_seconds < 1:
+            raise CompositionError(f"timeout_seconds must be >= 1, got {timeout_seconds}")
         self.pipeline_id = pipeline_id
         self.description = description
         self.version = version
@@ -235,10 +254,35 @@ class Pipeline:
         self.provider = provider
         self.default_model = default_model
         self.context_mode: ContextMode = context_mode
+        self.context_max_tokens = context_max_tokens
+        """A soft ceiling on accumulated context, above which the engine trims.
+
+        Per workflow file, which means per *stage*: a stage compiles to its own
+        document with its own ``context:`` block, so a long council can be
+        bounded without bounding its caller. There is no per-node equivalent —
+        the engine has no per-agent context config.
+        """
+
+        self.context_trim = context_trim
+        """How the engine makes room once the ceiling is reached.
+
+        Named rather than left to the engine, which silently uses
+        ``drop_oldest``. That one deletes whole step outputs, oldest first, and
+        a deleted output is indistinguishable from inside a prompt from a step
+        that has not run yet — so a loop reading it carries on rendering nothing
+        and looks like a first pass forever. ``TRUNCATE`` shortens fields in
+        place and leaves every reference resolvable, which is the only strategy
+        that degrades rather than disappears.
+        """
         self.loop_passes = loop_passes
         self.budget_usd = budget_usd
         self.budget_mode: BudgetMode = budget_mode
         self.max_iterations = max_iterations
+        # A wall-clock ceiling on the whole run, as against a step's own
+        # `timeout_seconds`, which bounds one model call. Nothing else bounds
+        # elapsed time: `budget_usd` bounds spend and `max_iterations` bounds
+        # step count, and a run can sit for hours without moving either.
+        self.timeout_seconds = timeout_seconds
         self.metadata: dict[str, str] = dict(metadata or {})
         # Prepended to every step's prompt. The engine runs its agents with no
         # settings sources at all — no CLAUDE.md, no ambient skills, no hooks —

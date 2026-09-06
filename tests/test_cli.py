@@ -146,6 +146,78 @@ def test_run_says_what_the_input_file_is_missing(tmp_path: Path) -> None:
     assert "input.md" in result.output
 
 
+def _capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Record what the backend would launch, without launching it."""
+    calls: list[list[str]] = []
+
+    def fake(command: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("ictus.interfaces.conductor.subprocess.run", fake)
+    return calls
+
+
+def test_dry_run_asks_for_a_plan_and_launches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan that spends nothing has no dashboard to serve and nothing to detach."""
+    calls = _capture(monkeypatch)
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    result = runner.invoke(app, ["run", str(folder), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert "--dry-run" in calls[0]
+    assert "--web" not in calls[0]
+    assert "--web-bg" not in calls[0]
+
+
+def test_dry_run_does_not_demand_inputs_it_will_never_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Conductor plans from the workflow file alone, so the values are not read.
+
+    Requiring them would put the plan behind the very inputs it is read to
+    decide, which is the opposite of what a dry run is for.
+    """
+    calls = _capture(monkeypatch)
+    folder = _write(tmp_path / "pipelines", "demo", NEEDS_INPUT)
+    result = runner.invoke(app, ["run", str(folder), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "requires" not in result.output
+    assert "--dry-run" in calls[0]
+
+
+def test_dry_run_still_refuses_an_input_name_that_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A misspelling is a defect whether or not the value gets spent."""
+    _capture(monkeypatch)
+    folder = _write(tmp_path / "pipelines", "demo", NEEDS_INPUT)
+    result = runner.invoke(app, ["run", str(folder), "--dry-run", "-i", "subjekt=x"])
+    assert result.exit_code == 1
+    assert "subjekt" in result.output
+
+
+def test_the_log_file_reaches_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-mortem needs the debug output, and only the engine can write it."""
+    calls = _capture(monkeypatch)
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    result = runner.invoke(
+        app, ["run", str(folder), "--skip-preflight", "--foreground", "-l", "auto"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0][calls[0].index("--log-file") + 1] == "auto"
+
+
+def test_no_log_file_passes_no_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture(monkeypatch)
+    folder = _write(tmp_path / "pipelines", "demo", MINIMAL.format(pid="demo"))
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight", "--foreground"])
+    assert result.exit_code == 0, result.output
+    assert "--log-file" not in calls[0]
+
+
 def test_init_writes_the_files_a_folder_needs(tmp_path: Path) -> None:
     folder = tmp_path / "fresh"
     assert runner.invoke(app, ["init", str(folder)]).exit_code == 0
