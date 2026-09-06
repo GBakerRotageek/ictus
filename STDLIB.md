@@ -72,10 +72,17 @@ No provider call, still 1 iteration each.
 | Constructor | Use | Options | Outcomes | Carries |
 | --- | --- | --- | --- | --- |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
-| `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
+| `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `deliberate`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
 
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
+
+`deliberate=` (on by default) hands every voice the others' positions and
+concerns from the last round, verbatim and attributed, and asks it to answer
+them by name. Off, a voice sees only the synthesis — one more agent's
+compression of what everybody said — so it can restate its position but cannot
+disagree with anyone in particular, and the council discovers and asserts round
+after round without converging. Costs prompt tokens and no extra model calls.
 
 `verify_each=` puts a checker behind every voice, all running at once, before
 the round is written up. Off by default — it doubles the model calls in a round.
@@ -296,6 +303,13 @@ plausible one.
 - **An unset `system_prompt` is an *empty* one, not a default one.** Conductor
   forwards `None` and the SDK sends `--system-prompt ""`, so ictus supplies a
   baseline instead. Set `none` only if you mean a step with no discipline at all.
+- **A parallel group's members read each other a round behind, or not at all.**
+  Two members run at once, so a sibling's output is not addressable while the
+  reader runs — `feed` refuses it. Inside a loop it *is* addressable, one pass
+  back: the engine keys a group's result by the group's name and overwrites it
+  only when the group next finishes. `feed(..., previous_pass=True)` says you
+  mean that, and the lint refuses the flag on a graph with no loop, where the
+  reference would render empty every time.
 - **A council without `verify=` can only measure consensus.** Its voices read
   what you hand them; if that is a summary, they review the summary.
 - **`council` needs `rounds >= 2`.** A voice is satisfied when the report states

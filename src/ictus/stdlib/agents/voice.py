@@ -82,6 +82,7 @@ def voice(
     charge: Ref | None = None,
     intent: Ref | None = None,
     prior: Ref | None = None,
+    peers: Sequence[tuple[str, Ref, Ref]] = (),
     checked: Ref | None = None,
     direction: Ref | None = None,
     description: str = "",
@@ -98,6 +99,18 @@ def voice(
 
     ``checked`` carries what a verification step struck out of the last round,
     so a refuted claim is not argued again in the next one.
+
+    ``peers`` is what lets a voice answer the others rather than a summary of
+    them: ``(name, position, concerns)`` for each of the other seats, rendered
+    verbatim and attributed. Without it a voice reads only the synthesis, which
+    is one more agent's compression of what everybody said — so it can restate,
+    but it cannot disagree with anyone in particular, and a council of that
+    shape discovers and asserts round after round without converging.
+
+    The references are a round behind, because the seats run at once. That is
+    the right lag: a voice answering what its neighbours said last round is a
+    deliberation, and there is no ordering in which it could answer what they
+    are saying at this moment.
 
     ``prior`` and ``direction`` are what make a council deliberate rather than
     poll: the first is the last round's synthesis, the second is whatever a
@@ -170,6 +183,26 @@ def voice(
                 "if it did not — agreeing to close a discussion you still disagree with "
                 "is the one thing that makes this whole exercise worthless.\n",
             ),
+        ]
+    if peers:
+        block: list[TemplatePart] = []
+        for name, position, concerns in peers:
+            block += [
+                optional(
+                    f"\n### {name}\nsaid: ",
+                    position,
+                    "",
+                ),
+                optional("\nwants changed:\n", concerns, "\n"),
+            ]
+        parts += [
+            "\n",
+            "--- what the others said last round, in their own words ---\n",
+            *block,
+            "\nThese are their words, not a summary of them. Answer the ones you "
+            "disagree with by name and say what would change your mind; where one of "
+            "them has changed yours, say so and say which. A round where nobody "
+            "addresses anybody is four assessments filed together, not a council.\n",
         ]
     if checked is not None:
         parts += [

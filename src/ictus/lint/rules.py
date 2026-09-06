@@ -61,6 +61,7 @@ __all__ = [
     "group_routing_problems",
     "node_problems",
     "placeholder_problems",
+    "previous_pass_problems",
     "reference_problems",
     "stage_contract_problems",
 ]
@@ -182,6 +183,27 @@ def placeholder_problems(pipeline: Pipeline, where: str) -> list[str]:
                 "would be paid to act on the placeholder"
             )
     return problems
+
+
+def previous_pass_problems(pipeline: Pipeline, where: str) -> list[str]:
+    """A read of the last pass, on a graph that never takes a second one.
+
+    ``feed(..., previous_pass=True)`` is how a member of a parallel group reads a
+    sibling: the engine keys the group's result by the group's name and
+    overwrites it only when the group next finishes, so a second pass sees the
+    first. With no loop there is no first — the reference renders empty, every
+    round, and a council wired this way would look like it was deliberating.
+    """
+    if pipeline.has_cycle():
+        return []
+    return [
+        f"{where}: {dep.target.node_id!r} reads {dep.source.node_id!r} with "
+        "previous_pass=True, but this graph has no loop, so there is never a previous "
+        "pass and the reference renders empty every time. Drop the flag and put the "
+        "reader after the group, or give the graph the loop it was written for."
+        for dep in pipeline.data_deps
+        if dep.previous_pass
+    ]
 
 
 def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:

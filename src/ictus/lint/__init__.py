@@ -23,6 +23,7 @@ from ictus.lint.rules import (
     group_routing_problems,
     node_problems,
     placeholder_problems,
+    previous_pass_problems,
     stage_contract_problems,
 )
 
@@ -60,6 +61,7 @@ def lint_pipeline(
         return [f"{where}: {exc}"]
 
     problems: list[str] = placeholder_problems(pipeline, where)
+    problems.extend(previous_pass_problems(pipeline, where))
     reachable = pipeline.reachable_from_entry()
     problems.extend(
         f"{where}: {describe(node)} is unreachable from entry point "

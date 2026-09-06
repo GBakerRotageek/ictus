@@ -131,6 +131,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### field
+      said: {{ voices.outputs.field.position }}
+      wants changed:
+      {{ voices.outputs.field.concerns }}
+
+      ### operator
+      said: {{ voices.outputs.operator.position }}
+      wants changed:
+      {{ voices.outputs.operator.concerns }}
+
+      ### extension
+      said: {{ voices.outputs.extension.position }}
+      wants changed:
+      {{ voices.outputs.extension.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -163,6 +182,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.field.position?
+      - voices.outputs.field.concerns?
+      - voices.outputs.operator.position?
+      - voices.outputs.operator.concerns?
+      - voices.outputs.extension.position?
+      - voices.outputs.extension.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?
@@ -213,6 +238,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### engine
+      said: {{ voices.outputs.engine.position }}
+      wants changed:
+      {{ voices.outputs.engine.concerns }}
+
+      ### operator
+      said: {{ voices.outputs.operator.position }}
+      wants changed:
+      {{ voices.outputs.operator.concerns }}
+
+      ### extension
+      said: {{ voices.outputs.extension.position }}
+      wants changed:
+      {{ voices.outputs.extension.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -245,6 +289,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.engine.position?
+      - voices.outputs.engine.concerns?
+      - voices.outputs.operator.position?
+      - voices.outputs.operator.concerns?
+      - voices.outputs.extension.position?
+      - voices.outputs.extension.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?
@@ -295,6 +345,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### engine
+      said: {{ voices.outputs.engine.position }}
+      wants changed:
+      {{ voices.outputs.engine.concerns }}
+
+      ### field
+      said: {{ voices.outputs.field.position }}
+      wants changed:
+      {{ voices.outputs.field.concerns }}
+
+      ### extension
+      said: {{ voices.outputs.extension.position }}
+      wants changed:
+      {{ voices.outputs.extension.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -327,6 +396,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.engine.position?
+      - voices.outputs.engine.concerns?
+      - voices.outputs.field.position?
+      - voices.outputs.field.concerns?
+      - voices.outputs.extension.position?
+      - voices.outputs.extension.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?
@@ -377,6 +452,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### engine
+      said: {{ voices.outputs.engine.position }}
+      wants changed:
+      {{ voices.outputs.engine.concerns }}
+
+      ### field
+      said: {{ voices.outputs.field.position }}
+      wants changed:
+      {{ voices.outputs.field.concerns }}
+
+      ### operator
+      said: {{ voices.outputs.operator.position }}
+      wants changed:
+      {{ voices.outputs.operator.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -409,6 +503,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.engine.position?
+      - voices.outputs.engine.concerns?
+      - voices.outputs.field.position?
+      - voices.outputs.field.concerns?
+      - voices.outputs.operator.position?
+      - voices.outputs.operator.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?

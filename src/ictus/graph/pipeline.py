@@ -182,6 +182,16 @@ class DataDep:
     source: Node | MapGroup
     target: Node
     connection: PortConnection
+    previous_pass: bool = False
+    """Whether this edge reads what the source produced on the *last* time round.
+
+    Only meaningful between two members of one parallel group, where it is the
+    difference between a reference that resolves to nothing and one that carries
+    the previous round. The engine stores a group's result under the group's own
+    name and overwrites it when the group next finishes, so while a member is
+    running its siblings' entries still hold the pass before. Outside a loop
+    there is no such pass, which is what the lint checks.
+    """
 
 
 class Pipeline:
@@ -581,25 +591,44 @@ class Pipeline:
             )
         self._input_edges.append((param, target, in_port))
 
-    def feed(self, source: Node | MapGroup, from_port: str, target: Node, to_port: str) -> DataDep:
+    def feed(
+        self,
+        source: Node | MapGroup,
+        from_port: str,
+        target: Node,
+        to_port: str,
+        *,
+        previous_pass: bool = False,
+    ) -> DataDep:
         """Declare that ``target`` reads a value from ``source``, with no control edge.
 
         Needed whenever data and control diverge — most often across a gate. The
         gate decides *where* execution goes; the node it routes to still has to
         read the value produced before the gate, and Conductor will not infer
         that under ``context.mode: explicit``.
+
+        ``previous_pass`` is how one member of a parallel group reads another.
+        Ordinarily that is refused, because the two run at once and the
+        reference resolves to nothing. Inside a loop it resolves to something
+        useful instead: the engine keys a group's result by the group's name and
+        overwrites it only when the group next *finishes*, so a member running
+        its second pass still sees its siblings' first. Saying so explicitly is
+        the point — the value is a round behind, and a caller that did not mean
+        that has written a subtle bug. The lint refuses the flag on a graph with
+        no loop, where there is no previous pass to read.
         """
         self._require_routable(source, "data source")
         self._require_member(target, "data target")
         if isinstance(source, Node):
             shared = self.group_of(source)
-            if shared is not None and shared is self.group_of(target):
+            if shared is not None and shared is self.group_of(target) and not previous_pass:
                 raise CompositionError(
                     f"{target.node_id!r} cannot read {source.node_id!r}: both run inside "
                     f"parallel group {shared.group_id!r}, at the same time. A member's "
                     "output is only addressable once the whole group has finished, so the "
                     "reference resolves to nothing while the reader is running. Put the "
-                    "reader after the group."
+                    "reader after the group, or pass previous_pass=True if you mean to "
+                    "read what it produced last time round the loop."
                 )
         if isinstance(source, Node) and self.map_of(source) is not None:
             mapped = self.map_of(source)
@@ -618,7 +647,12 @@ class Pipeline:
                 f"to {target.node_id}.{in_port.name} ({in_port.port_type.value}): "
                 "port types differ"
             )
-        dep = DataDep(source=source, target=target, connection=PortConnection(out_port, in_port))
+        dep = DataDep(
+            source=source,
+            target=target,
+            connection=PortConnection(out_port, in_port),
+            previous_pass=previous_pass,
+        )
         self._deps.append(dep)
         return dep
 

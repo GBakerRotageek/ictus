@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ictus import Pipeline, PortType
+from ictus import END, Pipeline, PortType
 from ictus.errors import CompositionError
 from ictus.graph.node import AgentNode
 from ictus.graph.ports import InputPort, OutputPort
@@ -588,3 +588,104 @@ class TestPerVoiceChecking:
         parent = _host(self._scope(verify="Check the report."))
         assert lint_pipeline(parent) == []
         validates(parent)
+
+
+class TestVoicesAnswerEachOther:
+    """Without this a voice reads only the synthesis, never its neighbours.
+
+    The report is one more agent's compression of what everybody said, so a
+    voice reading it can restate its position but cannot disagree with anyone in
+    particular. Observed over several live runs: the voices discovered and
+    asserted round after round and never converged, because there was nothing
+    for them to converge *on* except a summary nobody wrote back to.
+    """
+
+    def test_it_is_on_by_default(self) -> None:
+        """It costs prompt tokens and no extra model calls."""
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "in their own words" in prompt
+
+    def test_a_voice_reads_every_other_voice(self) -> None:
+        deps = {
+            (d.source.node_id, d.target.node_id, d.connection.target.name)
+            for d in _council().body.data_deps
+        }
+        for reader in SPEAKERS:
+            for other in SPEAKERS:
+                if other.node_id == reader.node_id:
+                    continue
+                assert (other.node_id, reader.node_id, f"{other.node_id}__said") in deps
+                assert (other.node_id, reader.node_id, f"{other.node_id}__wants") in deps
+
+    def test_a_voice_does_not_read_itself(self) -> None:
+        deps = {(d.source.node_id, d.target.node_id) for d in _council().body.data_deps}
+        for spec in SPEAKERS:
+            assert (spec.node_id, spec.node_id) not in deps
+
+    def test_the_edges_say_they_are_a_round_behind(self) -> None:
+        """Seats run at once; only the previous pass is addressable."""
+        peer_edges = [
+            d
+            for d in _council().body.data_deps
+            if d.connection.target.name.endswith(("__said", "__wants"))
+        ]
+        assert peer_edges
+        assert all(d.previous_pass for d in peer_edges)
+
+    def test_it_asks_them_to_answer_by_name(self) -> None:
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "Answer the ones you disagree with by name" in prompt
+        assert "four assessments filed together, not a council" in prompt
+
+    def test_the_neighbour_is_addressed_through_the_group(self) -> None:
+        """A member's output is only nameable via its group, and only an edge knows."""
+        emitted = _agent(_council().body, "perf")
+        assert "{{ voices.outputs.shape.position }}" in str(emitted["prompt"])
+        declared = emitted["input"]
+        assert isinstance(declared, list)
+        assert "voices.outputs.shape.position?" in declared
+        assert "voices.outputs.shape.concerns?" in declared
+
+    def test_turning_it_off_leaves_the_voices_isolated(self) -> None:
+        body = _council(deliberate=False).body
+        assert "in their own words" not in str(_agent(body, "perf")["prompt"])
+        assert not [d for d in body.data_deps if d.connection.target.name.endswith("__said")]
+
+    def test_it_is_lint_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        parent = _host(_council(verify="Check it."))
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+class TestReadingAPassThatNeverHappens:
+    """`previous_pass` on a graph with no loop renders empty, every time."""
+
+    def _flat(self) -> Pipeline:
+        p = Pipeline(pipeline_id="t", provider="claude-agent-sdk")
+        a = p.add(
+            AgentNode(
+                node_id="a",
+                prompt="x",
+                inputs=(InputPort("b", STR, optional=True),),
+                declared_outputs=(OutputPort("position", STR),),
+            )
+        )
+        b = p.add(
+            AgentNode(node_id="b", prompt="y", declared_outputs=(OutputPort("position", STR),))
+        )
+        group = p.parallel("panel", [a, b])
+        p.set_entry(group)
+        p.route(group, END)
+        return p
+
+    def test_a_sibling_read_is_refused_without_the_flag(self) -> None:
+        p = self._flat()
+        by_id = {n.node_id: n for n in p.nodes}
+        with pytest.raises(CompositionError, match="at the same time"):
+            p.feed(by_id["b"], "position", by_id["a"], "b")
+
+    def test_and_linted_with_it_when_there_is_no_loop(self) -> None:
+        p = self._flat()
+        by_id = {n.node_id: n for n in p.nodes}
+        p.feed(by_id["b"], "position", by_id["a"], "b", previous_pass=True)
+        assert [x for x in lint_pipeline(p) if "no loop" in x]

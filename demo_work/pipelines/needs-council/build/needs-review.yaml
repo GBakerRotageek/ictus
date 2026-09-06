@@ -118,6 +118,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### experience
+      said: {{ voices.outputs.experience.position }}
+      wants changed:
+      {{ voices.outputs.experience.concerns }}
+
+      ### authoring
+      said: {{ voices.outputs.authoring.position }}
+      wants changed:
+      {{ voices.outputs.authoring.concerns }}
+
+      ### agent_power
+      said: {{ voices.outputs.agent_power.position }}
+      wants changed:
+      {{ voices.outputs.agent_power.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -150,6 +169,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.experience.position?
+      - voices.outputs.experience.concerns?
+      - voices.outputs.authoring.position?
+      - voices.outputs.authoring.concerns?
+      - voices.outputs.agent_power.position?
+      - voices.outputs.agent_power.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?
@@ -200,6 +225,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### capability
+      said: {{ voices.outputs.capability.position }}
+      wants changed:
+      {{ voices.outputs.capability.concerns }}
+
+      ### authoring
+      said: {{ voices.outputs.authoring.position }}
+      wants changed:
+      {{ voices.outputs.authoring.concerns }}
+
+      ### agent_power
+      said: {{ voices.outputs.agent_power.position }}
+      wants changed:
+      {{ voices.outputs.agent_power.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -232,6 +276,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.capability.position?
+      - voices.outputs.capability.concerns?
+      - voices.outputs.authoring.position?
+      - voices.outputs.authoring.concerns?
+      - voices.outputs.agent_power.position?
+      - voices.outputs.agent_power.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?
@@ -282,6 +332,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### capability
+      said: {{ voices.outputs.capability.position }}
+      wants changed:
+      {{ voices.outputs.capability.concerns }}
+
+      ### experience
+      said: {{ voices.outputs.experience.position }}
+      wants changed:
+      {{ voices.outputs.experience.concerns }}
+
+      ### agent_power
+      said: {{ voices.outputs.agent_power.position }}
+      wants changed:
+      {{ voices.outputs.agent_power.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -314,6 +383,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.capability.position?
+      - voices.outputs.capability.concerns?
+      - voices.outputs.experience.position?
+      - voices.outputs.experience.concerns?
+      - voices.outputs.agent_power.position?
+      - voices.outputs.agent_power.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?
@@ -364,6 +439,25 @@ agents:
 
       Respond to it. Say plainly if it changed your mind, and say plainly if it did not — agreeing to close a discussion you still disagree with is the one thing that makes this whole exercise worthless.
       {% endif %}
+      --- what the others said last round, in their own words ---
+
+      ### capability
+      said: {{ voices.outputs.capability.position }}
+      wants changed:
+      {{ voices.outputs.capability.concerns }}
+
+      ### experience
+      said: {{ voices.outputs.experience.position }}
+      wants changed:
+      {{ voices.outputs.experience.concerns }}
+
+      ### authoring
+      said: {{ voices.outputs.authoring.position }}
+      wants changed:
+      {{ voices.outputs.authoring.concerns }}
+
+      These are their words, not a summary of them. Answer the ones you disagree with by name and say what would change your mind; where one of them has changed yours, say so and say which. A round where nobody addresses anybody is four assessments filed together, not a council.
+
       {% if verify is defined %}--- what verification struck out of the last round ---
       {{ verify.output.corrections }}
 
@@ -396,6 +490,12 @@ agents:
       - workflow.input.subject
       - workflow.input.charge?
       - workflow.input.intent?
+      - voices.outputs.capability.position?
+      - voices.outputs.capability.concerns?
+      - voices.outputs.experience.position?
+      - voices.outputs.experience.concerns?
+      - voices.outputs.authoring.position?
+      - voices.outputs.authoring.concerns?
       - report.output.text?
       - verify.output.corrections?
       - interject.output.additional_input.notes?

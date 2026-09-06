@@ -97,6 +97,7 @@ def council(
     charge: str = "What this assessment is for",
     verify: str = "",
     verify_each: str = "",
+    deliberate: bool = True,
     verify_turns: int = 200,
     rounds: int = 3,
     interject: bool = False,
@@ -110,6 +111,14 @@ def council(
     ``interject`` is on and a person stops it. All three carry the last report,
     what was still contested, and how many rounds it took, so a caller can act
     on a council that did not converge instead of only learning that it didn't.
+
+    ``deliberate`` hands every voice the others' positions and concerns from the
+    last round, verbatim and attributed, and asks it to answer them by name. On
+    by default: without it a voice sees only the synthesis — one more agent's
+    compression of what everybody said — so it can restate its position but
+    cannot disagree with anyone in particular, and the council discovers and
+    asserts round after round without ever converging. It costs prompt tokens
+    and no extra model calls.
 
     ``verify_each`` puts a checker behind every voice, running at once, before
     the round is written up. It is off by default because it doubles the model
@@ -210,6 +219,19 @@ def council(
             return ref_to(f"{node_id}{CHECK_SUFFIX}", "corrections", STR)
         return ref_to(VERIFY, "corrections", STR) if verify else None
 
+    def _peers_of(node_id: str) -> tuple[tuple[str, Ref, Ref], ...]:
+        if not deliberate:
+            return ()
+        return tuple(
+            (
+                other.node_id,
+                ref_to(other.node_id, "position", STR),
+                ref_to(other.node_id, "concerns", STR),
+            )
+            for other in voices
+            if other.node_id != node_id
+        )
+
     seats = [
         body.add(
             voice(
@@ -226,6 +248,7 @@ def council(
                 charge=charge_in.ref(),
                 intent=intent.ref(),
                 prior=prior,
+                peers=_peers_of(spec.node_id),
                 checked=_checked_for(spec.node_id),
                 direction=steer,
                 inputs=(
@@ -243,12 +266,34 @@ def council(
                         if interject
                         else ()
                     ),
+                    *(
+                        port
+                        for name, _, _ in _peers_of(spec.node_id)
+                        for port in (
+                            InputPort(f"{name}__said", STR, optional=True),
+                            InputPort(f"{name}__wants", STR, optional=True),
+                        )
+                    ),
                 ),
             )
         )
         for spec in voices
     ]
     panel = body.parallel(PANEL, seats, description=f"{len(seats)} voices, at once")
+
+    # Every voice reads every other, a round behind. `previous_pass` because the
+    # seats run at once: the engine keys the group's result by the group's name
+    # and overwrites it only when the group next finishes, so a seat on its
+    # second pass still sees its neighbours' first. Without these edges the
+    # references render but nothing declares them, and Conductor warns that the
+    # prompt names something the agent never asked for.
+    if deliberate:
+        for seat in seats:
+            for other in seats:
+                if other is seat:
+                    continue
+                body.feed(other, "position", seat, f"{other.node_id}__said", previous_pass=True)
+                body.feed(other, "concerns", seat, f"{other.node_id}__wants", previous_pass=True)
 
     # One checker per voice, each facing a quarter of the material a single
     # group checker would have to triage.
