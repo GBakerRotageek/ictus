@@ -1,0 +1,9 @@
+provider: claude-agent-sdk
+# A step runs with no settings sources at all — no CLAUDE.md, no ambient skills.
+# Two different things go back in, and they are kept apart on purpose:
+#   - the *target repository's* account of itself, discovered by
+#     `--workspace-instructions` (AGENTS.md and friends, on by default), which
+#     is what sends every voice to the engine's own source;
+#   - this brainstorm's framing, below, which travels with the pipeline.
+instructions:
+  - ./context.md

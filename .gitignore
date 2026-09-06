@@ -17,3 +17,5 @@ checkpoints/
 needs-review.md
 # Personal editor/permission state, not project configuration.
 .claude/settings.local.json
+# Run output: `untapped` writes its brainstorm here on every run.
+untapped.md
