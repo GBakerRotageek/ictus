@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ictus import Pipeline, PortType
+from ictus import END, Pipeline, PortType
 from ictus.errors import CompositionError
 from ictus.graph.node import AgentNode
 from ictus.graph.ports import InputPort, OutputPort
@@ -188,7 +188,7 @@ class TestCouncil:
         for name in ("agreed", "unresolved"):
             template = _agent(_council().body, name)["output_template"]
             assert isinstance(template, dict)
-            assert set(template) == {"outcome", "report", "dissent", "rounds"}
+            assert set(template) == {"outcome", "report", "dissent", "unverified", "rounds"}
 
     def test_the_synthesis_records_disagreement_rather_than_averaging_it(self) -> None:
         prompt = str(_agent(_council().body, "report")["prompt"])
@@ -332,10 +332,6 @@ class TestVoiceCost:
         )
         assert _agent(_council(voices=looks).body, "deps")["tools"] == ["read_file", "grep"]
 
-    def test_the_workflow_default_is_still_reachable(self) -> None:
-        free = (Voice(node_id="a", persona="p", focus="f", tools=None), SPEAKERS[0])
-        assert "tools" not in _agent(_council(voices=free).body, "a")
-
 
 class TestCharge:
     """One instruction every voice receives, settable per run."""
@@ -362,3 +358,345 @@ class TestCharge:
         assert "{% if workflow.input.charge %}" in prompt
         assert "{% if workflow.input.intent %}" in prompt
         assert "is defined" not in prompt.split("--- the material ---")[0]
+
+
+class TestVerification:
+    """Agreement measures convergence between voices. It is not evidence.
+
+    Four models given the same wrong material agree sooner, not later. A council
+    that ran on a project's own docs once produced a confident report in which a
+    third of the findings were already implemented — every voice agreed, and
+    every voice had read the same summary instead of the thing it described.
+    """
+
+    @staticmethod
+    def _checked() -> Scope:
+        return _council(verify="Check every claim against the source.")
+
+    def test_agreement_alone_does_not_end_it(self) -> None:
+        routes = _agent(self._checked().body, "verify")["routes"]
+        assert isinstance(routes, list)
+        agreed = routes[0]
+        assert isinstance(agreed, dict)
+        assert "verify.output.sound" in str(agreed["when"])
+        assert str(agreed["to"]) == "agreed"
+
+    def test_without_verification_agreement_is_the_only_test(self) -> None:
+        routes = _agent(_council().body, "report")["routes"]
+        assert isinstance(routes, list)
+        first = routes[0]
+        assert isinstance(first, dict)
+        assert "sound" not in str(first["when"])
+
+    def test_the_checker_can_go_and_look(self) -> None:
+        """A verifier that cannot read the source is another voice with an opinion."""
+        assert "tools" not in _agent(self._checked().body, "verify")
+
+    def test_it_is_told_to_refute_rather_than_improve(self) -> None:
+        prompt = str(_agent(self._checked().body, "verify")["prompt"])
+        assert "refute it, not to improve it" in prompt
+        assert "agreement between them is no evidence" in prompt
+
+    def test_corrections_reach_the_next_round(self) -> None:
+        """Otherwise the same refuted claim is argued again, with more confidence."""
+        deps = [(d.source.node_id, d.target.node_id) for d in self._checked().body.data_deps]
+        assert ("verify", "perf") in deps
+        prompt = str(_agent(self._checked().body, "perf")["prompt"])
+        assert "{% if verify is defined %}" in prompt
+        assert "did not survive being checked" in prompt
+
+    def test_what_was_struck_out_leaves_with_the_report(self) -> None:
+        template = _agent(self._checked().body, "agreed")["output_template"]
+        assert isinstance(template, dict)
+        assert set(template) == {
+            "outcome",
+            "report",
+            "dissent",
+            "unverified",
+            "rounds",
+            "corrections",
+        }
+
+    def test_voices_must_ground_their_claims(self) -> None:
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "A claim you have not checked is not a finding" in prompt
+
+    def test_the_checker_is_handed_what_nobody_could_verify(self) -> None:
+        """It is the shortest list of falsifiable claims in the round."""
+        body = self._checked().body
+        prompt = str(_agent(body, "verify")["prompt"])
+        assert "--- what they could not check ---" in prompt
+        assert "{{ report.output.unverified }}" in prompt
+        deps = [
+            (d.source.node_id, d.target.node_id, d.connection.target.name) for d in body.data_deps
+        ]
+        assert ("report", "verify", "unverified") in deps
+
+    def test_it_is_lint_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        parent = _host(self._checked())
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+class TestUnverifiedClaims:
+    """A lookup a voice could not perform must not leave as a finding.
+
+    The council that prompted this asserted four engine limitations that were
+    unwired fields; every voice had given up after one failed import, and the
+    output contract gave a blocked voice nowhere to say so except `concerns`,
+    which the report then read as a change request.
+    """
+
+    def test_a_voice_declares_somewhere_to_put_a_failed_lookup(self) -> None:
+        seat = _agent(_council().body, "perf")
+        assert isinstance(seat["output"], dict)
+        assert "unchecked" in seat["output"]
+
+    def test_a_voice_is_told_not_to_launder_it_into_concerns(self) -> None:
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "put it in `unchecked`" in prompt
+        assert "Do not route it into `concerns`" in prompt
+        assert "fact about this environment, not about" in prompt
+
+    def test_every_voice_reaches_the_report_with_it(self) -> None:
+        body = _council().body
+        deps = {(d.source.node_id, d.connection.target.name) for d in body.data_deps}
+        for spec in SPEAKERS:
+            assert (spec.node_id, f"{spec.node_id}__unchecked") in deps
+
+    def test_the_report_must_not_tidy_it_away(self) -> None:
+        report = _agent(_council().body, "report")
+        assert isinstance(report["output"], dict)
+        assert "unverified" in report["output"]
+        prompt = str(report["prompt"])
+        assert "must not tidy away" in prompt
+        assert "Voices agreeing is not evidence" in prompt
+
+    def test_it_leaves_with_every_outcome(self) -> None:
+        for name in ("agreed", "unresolved"):
+            template = _agent(_council().body, name)["output_template"]
+            assert isinstance(template, dict)
+            assert template["unverified"] == "{{ report.output.unverified }}"
+
+
+class TestVoiceTurnBudget:
+    """A voice with tools and the default ceiling dies rather than throttling."""
+
+    def test_a_voice_carries_its_own_ceiling_to_the_engine(self) -> None:
+        speakers = (
+            Voice(node_id="perf", persona="Paged once.", focus="io", tools=None, max_turns=250),
+            Voice(node_id="shape", persona="Maintains it.", focus="fit", tools=None, max_turns=90),
+        )
+        body = _council(voices=speakers).body
+        assert _agent(body, "perf")["max_agent_iterations"] == 250
+        assert _agent(body, "shape")["max_agent_iterations"] == 90
+
+    def test_a_voice_without_tools_needs_no_ceiling(self) -> None:
+        """It cannot spend turns it has no way to spend."""
+        assert "max_agent_iterations" not in _agent(_council().body, "perf")
+
+    def test_tools_without_a_ceiling_is_refused_at_composition(self) -> None:
+        """The failure it prevents costs a whole council to discover at run time."""
+        with pytest.raises(CompositionError, match="tools but no max_turns"):
+            _council(
+                voices=(
+                    Voice(node_id="perf", persona="Paged once.", focus="io", tools=None),
+                    Voice(node_id="shape", persona="Maintains it.", focus="fit"),
+                )
+            )
+
+
+class TestPerVoiceChecking:
+    """`verify_each` puts a checker behind every voice, before the round is written.
+
+    The failure it removes is triage. One checker facing a report of thirty
+    claims spends about a lookup on each, which buys the docstring and not the
+    code under it — observed on a live run, where the group checker struck out a
+    true finding after reading one of the two cases it covered. Four checkers
+    running at once have the same budget for a quarter of the material each.
+    """
+
+    def _scope(self, **kwargs: object) -> Scope:
+        return _council(verify_each="Check what this voice claimed.", **kwargs)
+
+    def test_it_is_off_unless_asked_for(self) -> None:
+        """It doubles the model calls in a round, so it is never the default."""
+        names = {n.node_id for n in _council().body.nodes}
+        assert not [n for n in names if n.endswith("_check")]
+
+    def test_one_checker_per_voice(self) -> None:
+        names = {n.node_id for n in self._scope().body.nodes}
+        for spec in SPEAKERS:
+            assert f"{spec.node_id}_check" in names
+
+    def test_they_run_at_once_rather_than_in_sequence(self) -> None:
+        """Independent checks in a chain spend four steps to learn four things."""
+        body = self._scope().body
+        group = next(g for g in body.groups if g.node_id == "checks")
+        assert {m.node_id for m in group.members} == {f"{s.node_id}_check" for s in SPEAKERS}
+
+    def test_each_reads_only_its_own_voice(self) -> None:
+        deps = {
+            (d.source.node_id, d.target.node_id, d.connection.target.name)
+            for d in self._scope().body.data_deps
+        }
+        for spec in SPEAKERS:
+            guard = f"{spec.node_id}_check"
+            for port in ("position", "concerns", "unchecked"):
+                assert (spec.node_id, guard, port) in deps
+            others = [s.node_id for s in SPEAKERS if s.node_id != spec.node_id]
+            assert not [o for o in others if (o, guard, "position") in deps]
+
+    def test_what_they_strike_reaches_the_report(self) -> None:
+        deps = {(d.source.node_id, d.connection.target.name) for d in self._scope().body.data_deps}
+        for spec in SPEAKERS:
+            assert (f"{spec.node_id}_check", f"{spec.node_id}__checked") in deps
+
+    def test_a_voice_reads_its_own_checker_next_round(self) -> None:
+        """Not the panel's: a voice can act on a claim of its own being struck."""
+        prompt = str(_agent(self._scope().body, "perf")["prompt"])
+        assert "{{ checks.outputs.perf_check.corrections }}" in prompt
+        assert "shape_check" not in prompt
+
+    def test_the_group_check_stops_feeding_voices_when_each_has_its_own(self) -> None:
+        """One source per port, or the two corrections would collide on it."""
+        scope = self._scope(verify="Check the report.")
+        deps = [(d.source.node_id, d.target.node_id) for d in scope.body.data_deps]
+        assert ("verify", "perf") not in deps
+        assert ("perf_check", "perf") in deps
+
+    def test_the_group_check_still_feeds_voices_when_it_is_the_only_one(self) -> None:
+        """The existing shape has to keep working."""
+        deps = [
+            (d.source.node_id, d.target.node_id)
+            for d in _council(verify="Check the report.").body.data_deps
+        ]
+        assert ("verify", "perf") in deps
+
+    def test_the_report_is_told_not_to_carry_a_struck_claim(self) -> None:
+        prompt = str(_agent(self._scope().body, "report")["prompt"])
+        assert "did not survive checking" in prompt
+        assert "do not quietly restate it" in prompt
+
+    def test_a_checker_is_told_that_a_citation_is_not_a_claim(self) -> None:
+        """Every citation in a report can be right and every inference wrong.
+
+        Observed: a table cited the correct class for a checkpoint field and
+        recommended wiring it, while the sentence disqualifying it sat in the
+        same docstring nobody re-opened.
+        """
+        prompt = str(_agent(self._scope().body, "perf_check")["prompt"])
+        assert "A correct citation is not a correct claim" in prompt
+        assert "whether anything nearby disqualifies the conclusion" in prompt
+
+    def test_a_checker_can_go_and_look(self) -> None:
+        """One that cannot is another voice with an opinion."""
+        emitted = _agent(self._scope().body, "perf_check")
+        assert "tools" not in emitted, "unset means the engine's full set"
+        assert emitted["max_agent_iterations"] == 200
+
+    def test_it_is_lint_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        parent = _host(self._scope(verify="Check the report."))
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+class TestVoicesAnswerEachOther:
+    """Without this a voice reads only the synthesis, never its neighbours.
+
+    The report is one more agent's compression of what everybody said, so a
+    voice reading it can restate its position but cannot disagree with anyone in
+    particular. Observed over several live runs: the voices discovered and
+    asserted round after round and never converged, because there was nothing
+    for them to converge *on* except a summary nobody wrote back to.
+    """
+
+    def test_it_is_on_by_default(self) -> None:
+        """It costs prompt tokens and no extra model calls."""
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "in their own words" in prompt
+
+    def test_a_voice_reads_every_other_voice(self) -> None:
+        deps = {
+            (d.source.node_id, d.target.node_id, d.connection.target.name)
+            for d in _council().body.data_deps
+        }
+        for reader in SPEAKERS:
+            for other in SPEAKERS:
+                if other.node_id == reader.node_id:
+                    continue
+                assert (other.node_id, reader.node_id, f"{other.node_id}__said") in deps
+                assert (other.node_id, reader.node_id, f"{other.node_id}__wants") in deps
+
+    def test_a_voice_does_not_read_itself(self) -> None:
+        deps = {(d.source.node_id, d.target.node_id) for d in _council().body.data_deps}
+        for spec in SPEAKERS:
+            assert (spec.node_id, spec.node_id) not in deps
+
+    def test_the_edges_say_they_are_a_round_behind(self) -> None:
+        """Seats run at once; only the previous pass is addressable."""
+        peer_edges = [
+            d
+            for d in _council().body.data_deps
+            if d.connection.target.name.endswith(("__said", "__wants"))
+        ]
+        assert peer_edges
+        assert all(d.previous_pass for d in peer_edges)
+
+    def test_it_asks_them_to_answer_by_name(self) -> None:
+        prompt = str(_agent(_council().body, "perf")["prompt"])
+        assert "Answer the ones you disagree with by name" in prompt
+        assert "four assessments filed together, not a council" in prompt
+
+    def test_the_neighbour_is_addressed_through_the_group(self) -> None:
+        """A member's output is only nameable via its group, and only an edge knows."""
+        emitted = _agent(_council().body, "perf")
+        assert "{{ voices.outputs.shape.position }}" in str(emitted["prompt"])
+        declared = emitted["input"]
+        assert isinstance(declared, list)
+        assert "voices.outputs.shape.position?" in declared
+        assert "voices.outputs.shape.concerns?" in declared
+
+    def test_turning_it_off_leaves_the_voices_isolated(self) -> None:
+        body = _council(deliberate=False).body
+        assert "in their own words" not in str(_agent(body, "perf")["prompt"])
+        assert not [d for d in body.data_deps if d.connection.target.name.endswith("__said")]
+
+    def test_it_is_lint_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        parent = _host(_council(verify="Check it."))
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+class TestReadingAPassThatNeverHappens:
+    """`previous_pass` on a graph with no loop renders empty, every time."""
+
+    def _flat(self) -> Pipeline:
+        p = Pipeline(pipeline_id="t", provider="claude-agent-sdk")
+        a = p.add(
+            AgentNode(
+                node_id="a",
+                prompt="x",
+                inputs=(InputPort("b", STR, optional=True),),
+                declared_outputs=(OutputPort("position", STR),),
+            )
+        )
+        b = p.add(
+            AgentNode(node_id="b", prompt="y", declared_outputs=(OutputPort("position", STR),))
+        )
+        group = p.parallel("panel", [a, b])
+        p.set_entry(group)
+        p.route(group, END)
+        return p
+
+    def test_a_sibling_read_is_refused_without_the_flag(self) -> None:
+        p = self._flat()
+        by_id = {n.node_id: n for n in p.nodes}
+        with pytest.raises(CompositionError, match="at the same time"):
+            p.feed(by_id["b"], "position", by_id["a"], "b")
+
+    def test_and_linted_with_it_when_there_is_no_loop(self) -> None:
+        p = self._flat()
+        by_id = {n.node_id: n for n in p.nodes}
+        p.feed(by_id["b"], "position", by_id["a"], "b", previous_pass=True)
+        assert [x for x in lint_pipeline(p) if "no loop" in x]

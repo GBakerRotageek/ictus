@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from ictus import (
     END,
     AgentNode,
@@ -21,6 +23,7 @@ from ictus import (
     Stage,
     WaitNode,
 )
+from ictus.errors import CompositionError
 from ictus.interfaces.conductor import ConductorBackend
 from ictus.interfaces.conductor.serialize import dump_yaml
 from ictus.stdlib import approval_gate, succeed
@@ -208,10 +211,16 @@ class TestRouteOrdering:
 
 
 class TestWorkflowBlock:
-    def test_checkpointing_is_enabled_only_when_a_gate_is_present(self) -> None:
+    def test_checkpointing_is_on_whether_or_not_a_gate_is_present(self) -> None:
+        """The crash worth a checkpoint is the one that raises nothing.
+
+        Conductor saves on failure by itself, so gating this on a gate left the
+        hang and the killed process — the two shapes that raise nothing and so
+        reach no failure handler — with no resume point at all.
+        """
         plain = Pipeline(pipeline_id="plain")
         plain.add(succeed(node_id="done", reason="d"))
-        assert "checkpoint" not in _d(_workflow(plain)["runtime"])
+        assert _d(_workflow(plain)["runtime"])["checkpoint"] == {"every_agent": True}
 
         gated = Pipeline(pipeline_id="gated")
         gate = gated.add(approval_gate(node_id="g", prompt="?"))
@@ -220,6 +229,27 @@ class TestWorkflowBlock:
         gated.set_entry(gate)
         gated.branch(gate, {"approved": ok, "rejected": no})
         assert _d(_workflow(gated)["runtime"])["checkpoint"] == {"every_agent": True}
+
+    def test_every_seconds_is_not_emitted_beside_every_agent(self) -> None:
+        """Conductor ignores it whenever `every_agent` is set (config/schema.py)."""
+        p = Pipeline(pipeline_id="t")
+        p.add(succeed(node_id="done", reason="d"))
+        assert "every_seconds" not in _d(_d(_workflow(p)["runtime"])["checkpoint"])
+
+    def test_a_wall_clock_ceiling_is_emitted_into_limits(self) -> None:
+        p = Pipeline(pipeline_id="t", timeout_seconds=900)
+        p.add(succeed(node_id="done", reason="d"))
+        assert _workflow(p)["limits"] == {"max_iterations": 1, "timeout_seconds": 900}
+
+    def test_no_ceiling_emits_no_key(self) -> None:
+        """Absent means unlimited; a zero or a default would be a number nobody chose."""
+        p = Pipeline(pipeline_id="t")
+        p.add(succeed(node_id="done", reason="d"))
+        assert "timeout_seconds" not in _d(_workflow(p)["limits"])
+
+    def test_a_ceiling_conductor_would_refuse_is_refused_where_it_is_written(self) -> None:
+        with pytest.raises(CompositionError, match="timeout_seconds must be >= 1"):
+            Pipeline(pipeline_id="t", timeout_seconds=0)
 
     def test_provider_is_always_explicit(self) -> None:
         """Conductor defaults to copilot; leaving it implicit fails at run time only."""

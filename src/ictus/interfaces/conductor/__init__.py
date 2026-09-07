@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
+from ictus.errors import IctusError
 from ictus.graph.node import NODE_KINDS
 from ictus.interfaces import Capabilities, Document, PreflightIssue, ValidationResult
 from ictus.interfaces.conductor.agents import agent_entry
@@ -27,6 +28,7 @@ from ictus.interfaces.conductor.parallel import parallel_block
 from ictus.interfaces.conductor.serialize import dump_yaml
 from ictus.interfaces.conductor.templates import output_block
 from ictus.interfaces.conductor.workflow import NOTHING_INHERITED, Inherited, workflow_block
+from ictus.interfaces.environment import executable_issues
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -53,6 +55,14 @@ class ConductorBackend:
             providers=frozenset(
                 {"copilot", "openai", "claude", "claude-agent-sdk", "hermes", "aca"}
             ),
+            # Conductor's `tools:` holds *workflow* tool names, which the
+            # claude-agent-sdk provider cannot translate to CLI tool ids — it
+            # raises ProviderError on a non-empty list rather than silently
+            # granting the wrong ones (providers/claude_agent_sdk.py).
+            tool_allowlists=False,
+            # `capabilities.session_continuity` is true for this one alone;
+            # config/validator.py:2458 rejects a session_key on any other.
+            remembering_providers=frozenset({"claude-agent-sdk"}),
             conditional_routes=True,
             cycles=True,
             sub_graphs=True,
@@ -67,8 +77,13 @@ class ConductorBackend:
         """
         # A map group's body lives inline under `for_each:`; emitting it here as
         # well would leave a step Conductor schedules once on its own.
+        # An unset system prompt is an *empty* one to the engine, not a default
+        # one, so what a step inherits has to be decided here and passed down.
+        baseline = pipeline.system_prompt or inherited.system_prompt
         agents: list[YamlValue] = [
-            agent_entry(pipeline, node) for node in pipeline.nodes if pipeline.map_of(node) is None
+            agent_entry(pipeline, node, baseline)
+            for node in pipeline.nodes
+            if pipeline.map_of(node) is None
         ]
         doc: YamlDict = {"workflow": workflow_block(pipeline, inherited), "agents": agents}
         groups = parallel_block(pipeline)
@@ -113,8 +128,16 @@ class ConductorBackend:
         Conductor validates that a provider *can* honour MCP. Whether the server
         is installed, the token is set and the endpoint answers is checked here,
         because nothing else checks it and the failure otherwise lands mid-run.
+
+        Declared executables are checked here too. They are not Conductor's
+        concern — a command on PATH means the same thing under any engine — but
+        preflight is one question, and asking it in two places would let one of
+        them be forgotten.
         """
-        return preflight_issues(pipeline, probe=probe)
+        return [
+            *executable_issues(pipeline, probe=probe),
+            *preflight_issues(pipeline, probe=probe),
+        ]
 
     def validate(self, paths: Sequence[Path]) -> list[ValidationResult]:
         """Ask Conductor's own validator whether each document loads."""
@@ -140,7 +163,9 @@ class ConductorBackend:
         inputs: Mapping[str, str],
         dashboard: bool,
         background: bool = False,
+        workspace_instructions: bool = True,
         working_dir: Path | None = None,
+        log_file: str | None = None,
     ) -> int:
         """Run a compiled workflow, serving the dashboard by default.
 
@@ -149,17 +174,55 @@ class ConductorBackend:
 
         ``working_dir`` is the directory the agents read and write in: Conductor
         resolves script paths and the model's own tools against the process's
-        cwd, so this is what "run it on that project" means. The workflow path
+        cwd, so this is what "run it on that project" means. It is also where
+        ``--workspace-instructions`` starts walking, which is why the two belong
+        to the same call. The workflow path
         is made absolute first, because it is almost never inside the project
         being worked on.
+
+        Detaching without a dashboard is refused rather than honoured on one
+        side: Conductor's ``--web-bg`` is what detaches, so a caller asking for
+        both got a served port anyway and no signal that its choice was dropped.
         """
+        if background and not dashboard:
+            raise IctusError(
+                "conductor detaches with --web-bg, which serves the dashboard: a "
+                "background run without one cannot be reached, and there is no flag "
+                "that does it. Ask for one or the other."
+            )
         command = [self._binary(), "run", str(path.resolve())]
         for name, value in inputs.items():
             command += ["-i", f"{name}={value}"]
+        if log_file is not None:
+            # Passed through verbatim: `auto` is Conductor's own spelling for a
+            # generated temp path, and anything else is taken as a file path.
+            command += ["--log-file", log_file]
+        if workspace_instructions:
+            # The provider runs every step with `setting_sources=[]` — no
+            # CLAUDE.md, no settings, no ambient skills — so a step arrives
+            # knowing nothing the project says about itself. This flag is the
+            # engine's own opt-in: it walks from the working directory up to the
+            # git root and prepends AGENTS.md, .github/copilot-instructions.md,
+            # CLAUDE.md and .github/instructions/*.instructions.md to every
+            # prompt. Nothing else ictus can emit reaches those files.
+            command.append("--workspace-instructions")
         if background:
             command.append("--web-bg")
         elif dashboard:
             command.append("--web")
+        return subprocess.run(command, check=False, cwd=working_dir).returncode
+
+    def plan(self, path: Path, *, working_dir: Path | None = None) -> int:
+        """Print the engine's execution plan for a compiled workflow, running nothing.
+
+        Separate from ``run`` rather than a flag on it, because it is not a run:
+        ``conductor run --dry-run`` builds its plan from the workflow file alone
+        (``cli/run.py``, ``build_dry_run_plan``), so inputs are not substituted,
+        no provider is constructed and nothing is spent. Passing the run-shape
+        flags would mean accepting a dashboard port and a detach for something
+        that prints and exits.
+        """
+        command = [self._binary(), "run", str(path.resolve()), "--dry-run"]
         return subprocess.run(command, check=False, cwd=working_dir).returncode
 
     @staticmethod

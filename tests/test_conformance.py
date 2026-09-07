@@ -24,6 +24,7 @@ from ictus import (
     ScriptNode,
     WaitNode,
 )
+from ictus.config import read_config
 from ictus.graph.pipeline import Pipeline as PipelineType
 from ictus.stdlib import approval_gate, choice_gate, succeed
 
@@ -48,9 +49,14 @@ def _authored_pipelines() -> list[tuple[str, PipelineType]]:
             if isinstance(getattr(module, name), PipelineType)
             for c in getattr(module, name).children.values()
         }
+        # The CLI applies the folder's config before anything else looks at the
+        # pipeline; a test that skipped it would be checking a workflow that
+        # never ships — with no provider, and so no session continuity.
+        settings = read_config(path.parent / "config.yaml")
         for name in sorted(dir(module)):
             value = getattr(module, name)
             if isinstance(value, PipelineType) and id(value) not in nested:
+                settings.apply(value, where=str(path.parent / "config.yaml"))
                 out.append((f"{path.parent.name}:{name}", value))
     return out
 

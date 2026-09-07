@@ -21,7 +21,7 @@ from ictus.errors import CompositionError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["EnvVar", "McpServer", "McpTransport"]
+__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport"]
 
 
 class McpTransport(StrEnum):
@@ -43,6 +43,40 @@ class EnvVar:
     name: str
     purpose: str = ""
     secret: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class Executable:
+    """A command that must be on ``PATH`` before the pipeline runs.
+
+    Declared for the same reason an ``EnvVar`` is: so "this pipeline reads
+    Conductor's own source" stops being knowledge in the author's head and
+    becomes something preflight can refuse on.
+
+    The failure this exists to prevent is not a crash. A step told to go and
+    check something against a tool that is not reachable does not fail — it
+    reports that the thing it was checking does not exist, which is a confident
+    wrong answer that costs a whole run to produce and looks exactly like a
+    considered one. Better to refuse at the launch, for free.
+
+    ``probe`` are arguments that prove the command actually answers, run only
+    when preflight is probing. ``--version`` is the usual one. Left empty, the
+    check is presence on ``PATH`` and nothing more.
+    """
+
+    name: str
+    purpose: str
+    probe: tuple[str, ...] = ()
+    setup_hint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise CompositionError("an executable requirement needs a command name")
+        if not self.purpose:
+            raise CompositionError(
+                f"executable {self.name!r} needs a purpose; it is what the person "
+                "being asked to install it will read"
+            )
 
 
 @dataclass(frozen=True, slots=True)

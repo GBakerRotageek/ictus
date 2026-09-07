@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
@@ -14,11 +15,14 @@ from ictus.errors import IctusError
 from ictus.gate import add_start_gate
 from ictus.graph.pipeline import Pipeline
 from ictus.interfaces.conductor import conductor
+from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ictus.interfaces import PreflightIssue
 
 app = typer.Typer(
@@ -71,14 +75,30 @@ def _load_module(module_path: Path) -> list[Pipeline]:
     return [p for p in found if id(p) not in nested]
 
 
-def _load(folder: PipelineFolder) -> list[Pipeline]:
+def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeline]:
     """The pipelines a folder defines, with its run policy applied.
 
     Policy and the start gate are applied here rather than in the composition so
     every command sees the same thing: a lint reading a different provider from
     the emit would be checking a workflow nobody runs.
+
+    ``require_config`` is what ``lint`` relaxes. A folder with no ``config.yaml``
+    used to fail before a single composition rule ran, so the one command whose
+    whole job is to find problems in a graph reported exactly one problem and it
+    was about a file. The graph is still worth checking; what the run would do
+    with it is not yet decided. A malformed config still fails either way — that
+    is an error to fix, not a decision left open.
     """
     pipelines = _load_module(folder.module)
+    if not require_config and not folder.config_file.is_file():
+        typer.secho(
+            f"warning: {folder.config_file} does not exist, so the run policy is unknown. "
+            "Checking the graph only — the provider and the start gate are not applied, "
+            "and `ictus emit` will still refuse this folder.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        return pipelines
     try:
         settings = read_config(folder.config_file)
         _check_provider(settings.provider, where=str(folder.config_file))
@@ -137,21 +157,70 @@ def _descendants(pipeline: Pipeline) -> list[Pipeline]:
 BACKEND = conductor
 
 
-def _write(pipeline: Pipeline, out: Path) -> list[Path]:
+@dataclass(frozen=True, slots=True)
+class _Written:
+    """One emitted file, and what writing it did to the bytes already there.
+
+    ``build/`` is committed, so "did this write move the artifact" is the thing
+    a caller needs to report. A compile that produces identical bytes is not a
+    change, and saying "emitted" for it hides the writes that are.
+    """
+
+    path: Path
+    status: Literal["wrote", "updated", "same"]
+
+    @property
+    def changed(self) -> bool:
+        return self.status != "same"
+
+
+def _write(pipeline: Pipeline, out: Path) -> list[_Written]:
     """Compile and write every document a pipeline produces.
 
     Each file goes to a temporary sibling and is renamed, so a failure part way
     through cannot leave a truncated document that still parses.
     """
     out.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
+    written: list[_Written] = []
     for document in BACKEND.compile(pipeline):
         target = out / document.filename
+        before = target.read_text(encoding="utf-8") if target.is_file() else None
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(document.content, encoding="utf-8")
         tmp.replace(target)
-        written.append(target)
+        status: Literal["wrote", "updated", "same"] = (
+            "wrote" if before is None else "same" if before == document.content else "updated"
+        )
+        written.append(_Written(target, status))
     return written
+
+
+def _prune(destination: Path, keep: set[Path]) -> list[Path]:
+    """Delete YAML in ``destination`` that no pipeline claims."""
+    if not destination.is_dir():
+        return []
+    stale = sorted(set(destination.glob("*.yaml")) - keep)
+    for path in stale:
+        path.unlink()
+    return stale
+
+
+def _report_written(written: Sequence[_Written], pruned: Sequence[Path]) -> None:
+    """Say which committed files moved, so the write is auditable without a diff."""
+    for path in pruned:
+        typer.secho(f"pruned  {path}", fg=typer.colors.YELLOW)
+    for item in sorted(written, key=lambda w: w.path):
+        colour = typer.colors.YELLOW if item.changed else None
+        typer.secho(f"{item.status:<7} {item.path}", fg=colour)
+
+
+def _refuse_problems(problems: list[str], *, consequence: str) -> None:
+    """Report composition problems and stop, naming what did not happen."""
+    if not problems:
+        return
+    for problem in problems:
+        typer.secho(f"  - {problem}", fg=typer.colors.RED, err=True)
+    _fail(f"{len(problems)} composition problem(s); {consequence}")
 
 
 @app.command()
@@ -173,8 +242,10 @@ def emit(
     what changed in what actually runs.
     """
     folders = _folders(where)
-    targets = [(f, out if out is not None else f.build) for f in folders]
-    pipelines = [p for folder, _ in targets for p in _load(folder)]
+    # Loaded once: emitting objects re-loaded after the lint would write a graph
+    # nothing checked, because a module is free to build a different one.
+    targets = [(out if out is not None else f.build, _load(f)) for f in folders]
+    pipelines = [p for _, group in targets for p in group]
     if not pipelines:
         _fail(f"no pipelines found in {where} (nothing was emitted)")
 
@@ -189,29 +260,23 @@ def emit(
                 )
             seen[document.filename] = pipeline.pipeline_id
         problems.extend(lint_pipeline(pipeline, backend=BACKEND))
-    if problems:
-        for problem in problems:
-            typer.secho(f"  - {problem}", fg=typer.colors.RED, err=True)
-        _fail(f"{len(problems)} composition problem(s); nothing was written")
+    _refuse_problems(problems, consequence="nothing was written")
 
-    written: set[Path] = set()
-    for folder, destination in targets:
-        for pipeline in _load(folder):
+    written: list[_Written] = []
+    for destination, group in targets:
+        for pipeline in group:
             try:
-                written.update(_write(pipeline, destination))
+                written.extend(_write(pipeline, destination))
             except IctusError as exc:
                 _fail(f"{pipeline.pipeline_id}: {exc}")
 
+    pruned: list[Path] = []
     if prune:
-        for _, destination in targets:
-            if not destination.is_dir():
-                continue
-            for stale in sorted(set(destination.glob("*.yaml")) - written):
-                stale.unlink()
-                typer.echo(f"pruned {stale}")
+        keep = {item.path for item in written}
+        for destination in dict.fromkeys(d for d, _ in targets):
+            pruned.extend(_prune(destination, keep))
 
-    for path in sorted(written):
-        typer.echo(f"emitted {path}")
+    _report_written(written, pruned)
     typer.secho(
         f"{len(written)} workflow(s) from {len(pipelines)} pipeline(s)", fg=typer.colors.GREEN
     )
@@ -224,7 +289,7 @@ def lint(
     ),
 ) -> None:
     """Run the composition lints without writing anything."""
-    pipelines = [p for folder in _folders(where) for p in _load(folder)]
+    pipelines = [p for folder in _folders(where) for p in _load(folder, require_config=False)]
     if not pipelines:
         _fail(f"no pipelines found in {where}")
     problems = [p for pipeline in pipelines for p in lint_pipeline(pipeline, backend=BACKEND)]
@@ -267,9 +332,13 @@ def preflight(
     issues: list[PreflightIssue] = []
     for pipeline in pipelines:
         declared = pipeline.all_mcp_servers()
-        typer.echo(f"{pipeline.pipeline_id}: {len(declared)} requirement(s) declared")
+        commands = pipeline.all_executables()
+        total = len(declared) + len(commands)
+        typer.echo(f"{pipeline.pipeline_id}: {total} requirement(s) declared")
         for server in declared:
             typer.echo(f"  - mcp:{server.name} — {server.purpose}")
+        for tool in commands:
+            typer.echo(f"  - exe:{tool.name} — {tool.purpose}")
         issues.extend(BACKEND.preflight(pipeline, probe=probe))
     _report_preflight(issues, probed=probe)
     if any(i.blocking for i in issues):
@@ -332,6 +401,13 @@ def run(
         bool, typer.Option(help="Serve the dashboard so gates can be answered remotely")
     ] = True,
     probe: Annotated[bool, typer.Option(help="Open each declared connection at preflight")] = True,
+    workspace_instructions: Annotated[
+        bool | None,
+        typer.Option(
+            "--workspace-instructions/--no-workspace-instructions",
+            help="Read the target project's CLAUDE.md/AGENTS.md (default: config.yaml, else on)",
+        ),
+    ] = None,
     skip_preflight: Annotated[
         bool, typer.Option(help="Launch without checking the environment first")
     ] = False,
@@ -341,14 +417,26 @@ def run(
     background: Annotated[
         bool,
         typer.Option(
-            "--background",
-            "-b",
-            help="Detach and return once started — the right mode for a gated pipeline",
+            "--background/--foreground",
+            "-b/-F",
+            help="Detach and let the dashboard drive, rather than tying the run to this terminal",
         ),
-    ] = False,
+    ] = True,
     inputs: Annotated[
         list[str] | None,
         typer.Option("--input", "-i", help="Override one input as name=value; repeatable"),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the execution plan and stop, spending nothing"),
+    ] = False,
+    log_file: Annotated[
+        str | None,
+        typer.Option(
+            "--log-file",
+            "-l",
+            help="Write full debug output here, or 'auto' for a generated temp file",
+        ),
     ] = None,
 ) -> None:
     """Run a pipeline folder against a project.
@@ -357,7 +445,21 @@ def run(
     project and go. A `repo:` key in the input file, or `--repo`, overrides that
     — a run that touches a checkout can then say which one in something you can
     commit.
+
+    Detached by default. A foreground run holds the terminal: Conductor puts it
+    in cbreak mode for its interrupt listener and answers gates there, and
+    anything that blocks on it blocks the same event loop that serves the
+    dashboard — so the browser freezes on whatever it last saw and the run looks
+    hung when it is waiting for a keystroke nobody is watching. Detached, the
+    dashboard is the only place anything is answered, which is the one place you
+    are looking.
     """
+    if background and not web:
+        _fail(
+            "--background and --no-web cannot both hold: a detached run's gates are "
+            "only answerable through the dashboard, so there would be no way to "
+            "reach it. Drop one."
+        )
     started_in = Path.cwd()
     try:
         target = PipelineFolder.at(folder)
@@ -365,6 +467,15 @@ def run(
         _fail(str(exc))
         return
     pipeline = _only(target)
+    # Before the inputs, because a broken graph is a source defect and saying so
+    # first is more use than asking for values that will not be spent. Before
+    # `_write` and the launch, because `--reemit` is on by default: without this
+    # the committed artifact is overwritten with output nothing checked, and then
+    # run.
+    _refuse_problems(
+        lint_pipeline(pipeline, backend=BACKEND),
+        consequence="nothing was compiled or launched",
+    )
 
     spec = None
     source = input_file if input_file is not None else target.input_file
@@ -389,7 +500,10 @@ def run(
         known = ", ".join(sorted(declared)) or "(none)"
         _fail(f"{unknown} are not inputs of {pipeline.pipeline_id!r}; declared: {known}")
     missing = sorted(n for n, d in declared.items() if d.required and n not in supplied)
-    if missing:
+    # A dry run substitutes nothing, so demanding values it will never spend
+    # would put the plan behind the very inputs you are reading it to decide.
+    # A *misspelled* one is still refused above: that is a defect either way.
+    if missing and not dry_run:
         hint = f" Add them to {source}," if source.is_file() else f" Create {target.input_file},"
         _fail(f"{pipeline.pipeline_id!r} requires {missing}.{hint} or pass -i name=value.")
 
@@ -403,12 +517,26 @@ def run(
 
     if reemit:
         try:
-            _write(pipeline, target.build)
+            written = _write(pipeline, target.build)
         except IctusError as exc:
             _fail(f"{pipeline.pipeline_id}: {exc}")
+            raise
+        # Only the moves: a reemit that says nothing has confirmed `build/` was
+        # already what the source compiles to, which is the common case and the
+        # one worth being quiet about.
+        _report_written(
+            [item for item in written if item.changed],
+            _prune(target.build, {item.path for item in written}),
+        )
     path = target.build / f"{pipeline.pipeline_id}.yaml"
     if not path.is_file():
         _fail(f"{path} does not exist; run `ictus emit {folder}` first")
+
+    if dry_run:
+        # Ahead of preflight, which opens real connections: a plan that spends
+        # nothing should not need a live environment to print.
+        typer.secho(f"{pipeline.pipeline_id}: plan only, nothing runs", fg=typer.colors.CYAN)
+        raise typer.Exit(code=BACKEND.plan(path, working_dir=working))
 
     if not skip_preflight:
         # Preflight reads the pipeline module, not the emitted file: the
@@ -429,22 +557,73 @@ def run(
         preview = supplied[name].replace("\n", " ")
         typer.echo(f"  {name} = {preview[:70]}{'…' if len(preview) > 70 else ''}")
 
+    # Re-read rather than thread it through `_load`: the policy is a property of
+    # the folder, and a flag on the command line beats the file.
+    reads_project = (
+        workspace_instructions
+        if workspace_instructions is not None
+        else _policy(target).workspace_instructions
+    )
+    if reads_project:
+        typer.secho(
+            "  reading the project's own instruction files (CLAUDE.md, AGENTS.md)",
+            fg=typer.colors.BRIGHT_BLACK,
+        )
+
     try:
         code = BACKEND.run(
             path,
             inputs=supplied,
             dashboard=web,
             background=background,
+            workspace_instructions=reads_project,
             working_dir=working,
+            log_file=log_file,
         )
     except FileNotFoundError as exc:
         _fail(str(exc))
         return
+    _report_activity(pipeline.pipeline_id, background=background)
     raise typer.Exit(code=code)
 
 
-if __name__ == "__main__":
-    app()
+def _report_activity(workflow: str, *, background: bool) -> None:
+    """Say which steps answered without looking at anything.
+
+    A run's exit code says whether it finished, not whether it thought. The
+    engine already records every tool call; not reading them back is how a
+    council shipped a report whose findings nobody had checked. A background run
+    is still going, so it gets the command instead of the answer.
+    """
+    if background:
+        typer.secho(f"\nwhen it finishes: ictus trace {workflow}", fg=typer.colors.BRIGHT_BLACK)
+        return
+    found = find_logs(workflow)
+    if not found:
+        return
+    try:
+        seen = read_trace(found[0])
+    except OSError:
+        return
+    idle = seen.incurious
+    if idle:
+        typer.secho(
+            f"\n{len(idle)} step(s) answered without consulting anything: "
+            f"{', '.join(s.name for s in idle)}",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo(
+            "Right for a step whose whole input is in its prompt, wrong for one asked "
+            f"to assess something it was only shown a summary of. `ictus trace {workflow}` "
+            "shows what each one opened."
+        )
+    stopped = seen.capped
+    if stopped:
+        typer.secho(
+            f"\n{len(stopped)} step(s) hit the turn ceiling: "
+            f"{', '.join(s.name for s in stopped)}. Give them max_turns.",
+            fg=typer.colors.RED,
+        )
 
 
 @app.command()
@@ -468,4 +647,118 @@ def init(
             continue
         target.write_text(body, encoding="utf-8")
         typer.secho(f"wrote {target}", fg=typer.colors.GREEN)
-    typer.echo(f"\nnow: ictus lint {folder} && ictus run {folder}")
+    # Deliberately stops short of `ictus run`. The old closing line named it, and
+    # following the tool's own instruction on an untouched folder starts a real,
+    # billable Conductor process against a placeholder.
+    typer.echo(
+        f"\nnext:\n"
+        f"  1. {folder / 'pipeline.py'} — replace CHANGE-ME with a name, "
+        f"then say what the step does\n"
+        f"  2. {folder / 'input.md'} — the values to run it on\n"
+        f"  3. ictus lint {folder}\n"
+    )
+
+
+def _declared_ceilings(pipeline: Pipeline, _into: dict[str, int] | None = None) -> dict[str, int]:
+    """Each step's own ``max_turns``, including those inside nested stages.
+
+    A stage compiles to its own workflow file but its steps appear in the parent
+    run's event log under their own names, so a trace of the whole run needs
+    every level's limits or it measures a stage's steps against the default.
+    """
+    found = {} if _into is None else _into
+    for node in pipeline.nodes:
+        limit = getattr(node, "max_turns", None)
+        if limit is not None:
+            found[node.node_id] = limit
+    for child in pipeline.children.values():
+        _declared_ceilings(child, found)
+    return found
+
+
+@app.command()
+def trace(
+    folder: Annotated[
+        Path | None,
+        typer.Argument(help="A pipeline folder, to trace its most recent run"),
+    ] = None,
+    log: Annotated[Path | None, typer.Option("--log", help="Read this event log instead")] = None,
+    files: Annotated[bool, typer.Option(help="List what each step opened")] = False,
+) -> None:
+    """Show what each step of the last run actually did.
+
+    A step's output says what it concluded. It does not say whether it looked at
+    anything first, and those are different runs that read identically. The
+    engine records every tool call already; this reads them back.
+    """
+    ceilings: dict[str, int] = {}
+    if log is not None:
+        path = log
+    else:
+        located = PipelineFolder.at(folder or Path())
+        pipeline = _only(located)
+        ceilings = _declared_ceilings(pipeline)
+        found = find_logs(pipeline.pipeline_id)
+        if not found:
+            _fail(
+                f"no run of {pipeline.pipeline_id!r} found under {LOG_DIR}. "
+                "Runs write an event log as they go; this one may not have started."
+            )
+        path = found[0]
+    if not path.is_file():
+        _fail(f"{path} does not exist")
+
+    seen = read_trace(path, ceilings=ceilings)
+    typer.secho(f"{seen.workflow}  {path.name}", fg=typer.colors.CYAN)
+    if not seen.steps:
+        typer.echo("no steps recorded yet")
+        return
+
+    header = f"  {'step':<20} {'turns':>5} {'looked':>7} {'tokens':>8} {'cost':>8}  tools"
+    typer.secho(header, fg=typer.colors.BRIGHT_BLACK)
+    for step in seen.steps.values():
+        used = ", ".join(f"{t}x{n}" for t, n in step.tools.most_common()) or "—"
+        colour = typer.colors.YELLOW if not step.looked and step.turns else None
+        typer.secho(
+            f"  {step.name:<20} {step.turns:>5} {step.investigated:>7} "
+            f"{step.tokens:>8} {step.cost_usd:>8.4f}  {used}",
+            fg=colour,
+        )
+        if files and step.reads:
+            for target in dict.fromkeys(step.reads):
+                typer.secho(f"      {target}", fg=typer.colors.BRIGHT_BLACK)
+
+    stopped = seen.capped
+    if stopped:
+        typer.secho(
+            f"\n{len(stopped)} step(s) hit the turn ceiling: {', '.join(s.name for s in stopped)}",
+            fg=typer.colors.RED,
+        )
+        typer.echo(
+            "A step that runs out of turns does not return what it had — the provider "
+            "raises, and that error is not one a scope can turn into an outcome, so it "
+            "fails the whole run. Give it max_turns."
+        )
+
+    idle = seen.incurious
+    if idle:
+        typer.secho(
+            f"\n{len(idle)} step(s) answered without consulting anything: "
+            f"{', '.join(s.name for s in idle)}",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo(
+            "That is right for a step whose whole input is in its prompt, and wrong "
+            "for one asked to assess something it was only shown a summary of."
+        )
+
+
+# Last in the file, and it must stay last. Under `python -m ictus.cli` this
+# guard is true and the module stops executing here, so a command decorated
+# below it is never registered — while the console script, which imports the
+# module rather than running it, registers everything. `trace` sat below this
+# for a release: `ictus trace` worked, `python -m ictus.cli trace` said no such
+# command, and the docs looked wrong. `test_every_command_is_reachable` is what
+# keeps it honest.
+if __name__ == "__main__":
+    app()

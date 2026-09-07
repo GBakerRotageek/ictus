@@ -135,15 +135,7 @@ def output_block(pipeline: Pipeline) -> YamlDict:
                 if exposed.port.port_type is PortType.STRING
                 else exposed.default
             )
-            expression = (
-                "{% if "
-                + root
-                + " is defined %}"
-                + expression
-                + "{% else %}"
-                + fallback
-                + "{% endif %}"
-            )
+            expression = _guarded(f"{root} is defined", expression, fallback)
         out[name] = expression
     return out
 
@@ -177,14 +169,25 @@ def render_settled(pipeline: Pipeline, node: RouteEnd, value: str | Template) ->
     survives as a string that looks like data. ``| tojson`` is what makes the
     round trip lossless, and it only applies to a lone reference: a structured
     value spliced into surrounding prose is prose.
+
+    A fallback does not opt the value out of that. It used to: the reference fell
+    through to ``| default('[]')``, which both dropped ``| tojson`` from the
+    branch that had a value *and* quoted the fallback into a string. What a
+    fallback changes is where the empty case comes from, not what type either
+    case arrives as — so both branches emit JSON, the same way ``output_block``
+    already does for the workflow's own output map.
     """
     if isinstance(value, Template) and len(value.parts) == 1:
         part = value.parts[0]
-        if isinstance(part, Ref) and part.port_type in _STRUCTURED and part.fallback is None:
-            path = reference_path(pipeline, part) + " | tojson"
-            if _needs_guard(pipeline, node, part):
-                return _guarded(guard_test(pipeline, part), "{{ " + path + " }}")
-            return "{{ " + path + " }}"
+        if isinstance(part, Ref) and part.port_type in _STRUCTURED:
+            live = "{{ " + reference_path(pipeline, part) + " | tojson }}"
+            # A reference that needs no guard is always defined, so `default()`
+            # could never have fired and there is no branch for a fallback to be.
+            if not _needs_guard(pipeline, node, part):
+                return live
+            # Raw, not quoted: a structured fallback is already a JSON literal —
+            # `_EMPTY_FOR` spells the empty ones "{}" and "[]".
+            return _guarded(guard_test(pipeline, part), live, part.fallback)
     return render(pipeline, node, value)
 
 
@@ -202,7 +205,19 @@ def _part(
     if isinstance(part, Comparison):
         operator = "!=" if part.negated else "=="
         path = reference_path(pipeline, part.ref)
-        test = f"{path} {operator} '{part.value}'"
+        # One spelling per value type, and bool is tested first because it is a
+        # subclass of int. `| int` for a number, for AtLeast's reason: the value
+        # arrives as whatever `_maybe_parse_json` made of it, and an unfiltered
+        # `0 == 0` against a rendered string is false rather than an error.
+        # A bool renders Jinja's bare literal — quoted, it would never match the
+        # real bool the engine stored. Which spelling is legal for which port is
+        # settled at composition by `equals`.
+        if isinstance(part.value, bool):
+            test = f"{path} {operator} {str(part.value).lower()}"
+        elif isinstance(part.value, int):
+            test = f"{path} | int {operator} {part.value}"
+        else:
+            test = f"{path} {operator} '{part.value}'"
         return _condition(pipeline, node, test, (part.ref,))
     if isinstance(part, Every):
         # `not (a and b)` rather than `not a or not b`: one negation to read, and
@@ -255,9 +270,15 @@ def _expression(path: str, fallback: str | None = None) -> str:
     return "{{ " + path + " }}"
 
 
-def _guarded(condition: str, body: str) -> str:
-    """Wrap ``body`` so it renders only when ``condition`` holds."""
-    return "{% if " + condition + " %}" + body + "{% endif %}"
+def _guarded(condition: str, body: str, otherwise: str | None = None) -> str:
+    """Wrap ``body`` so it renders only when ``condition`` holds.
+
+    ``otherwise`` is what the other branch emits. Both branches have to produce
+    the same shape wherever the result is parsed back, so the two callers that
+    need one build it here rather than each spelling out the block.
+    """
+    tail = "" if otherwise is None else "{% else %}" + otherwise
+    return "{% if " + condition + " %}" + body + tail + "{% endif %}"
 
 
 def guard_test(pipeline: Pipeline, ref: Ref) -> str:

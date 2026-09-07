@@ -34,6 +34,7 @@ __all__ = [
     "Ref",
     "Template",
     "TemplatePart",
+    "as_template",
     "at_least",
     "equals",
     "every",
@@ -128,10 +129,17 @@ class Comparison:
     ``tpl(ref)`` interpolates — ``{{ x }}`` — which is right for a boolean and
     useless for anything else. Choosing a branch by a gate's answer needs the
     test *inside* the braces, which is a different shape entirely.
+
+    Each value type has its own spelling: a string is quoted, an ``int`` goes
+    through ``| int`` for the reason :class:`AtLeast` spells out, and a ``bool``
+    renders Jinja's bare ``true``/``false``. Which one applies is decided by the
+    value's Python type and checked against the port's declared type, so a
+    mismatch — ``0 == '0'``, ``True == 'true'``, both quietly false — is refused
+    where it is written rather than discovered as a branch that never fires.
     """
 
     ref: Ref
-    value: str
+    value: str | int | bool
     negated: bool = False
 
     def refs(self) -> Iterator[Ref]:
@@ -225,14 +233,91 @@ def tpl(*parts: TemplatePart) -> Template:
     return Template(tuple(parts))
 
 
-def equals(ref: Ref, value: str) -> Template:
-    """A condition that holds when ``ref`` equals ``value``."""
+def as_template(value: str | Template | Ref) -> str | Template:
+    """A bare reference, wrapped so every reader downstream sees one shape.
+
+    Authors reach for ``node.ref("x")`` first, and it is the only spelling a
+    reference lint can see: a hand-written ``{{ ... }}`` is opaque text. So the
+    constructors accept a ``Ref`` and narrow here, rather than making the string
+    the only form that fits.
+    """
+    return tpl(value) if isinstance(value, Ref) else value
+
+
+def equals(ref: Ref, value: str | int | bool) -> Template:
+    """A condition that holds when ``ref`` equals ``value``.
+
+    The value's Python type has to match the port's declared type — pass a
+    ``str`` for a string port, an ``int`` for a number, ``True``/``False`` for a
+    boolean. See :func:`_check_comparable` for why a mismatch is refused rather
+    than rendered.
+    """
+    _check_comparable(ref, value)
     return Template((Comparison(ref=ref, value=value),))
 
 
-def not_equals(ref: Ref, value: str) -> Template:
+def not_equals(ref: Ref, value: str | int | bool) -> Template:
     """A condition that holds when ``ref`` does not equal ``value``."""
+    _check_comparable(ref, value)
     return Template((Comparison(ref=ref, value=value, negated=True),))
+
+
+#: What a value has to be for each port type it can be compared against, and how
+#: the mismatch is spelled for whoever has to fix it.
+_COMPARABLE: dict[PortType, tuple[type, str]] = {
+    PortType.STRING: (str, "a quoted string"),
+    PortType.NUMBER: (int, "an int"),
+    PortType.BOOLEAN: (bool, "True or False"),
+}
+
+
+def _check_comparable(ref: Ref, value: str | int | bool) -> None:
+    """Refuse a comparison whose two sides do not render as the same Jinja type.
+
+    A route condition is evaluated against the value the engine stored, not
+    against its rendered text, so the type is real on that side: a boolean port
+    holds ``True`` and a number holds ``0``. Comparing either to a quoted string
+    produces a condition that is well-formed, never true, and silently sends
+    every run down the catch-all — the failure a route exists to prevent,
+    arriving as a branch nobody took rather than as an error somebody saw.
+    """
+    expected = _COMPARABLE.get(ref.port_type)
+    if expected is None:
+        raise CompositionError(
+            f"{ref.source_id}.{ref.port} is {ref.port_type.value}, which equals() cannot "
+            "compare: a container never equals a scalar literal, so the test would be false "
+            "on every run. Route on a scalar the step also declares."
+        )
+    wanted, hint = expected
+    if _kind(value) is not wanted:
+        raise CompositionError(
+            f"{ref.source_id}.{ref.port} is {ref.port_type.value}, so comparing it to "
+            f"{value!r} renders `{_rendered(value)}` and is never true; pass {hint}"
+            + (
+                ". A boolean route is usually spelled tpl(ref) for true and "
+                "not_every(ref) for false"
+                if ref.port_type is PortType.BOOLEAN
+                else ""
+            )
+        )
+
+
+def _kind(value: str | int | bool) -> type:
+    """``bool`` is a subclass of ``int``, so the order of these tests is the rule."""
+    if isinstance(value, bool):
+        return bool
+    if isinstance(value, int):
+        return int
+    return str
+
+
+def _rendered(value: str | int | bool) -> str:
+    """What the comparison would have become, for an error the reader can check."""
+    if isinstance(value, bool):
+        return f"== {str(value).lower()}"
+    if isinstance(value, int):
+        return f"| int == {value}"
+    return f"== '{value}'"
 
 
 def every(*refs: Ref) -> Template:

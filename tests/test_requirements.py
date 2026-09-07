@@ -15,6 +15,7 @@ from ictus import (
     AgentNode,
     CompositionError,
     EnvVar,
+    Executable,
     InputPort,
     McpServer,
     McpTransport,
@@ -163,3 +164,82 @@ class TestPreflight:
         p = _pipeline(server)
         assert conductor.preflight(p, probe=False) == []
         assert [i for i in conductor.preflight(p, probe=True) if "unreachable" in i.problem]
+
+
+def _with_tool(*tools: Executable) -> Pipeline:
+    p = Pipeline(pipeline_id="t")
+    node = p.add(AgentNode(node_id="a", prompt="x"))
+    p.route(node, END)
+    for tool in tools:
+        p.require_executable(tool)
+    return p
+
+
+class TestDeclaredExecutables:
+    """A tool a step checks its claims against is a requirement like any other.
+
+    The failure mode is what makes this worth refusing on: a missing MCP server
+    breaks a step, but a missing *reference* tool does not — the step runs, the
+    lookup fails, and the model reports the thing it was checking as absent.
+    That answer costs a full run and is indistinguishable from a real one.
+    """
+
+    def test_a_missing_command_blocks_the_launch(self) -> None:
+        p = _with_tool(Executable(name="definitely-not-installed-xyz", purpose="ground truth"))
+        issues = conductor.preflight(p, probe=False)
+        assert [i for i in issues if i.requirement == "exe:definitely-not-installed-xyz"]
+        assert all(i.blocking for i in issues)
+
+    def test_the_purpose_reaches_whoever_has_to_fix_it(self) -> None:
+        p = _with_tool(
+            Executable(
+                name="definitely-not-installed-xyz",
+                purpose="the schema claims are checked against",
+                setup_hint="uv tool install widget",
+            )
+        )
+        issue = conductor.preflight(p, probe=False)[0]
+        assert "the schema claims are checked against" in issue.problem
+        assert issue.remedy == "uv tool install widget"
+
+    def test_a_present_command_is_clean(self) -> None:
+        assert conductor.preflight(_with_tool(Executable(name="sh", purpose="p")), probe=True) == []
+
+    def test_on_path_is_not_the_same_as_working(self) -> None:
+        """A probe catches the command that exists and still cannot answer."""
+        tool = Executable(name="sh", purpose="p", probe=("-c", "exit 3"))
+        p = _with_tool(tool)
+        assert conductor.preflight(p, probe=False) == []
+        issues = conductor.preflight(p, probe=True)
+        assert [i for i in issues if "exited 3" in i.problem]
+
+    def test_a_stage_requirement_is_the_callers_problem_too(self) -> None:
+        """A stage runs in the caller's environment, so preflight must see it."""
+        stage = Stage(stage_id="inner")
+        param = stage.body.declare_input("x", STR)
+        step = stage.body.add(
+            AgentNode(
+                node_id="w",
+                inputs=(InputPort("x", STR),),
+                prompt="w",
+                declared_outputs=(OutputPort("y", STR),),
+            )
+        )
+        stage.body.connect_input(param, step, "x")
+        stage.body.route(step, END)
+        stage.body.expose_output("y", step, "y")
+        stage.body.require_executable(
+            Executable(name="definitely-not-installed-xyz", purpose="ground truth")
+        )
+        parent = _with_tool(Executable(name="sh", purpose="p"))
+        stage.instantiate(parent)
+        assert {t.name for t in parent.all_executables()} == {
+            "sh",
+            "definitely-not-installed-xyz",
+        }
+        assert [i for i in conductor.preflight(parent, probe=False) if "not on PATH" in i.problem]
+
+    def test_a_duplicate_name_is_refused_where_it_is_written(self) -> None:
+        p = _with_tool(Executable(name="sh", purpose="p"))
+        with pytest.raises(CompositionError, match="already requires an executable"):
+            p.require_executable(Executable(name="sh", purpose="q"))

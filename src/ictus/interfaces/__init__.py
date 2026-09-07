@@ -63,6 +63,25 @@ class Capabilities:
     has been compiled.
     """
 
+    remembering_providers: frozenset[str] = frozenset()
+    """Providers whose steps can resume a session rather than starting cold.
+
+    A step that starts cold has read nothing, whatever it read last time round
+    the loop. Not every provider can carry a conversation forward, and one that
+    cannot rejects the request rather than quietly ignoring it, so which ones
+    can is worth knowing before the run.
+    """
+
+    tool_allowlists: bool = False
+    """Whether a step can name *which* tools it may use.
+
+    Three states, and only the middle one is universal: omitting a list means
+    "whatever the engine gives a step by default", an empty list means "none",
+    and a non-empty list means "exactly these". An engine that cannot translate
+    the third has to say so, because the alternative is a run that dies partway
+    through on a list ictus was happy to emit.
+    """
+
     conditional_routes: bool = True
     cycles: bool = True
     sub_graphs: bool = True
@@ -143,7 +162,14 @@ class Backend(Protocol):
         *,
         inputs: Mapping[str, str],
         dashboard: bool,
+        workspace_instructions: bool = True,
         working_dir: Path | None = None,
     ) -> int:
-        """Execute a compiled document in ``working_dir``. Returns the exit code."""
+        """Execute a compiled document in ``working_dir``. Returns the exit code.
+
+        ``workspace_instructions`` asks the engine to read the target project's
+        own instruction files. What an engine discovers, and whether it can at
+        all, is its business; that a step should arrive knowing what the project
+        says about itself is not.
+        """
         ...

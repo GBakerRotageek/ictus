@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
-from ictus.graph.node import GateNode, ScopeNode, SubGraphNode
+from ictus.graph.node import GateNode, NodeKind, ScopeNode, SubGraphNode
 from ictus.graph.ref import Origin
 
 if TYPE_CHECKING:
@@ -22,9 +22,46 @@ if TYPE_CHECKING:
 # Conductor carries an abandoned question set on `abort_route`, not in `routes:`.
 ABORT_CASE = "__abort__"
 
+# What to call a node in a violation. `NodeKind`'s own values name the work for a
+# backend to map onto its vocabulary; a person reading a lint wants the word they
+# typed. Every rule here used to say "agent", so a script's unwired input, a
+# dead-ended gate and a stage's drifted contract all reported as agent problems.
+_KIND_NAMES = {
+    NodeKind.LLM_CALL: "agent",
+    NodeKind.HUMAN_DECISION: "gate",
+    NodeKind.SUBPROCESS: "script",
+    NodeKind.COMPUTATION: "compute node",
+    NodeKind.DELAY: "wait",
+    NodeKind.EXIT: "terminal",
+    NodeKind.SUB_GRAPH: "stage",
+    NodeKind.ASK: "questions",
+}
+
+
+def describe(node: Node) -> str:
+    """How a violation names one node: what it is, then which one."""
+    if isinstance(node, ScopeNode):
+        # A scope is a stage with a closed outcome vocabulary, and the rules
+        # treat the two differently — so the message has to as well.
+        return f"scope {node.node_id!r}"
+    return f"{_KIND_NAMES.get(node.kind, node.kind.value)} {node.node_id!r}"
+
+
+PLACEHOLDER = "CHANGE-ME"
+"""What `ictus init` writes where a decision has to be made.
+
+A graph still carrying it has not been authored yet, and `ictus run` on one is a
+billable call against a placeholder. Caught as a lint rather than at the
+scaffold, because the folder is meant to be unfinished right after `init` — it
+is running it that is the mistake.
+"""
+
 __all__ = [
+    "describe",
     "group_routing_problems",
     "node_problems",
+    "placeholder_problems",
+    "previous_pass_problems",
     "reference_problems",
     "stage_contract_problems",
 ]
@@ -60,12 +97,12 @@ def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
             if param is None:
                 known = ", ".join(sorted(declared_inputs)) or "(none)"
                 problems.append(
-                    f"{where}: agent {node.node_id!r} references pipeline input "
+                    f"{where}: {describe(node)} references pipeline input "
                     f"{ref.source_id!r}, which is not declared; declared: {known}"
                 )
             elif param.port_type is not ref.port_type:
                 problems.append(
-                    f"{where}: agent {node.node_id!r} reads input {ref.source_id!r} as "
+                    f"{where}: {describe(node)} reads input {ref.source_id!r} as "
                     f"{ref.port_type.value} but it is declared {param.port_type.value}"
                 )
             continue
@@ -73,7 +110,7 @@ def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
         if target is None:
             known = ", ".join(sorted(by_id)) or "(none)"
             problems.append(
-                f"{where}: agent {node.node_id!r} references unknown node "
+                f"{where}: {describe(node)} references unknown node "
                 f"{ref.source_id!r}; nodes in this pipeline: {known}"
             )
             continue
@@ -82,12 +119,12 @@ def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
         if port is None:
             known = ", ".join(sorted(declared)) or "(none declared)"
             problems.append(
-                f"{where}: agent {node.node_id!r} references {ref.source_id}.{ref.port}, "
+                f"{where}: {describe(node)} references {ref.source_id}.{ref.port}, "
                 f"which {ref.source_id!r} does not declare; declared outputs: {known}"
             )
         elif port.port_type is not ref.port_type:
             problems.append(
-                f"{where}: agent {node.node_id!r} reads {ref.source_id}.{ref.port} as "
+                f"{where}: {describe(node)} reads {ref.source_id}.{ref.port} as "
                 f"{ref.port_type.value} but it is declared {port.port_type.value}"
             )
     return problems
@@ -98,10 +135,10 @@ def _map_reference_problems(group: MapGroup, node: Node, ref: Ref, where: str) -
     try:
         port = group.get_output(ref.port)
     except CompositionError as exc:
-        return [f"{where}: agent {node.node_id!r} {exc}"]
+        return [f"{where}: {describe(node)} {exc}"]
     if port.port_type is not ref.port_type:
         return [
-            f"{where}: agent {node.node_id!r} reads {group.group_id}.{ref.port} as "
+            f"{where}: {describe(node)} reads {group.group_id}.{ref.port} as "
             f"{ref.port_type.value} but a map group produces {port.port_type.value}"
         ]
     return []
@@ -129,6 +166,46 @@ def group_routing_problems(pipeline: Pipeline, group: RouteEnd, where: str) -> l
     return []
 
 
+def placeholder_problems(pipeline: Pipeline, where: str) -> list[str]:
+    """Scaffold text left where a decision was supposed to go."""
+    problems: list[str] = []
+    if PLACEHOLDER in pipeline.pipeline_id:
+        problems.append(
+            f"{where}: pipeline_id is still {pipeline.pipeline_id!r}. Name the pipeline "
+            "before running it — every file it emits is named after this."
+        )
+    for node in pipeline.nodes:
+        if PLACEHOLDER in node.node_id:
+            problems.append(f"{where}: {describe(node)} still carries {PLACEHOLDER} in its id")
+        if any(PLACEHOLDER in text for text in node.template_strings()):
+            problems.append(
+                f"{where}: {describe(node)} has {PLACEHOLDER} in its prompt, so the model "
+                "would be paid to act on the placeholder"
+            )
+    return problems
+
+
+def previous_pass_problems(pipeline: Pipeline, where: str) -> list[str]:
+    """A read of the last pass, on a graph that never takes a second one.
+
+    ``feed(..., previous_pass=True)`` is how a member of a parallel group reads a
+    sibling: the engine keys the group's result by the group's name and
+    overwrites it only when the group next finishes, so a second pass sees the
+    first. With no loop there is no first — the reference renders empty, every
+    round, and a council wired this way would look like it was deliberating.
+    """
+    if pipeline.has_cycle():
+        return []
+    return [
+        f"{where}: {dep.target.node_id!r} reads {dep.source.node_id!r} with "
+        "previous_pass=True, but this graph has no loop, so there is never a previous "
+        "pass and the reference renders empty every time. Drop the flag and put the "
+        "reader after the group, or give the graph the loop it was written for."
+        for dep in pipeline.data_deps
+        if dep.previous_pass
+    ]
+
+
 def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """Problems with one node's place in the graph."""
     problems: list[str] = []
@@ -154,7 +231,7 @@ def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
         and all(e.when is not None for e in routed)
     ):
         problems.append(
-            f"{where}: agent {node.node_id!r} has only conditional routes once its abort "
+            f"{where}: {describe(node)} has only conditional routes once its abort "
             "edge is set aside. An abort is emitted as `abort_route`, not in `routes:`, so "
             "it is not the fallback the answered path needs."
         )
@@ -162,7 +239,7 @@ def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
         # A member of a parallel group routes as part of the group and correctly
         # has no edge of its own; Conductor rejects one that does.
         problems.append(
-            f"{where}: agent {node.node_id!r} has no outgoing route, so it implicitly ends the "
+            f"{where}: {describe(node)} has no outgoing route, so it implicitly ends the "
             "run — indistinguishable from a forgotten edge. Use a TerminateNode or route to END."
         )
 
@@ -171,7 +248,7 @@ def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     fed = {d.connection.target.name for d in pipeline.deps_into(node)}
     fed |= {port.name for _, target, port in pipeline.input_bindings if target is node}
     problems.extend(
-        f"{where}: agent {node.node_id!r} declares required input {port.name!r} "
+        f"{where}: {describe(node)} declares required input {port.name!r} "
         "but nothing is wired to it"
         for port in node.inputs
         if not port.optional and port.name not in fed

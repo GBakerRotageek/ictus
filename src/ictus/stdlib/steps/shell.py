@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ictus.graph.ports import InputPort, OutputPort
+    from ictus.graph.ref import Template
 
 __all__ = ["shell"]
 
@@ -18,13 +19,14 @@ def shell(
     *,
     node_id: str,
     command: str,
-    args: Sequence[str] = (),
+    args: Sequence[str | Template] = (),
     outputs: Sequence[OutputPort] = (),
     description: str = "",
     inputs: Sequence[InputPort] = (),
-    stdin: str | None = None,
+    stdin: str | Template | None = None,
     timeout: int | None = None,
     working_dir: str | None = None,
+    enforce_outputs: bool = True,
 ) -> ScriptNode:
     """Run a command, with no model in the loop.
 
@@ -46,6 +48,13 @@ def shell(
 
     A stdout object is merged over ``{stdout, stderr, exit_code}``, so declared
     ``outputs`` can name its fields directly.
+
+    ``enforce_outputs=False`` keeps the ports and drops the contract: references
+    are still typed at composition, and the baseline three are still readable by
+    a route, but stdout is no longer parsed or checked. That is the only way to
+    route on a command that failed — the contract's raise lands before routes
+    are evaluated, so with it on a dying command ends the run rather than taking
+    a branch. ``stdlib.try_shell`` is that shape, already wired.
     """
     return ScriptNode(
         node_id=node_id,
@@ -57,4 +66,5 @@ def shell(
         timeout=timeout,
         working_dir=working_dir,
         declared_outputs=tuple(outputs),
+        enforce_outputs=enforce_outputs,
     )

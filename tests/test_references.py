@@ -23,6 +23,7 @@ from ictus import (
     at_least,
     equals,
     every,
+    not_equals,
     not_every,
     optional,
     ref_to,
@@ -34,6 +35,9 @@ from ictus.lint import lint_pipeline
 from ictus.stdlib import approval_gate, succeed
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ictus.graph.ref import Ref
     from ictus.graph.values import YamlDict
 
 STR, NUM, BOOL = PortType.STRING, PortType.NUMBER, PortType.BOOLEAN
@@ -278,6 +282,93 @@ class TestTypedConditions:
             every()
 
 
+class TestComparingAgainstNonStrings:
+    """`equals` quotes its value, and a quote against anything but a string is
+    silently false.
+
+    A route condition is evaluated against the value the engine stored, not its
+    rendered text, so the type is real on that side. The mismatch is well-formed,
+    never true, and sends every run down the catch-all — a branch nobody took
+    rather than an error anybody saw. A script step's `exit_code` is where it
+    bites hardest: the one number a graph routinely routes on.
+    """
+
+    @staticmethod
+    def _ref(port_type: PortType) -> Ref:
+        p = Pipeline(pipeline_id="n")
+        node = p.add(
+            AgentNode(node_id="n", prompt="x", declared_outputs=(OutputPort("v", port_type),))
+        )
+        return node.ref("v")
+
+    @staticmethod
+    def _render(port_type: PortType, build: Callable[[Ref], object]) -> str:
+        """The condition has to be built from *this* graph's node, or the
+        compiler reads it as a forward reference and wraps it in a guard."""
+        p = Pipeline(pipeline_id="r")
+        node = p.add(
+            AgentNode(node_id="n", prompt="x", declared_outputs=(OutputPort("v", port_type),))
+        )
+        done = p.add(succeed(node_id="done", reason="d"))
+        other = p.add(succeed(node_id="other", reason="o"))
+        p.set_entry(node)
+        p.route(node, done, when=build(node.ref("v")))  # type: ignore[arg-type]
+        p.route(node, other)
+        agents = conductor.document(p)["agents"]
+        assert isinstance(agents, list)
+        entry = next(a for a in agents if isinstance(a, dict) and a["name"] == "n")
+        routes = entry["routes"]
+        assert isinstance(routes, list)
+        first = routes[0]
+        assert isinstance(first, dict)
+        return str(first["when"])
+
+    def test_an_int_coerces_before_comparing(self) -> None:
+        assert self._render(NUM, lambda r: equals(r, 0)) == "{{ n.output.v | int == 0 }}"
+
+    def test_a_negated_int_comparison_uses_the_same_coercion(self) -> None:
+        assert self._render(NUM, lambda r: not_equals(r, 0)) == "{{ n.output.v | int != 0 }}"
+
+    def test_a_bool_renders_jinja_s_bare_literal(self) -> None:
+        """Quoted, it would compare against the string 'False' and never match."""
+        assert self._render(BOOL, lambda r: equals(r, False)) == "{{ n.output.v == false }}"
+
+    def test_a_negated_bool_comparison_uses_the_same_literal(self) -> None:
+        assert self._render(BOOL, lambda r: not_equals(r, True)) == "{{ n.output.v != true }}"
+
+    def test_a_string_still_renders_quoted(self) -> None:
+        assert self._render(STR, lambda r: equals(r, "ship")) == "{{ n.output.v == 'ship' }}"
+
+    @pytest.mark.parametrize(
+        ("port_type", "value"),
+        [
+            (NUM, "0"),
+            (STR, 0),
+            (BOOL, "true"),
+            (BOOL, "True"),
+            (BOOL, 1),
+            (NUM, True),
+            (STR, True),
+        ],
+    )
+    def test_a_value_of_the_wrong_type_is_refused(self, port_type: PortType, value: object) -> None:
+        """`bool` is a subclass of `int`, so `True` against a number port is the
+        one a naive isinstance check lets through."""
+        with pytest.raises(CompositionError, match="never true"):
+            equals(self._ref(port_type), value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("port_type", [PortType.ARRAY, PortType.OBJECT])
+    def test_a_container_cannot_be_compared_at_all(self, port_type: PortType) -> None:
+        """A list never equals a scalar literal; the test is false on every run."""
+        with pytest.raises(CompositionError, match="cannot compare"):
+            equals(self._ref(port_type), "x")
+
+    def test_the_error_shows_what_the_condition_would_have_become(self) -> None:
+        """An error a reader can check beats one they have to trust."""
+        with pytest.raises(CompositionError, match=r"renders `== 'true'`"):
+            equals(self._ref(BOOL), "true")
+
+
 class TestConditionalFieldsThatAlwaysRan:
     """A field can be absent even when the step that owns it certainly ran.
 
@@ -408,3 +499,102 @@ class TestConditionsAreFalseNotFatal:
 
     def test_it_is_lint_clean(self) -> None:
         assert lint_pipeline(self._pipeline(), backend=conductor) == []
+
+
+class TestSettledStructures:
+    """A value Conductor reads back with ``json.loads`` has to be rendered as JSON.
+
+    ``| tojson`` is what makes that round trip lossless. A fallback used to opt
+    the reference out of it, so the branch that had a value emitted a Python
+    repr — single quotes, parse fails, and what survives is a string that looks
+    like data.
+    """
+
+    @staticmethod
+    def _pipeline(*, fallback: bool) -> Pipeline:
+        p = Pipeline(pipeline_id="carry")
+        gate = p.add(approval_gate(node_id="ask", prompt="Search?"))
+        search = p.add(
+            AgentNode(
+                node_id="search",
+                prompt="find things",
+                declared_outputs=(OutputPort("hits", PortType.ARRAY),),
+            )
+        )
+        hits = search.ref("hits")
+        done = p.add(
+            succeed(
+                node_id="done",
+                reason="done",
+                inputs=(InputPort("hits", PortType.ARRAY, optional=True),),
+                result={"hits": tpl(hits.or_else("[]") if fallback else hits)},
+            )
+        )
+        p.set_entry(gate)
+        p.branch(gate, {"approved": search, "rejected": done})
+        p.route(search, done)
+        p.feed(search, "hits", done, "hits")
+        return p
+
+    def _template(self, *, fallback: bool) -> YamlDict:
+        agents = conductor.document(self._pipeline(fallback=fallback))["agents"]
+        assert isinstance(agents, list)
+        done = next(a for a in agents if isinstance(a, dict) and a["name"] == "done")
+        template = done["output_template"]
+        assert isinstance(template, dict)
+        return template
+
+    def test_a_lone_structured_reference_round_trips(self) -> None:
+        assert self._template(fallback=False)["hits"] == (
+            "{% if search is defined %}{{ search.output.hits | tojson }}{% endif %}"
+        )
+
+    def test_a_fallback_does_not_opt_the_value_out_of_json(self) -> None:
+        """The guard, not `| default()`: the attribute chain raises before a filter runs."""
+        assert self._template(fallback=True)["hits"] == (
+            "{% if search is defined %}{{ search.output.hits | tojson }}{% else %}[]{% endif %}"
+        )
+
+    def test_it_is_clean_and_loads(self, validates: Callable[[Pipeline], None]) -> None:
+        pipeline = self._pipeline(fallback=True)
+        assert lint_pipeline(pipeline, backend=conductor) == []
+        validates(pipeline)
+
+
+class TestTerminalResults:
+    """``result`` typed the reference out: only a hand-written "{{ ... }}" fitted.
+
+    That is the one spelling no reference lint can see — ``settled_refs`` walks
+    ``Template``s — so the demos taught the form the README's opening claim
+    forbids, because it was the only one that type-checked.
+    """
+
+    @staticmethod
+    def _pipeline(value: Ref) -> Pipeline:
+        p = Pipeline(pipeline_id="t")
+        work = p.add(_producer("work"))
+        done = p.add(
+            succeed(
+                node_id="done",
+                reason="ok",
+                inputs=(InputPort("v", STR),),
+                result={"v": value},
+            )
+        )
+        p.set_entry(work)
+        p.route(work, done)
+        p.feed(work, "v", done, "v")
+        return p
+
+    def test_a_result_takes_a_reference(self) -> None:
+        p = self._pipeline(_producer("work").ref("v"))
+        agents = conductor.document(p)["agents"]
+        assert isinstance(agents, list)
+        done = next(a for a in agents if isinstance(a, dict) and a["name"] == "done")
+        template = done["output_template"]
+        assert isinstance(template, dict)
+        assert template["v"] == "{{ work.output.v }}"
+
+    def test_a_reference_in_a_result_is_checked_like_any_other(self) -> None:
+        p = self._pipeline(ref_to("ghost", "v", STR))
+        assert any("unknown node 'ghost'" in problem for problem in lint_pipeline(p))

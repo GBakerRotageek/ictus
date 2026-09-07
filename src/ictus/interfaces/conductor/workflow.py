@@ -4,7 +4,8 @@ Every default Conductor would otherwise apply silently is written out here:
 the provider (which defaults to copilot), the iteration bound (which defaults to
 10 total steps and would stop a loop midway), the context mode (which defaults
 to ``accumulate``, under which the declared ``input:`` graph is parsed and never
-consulted), and checkpointing for any graph containing a gate.
+consulted), and checkpointing, which the engine otherwise does only when a step
+raises.
 """
 
 from __future__ import annotations
@@ -39,14 +40,11 @@ def max_iterations(pipeline: Pipeline) -> int:
     if pipeline.max_iterations is not None:
         return _within_ceiling(pipeline, pipeline.max_iterations)
     pipeline.require_loop_bound()
-    # A map body is one node in the graph and up to `max_items` executions in
-    # the engine: Conductor records the group's cost as the number of items it
-    # actually spawned.
-    fanout = sum(group.expect_items - 1 for group in pipeline.maps)
-    base = len(pipeline.nodes) + fanout
-    if not pipeline.has_cycle():
-        return _within_ceiling(pipeline, max(1, base))
-    return _within_ceiling(pipeline, max(1, base + pipeline.loop_cost(pipeline.loop_passes or 1)))
+    # Conductor charges a group's whole fan-out against this budget and records
+    # a map group's cost as the number of items it actually spawned, which is
+    # what `budget_cost` prices. Derived there rather than here so the start
+    # gate quotes the same number this compiles in.
+    return _within_ceiling(pipeline, pipeline.budget_cost())
 
 
 def _within_ceiling(pipeline: Pipeline, wanted: int) -> int:
@@ -82,12 +80,14 @@ class Inherited:
 
     provider: str | None = None
     default_model: str | None = None
+    system_prompt: str | None = None
 
     def under(self, parent: Pipeline) -> Inherited:
         """What a child of ``parent`` should inherit, parent's own choice first."""
         return Inherited(
             provider=parent.provider or self.provider,
             default_model=parent.default_model or self.default_model,
+            system_prompt=parent.system_prompt or self.system_prompt,
         )
 
 
@@ -99,6 +99,8 @@ def workflow_block(pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED)
     if pipeline.description:
         block["description"] = pipeline.description
     block["version"] = pipeline.version
+    if pipeline.instructions:
+        block["instructions"] = list(pipeline.instructions)
     block["entry_point"] = pipeline.entry().node_id
 
     runtime: YamlDict = {
@@ -110,10 +112,12 @@ def workflow_block(pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED)
     servers = mcp_servers_block(pipeline)
     if servers:
         runtime["mcp_servers"] = servers
-    if pipeline.has_gate():
-        # A gated run is long-lived by construction: the human may be hours
-        # away. Checkpointing only on failure would discard that wait.
-        runtime["checkpoint"] = {"every_agent": True}
+    # Unconditional. Conductor already checkpoints when a step raises, so what
+    # this adds is the crash that raises nothing — a hung provider, a killed
+    # process, a closed laptop — after which a run has no resume point at all.
+    # `every_seconds` is deliberately not set alongside: the schema ignores it
+    # whenever `every_agent` is true, and `keep_last` rotates the saves anyway.
+    runtime["checkpoint"] = {"every_agent": True}
     block["runtime"] = runtime
 
     if pipeline.workflow_inputs:
@@ -127,9 +131,16 @@ def workflow_block(pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED)
             params[param.name] = entry
         block["input"] = params
 
-    block["context"] = {"mode": pipeline.context_mode}
+    context: YamlDict = {"mode": pipeline.context_mode}
+    if pipeline.context_max_tokens is not None:
+        context["max_tokens"] = pipeline.context_max_tokens
+    if pipeline.context_trim is not None:
+        context["trim_strategy"] = pipeline.context_trim.value
+    block["context"] = context
 
     limits: YamlDict = {"max_iterations": max_iterations(pipeline)}
+    if pipeline.timeout_seconds is not None:
+        limits["timeout_seconds"] = pipeline.timeout_seconds
     if pipeline.budget_usd is not None:
         limits["budget_usd"] = pipeline.budget_usd
         limits["budget_mode"] = pipeline.budget_mode

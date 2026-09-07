@@ -84,7 +84,9 @@ def test_the_outcome_vocabularies_are_stated_correctly() -> None:
     assert stdlib.AGREED == "agreed"
     assert stdlib.UNRESOLVED == "unresolved"
     assert stdlib.HALTED == "halted"
-    for constant in ("converged", "exhausted", "agreed", "unresolved", "halted"):
+    assert stdlib.OK == "ok"
+    assert stdlib.FAILED == "failed"
+    for constant in ("converged", "exhausted", "agreed", "unresolved", "halted", "ok", "failed"):
         assert f"`{constant}`" in DOC, f"outcome {constant!r} is not named in STDLIB.md"
 
 
@@ -106,3 +108,44 @@ def test_deleted_constructors_are_not_offered_as_usable(gone: str) -> None:
     assert gone not in CODE, f"STDLIB.md has copyable code using {gone}"
     readme = (CATALOGUE.parent / "README.md").read_text(encoding="utf-8")
     assert f"`{gone}`" not in readme, f"README.md still lists {gone}"
+
+
+AGENTS = CATALOGUE.parent / "AGENTS.md"
+
+
+class TestRepositoryInstructions:
+    """What a run picks up from the repository itself, rather than from a pipeline.
+
+    `ictus run` passes `--workspace-instructions`, and Conductor discovers
+    `AGENTS.md`, `.github/copilot-instructions.md`, `CLAUDE.md` and
+    `.github/instructions/*.instructions.md`, walking up to the git root. That
+    is the only route to a project's own account of itself: the provider pins
+    `setting_sources=[]`, so nothing else reaches a step.
+
+    The split under test is that the repo-wide account lives here, once, and a
+    pipeline's own instructions carry only what is specific to that pipeline.
+    Before it, the account lived in one council's `context.md` — so every other
+    pipeline pointed at this repo, and every interactive session opened in it,
+    got nothing.
+    """
+
+    def test_the_repo_carries_an_agents_file_where_the_engine_looks(self) -> None:
+        assert AGENTS.is_file(), "AGENTS.md is what a run against this repo reads"
+        assert AGENTS.stat().st_size > 0
+
+    def test_it_says_how_to_reach_the_engine_source(self) -> None:
+        """Every "the engine cannot do X" claim is settled by this lookup."""
+        text = AGENTS.read_text(encoding="utf-8")
+        assert "readlink -f" in text, "the console-script resolution must be spelled out"
+        assert "config/schema.py" in text
+        assert "not importable" in text or "not* importable" in text
+
+    def test_the_council_context_does_not_restate_the_project(self) -> None:
+        """Duplicated, the two drift and the run reads whichever is stale."""
+        context = (
+            CATALOGUE.parent / "demo_work" / "pipelines" / "needs-council" / "context.md"
+        ).read_text(encoding="utf-8")
+        assert "readlink -f" not in context, (
+            "the engine lookup belongs in AGENTS.md, which the run discovers"
+        )
+        assert "conductor-cli" not in context

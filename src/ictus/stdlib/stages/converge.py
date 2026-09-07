@@ -72,6 +72,7 @@ def converge(
     verdict_port: str = "approved",
     passes: int = 3,
     pause_between: float | None = None,
+    remember: bool = False,
     description: str = "",
     brief: str = "What to work from",
 ) -> Scope:
@@ -86,6 +87,9 @@ def converge(
       that edge the second pass knows nothing the first did not.
     * ``self`` — no judge node. The last attempt declares the verdict port
       itself, which is the shape a poll wants: one step that checks and reports.
+
+    ``remember`` keeps each attempt's session across passes, so pass two revises
+    what it wrote rather than writing it again from the brief and a note.
 
     Outcomes are ``converged`` and ``exhausted``. Both carry every output of the
     final attempt, the last ``feedback``, and the ``passes`` actually spent, so
@@ -156,6 +160,7 @@ def converge(
                         else (InputPort("notes", PortType.STRING, "Last verdict", optional=True),)
                     ),
                 ),
+                session_key=f"{stage_id}-{step.node_id}" if remember else None,
                 prompt=_prompt(
                     step,
                     work.ref(),

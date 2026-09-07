@@ -12,3 +12,15 @@ checkpoints/
 .env
 .env.local
 .DS_Store
+
+# Run output: `needs-council` writes its report here on every run.
+needs-review.md
+# Personal editor/permission state, not project configuration.
+.claude/settings.local.json
+# Run output: `untapped` writes its brainstorm here on every run.
+untapped.md
+
+# Local pipelines. Kept out of the repo on purpose; note that the test suite
+# and every Makefile target below `soundcheck` read them, so a clone without
+# them cannot run the gate.
+demo_work/

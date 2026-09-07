@@ -2,7 +2,11 @@
 name = "ictus"
 version = "0.0.0"
 description = "Typed composition, validation and linting for multi-stage agent pipelines"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "MisterSzled" }]
 # pydantic was declared and never imported. The emitter constructs plain
 # YAML values and the Conductor CLI is the schema authority.
 dependencies = ["ruamel.yaml==0.18.10", "typer==0.20.0", "click==8.5.0"]

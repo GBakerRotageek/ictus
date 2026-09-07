@@ -33,7 +33,7 @@ from ictus.graph.ref import Origin, Ref, Template, equals
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from ictus.graph.requirements import McpServer
+    from ictus.graph.requirements import Executable, McpServer
     from ictus.graph.values import YamlScalar
 
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
@@ -51,6 +51,20 @@ class FailureMode(StrEnum):
     FAIL_FAST = "fail_fast"
     CONTINUE_ON_ERROR = "continue_on_error"
     ALL_OR_NOTHING = "all_or_nothing"
+
+
+class TrimStrategy(StrEnum):
+    """How an engine makes room when accumulated context hits its ceiling."""
+
+    TRUNCATE = "truncate"
+    """Shorten fields in place. The only one that leaves references resolvable."""
+
+    DROP_OLDEST = "drop_oldest"
+    """Delete whole step outputs, oldest first."""
+
+    SUMMARIZE = "summarize"
+    """Replace outputs with one short summary, deleting the originals — and fall
+    back to ``DROP_OLDEST`` where the engine cannot reach a model to write it."""
 
 
 @dataclass(frozen=True, eq=False)
@@ -182,6 +196,16 @@ class DataDep:
     source: Node | MapGroup
     target: Node
     connection: PortConnection
+    previous_pass: bool = False
+    """Whether this edge reads what the source produced on the *last* time round.
+
+    Only meaningful between two members of one parallel group, where it is the
+    difference between a reference that resolves to nothing and one that carries
+    the previous round. The engine stores a group's result under the group's own
+    name and overwrites it when the group next finishes, so while a member is
+    running its siblings' entries still hold the pass before. Outside a loop
+    there is no such pass, which is what the lint checks.
+    """
 
 
 class Pipeline:
@@ -203,16 +227,23 @@ class Pipeline:
         provider: str | None = None,
         default_model: str | None = None,
         context_mode: ContextMode = "explicit",
+        context_max_tokens: int | None = None,
+        context_trim: TrimStrategy | None = None,
         loop_passes: int | None = None,
         budget_usd: float | None = None,
         budget_mode: BudgetMode = "audit",
         max_iterations: int | None = None,
+        timeout_seconds: int | None = None,
         metadata: Mapping[str, str] | None = None,
+        instructions: Sequence[str] = (),
+        system_prompt: str | None = None,
     ) -> None:
         if not pipeline_id:
             raise CompositionError("pipeline_id cannot be empty")
         if loop_passes is not None and loop_passes < 1:
             raise CompositionError(f"loop_passes must be >= 1, got {loop_passes}")
+        if timeout_seconds is not None and timeout_seconds < 1:
+            raise CompositionError(f"timeout_seconds must be >= 1, got {timeout_seconds}")
         self.pipeline_id = pipeline_id
         self.description = description
         self.version = version
@@ -223,11 +254,44 @@ class Pipeline:
         self.provider = provider
         self.default_model = default_model
         self.context_mode: ContextMode = context_mode
+        self.context_max_tokens = context_max_tokens
+        """A soft ceiling on accumulated context, above which the engine trims.
+
+        Per workflow file, which means per *stage*: a stage compiles to its own
+        document with its own ``context:`` block, so a long council can be
+        bounded without bounding its caller. There is no per-node equivalent —
+        the engine has no per-agent context config.
+        """
+
+        self.context_trim = context_trim
+        """How the engine makes room once the ceiling is reached.
+
+        Named rather than left to the engine, which silently uses
+        ``drop_oldest``. That one deletes whole step outputs, oldest first, and
+        a deleted output is indistinguishable from inside a prompt from a step
+        that has not run yet — so a loop reading it carries on rendering nothing
+        and looks like a first pass forever. ``TRUNCATE`` shortens fields in
+        place and leaves every reference resolvable, which is the only strategy
+        that degrades rather than disappears.
+        """
         self.loop_passes = loop_passes
         self.budget_usd = budget_usd
         self.budget_mode: BudgetMode = budget_mode
         self.max_iterations = max_iterations
+        # A wall-clock ceiling on the whole run, as against a step's own
+        # `timeout_seconds`, which bounds one model call. Nothing else bounds
+        # elapsed time: `budget_usd` bounds spend and `max_iterations` bounds
+        # step count, and a run can sit for hours without moving either.
+        self.timeout_seconds = timeout_seconds
         self.metadata: dict[str, str] = dict(metadata or {})
+        # Prepended to every step's prompt. The engine runs its agents with no
+        # settings sources at all — no CLAUDE.md, no ambient skills, no hooks —
+        # so a step knows nothing about the project it is working on beyond what
+        # its prompt says. This is where that context goes back in.
+        self.instructions: list[str] = list(instructions)
+        # Applied to every model call that does not set its own. Left unset the
+        # engine sends an *empty* system prompt, not a default one.
+        self.system_prompt = system_prompt
 
         self._nodes: list[Node] = []
         self._by_id: dict[str, Node] = {}
@@ -240,6 +304,7 @@ class Pipeline:
         self._groups: dict[str, ParallelGroup] = {}
         self._maps: dict[str, MapGroup] = {}
         self._mcp: dict[str, McpServer] = {}
+        self._executables: dict[str, Executable] = {}
         self._entry: RouteEnd | None = None
 
     # -- construction ----------------------------------------------------
@@ -419,6 +484,39 @@ class Pipeline:
         """Every MCP server this pipeline declares, in declaration order."""
         return tuple(self._mcp.values())
 
+    def require_executable(self, tool: Executable) -> Executable:
+        """Declare a command that must be reachable before this pipeline runs.
+
+        For a step whose job is to check something against a tool: if the tool
+        is not there, the step does not crash, it concludes. Refusing at the
+        launch is the difference between a free failure and a paid one.
+        """
+        existing = self._executables.get(tool.name)
+        if existing is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already requires an executable named "
+                f"{tool.name!r}; a command is addressed by its name and must be unique"
+            )
+        self._executables[tool.name] = tool
+        return tool
+
+    @property
+    def executables(self) -> tuple[Executable, ...]:
+        """Every command this pipeline declares, in declaration order."""
+        return tuple(self._executables.values())
+
+    def all_executables(self) -> tuple[Executable, ...]:
+        """This pipeline's commands and those of every stage it contains.
+
+        A stage runs in the same environment as its caller, so its requirement
+        is the caller's problem too — the same reasoning as ``all_mcp_servers``.
+        """
+        seen: dict[str, Executable] = dict(self._executables)
+        for child in self._children.values():
+            for tool in child.all_executables():
+                seen.setdefault(tool.name, tool)
+        return tuple(seen.values())
+
     def all_mcp_servers(self) -> tuple[McpServer, ...]:
         """This pipeline's servers and those of every stage it contains.
 
@@ -537,25 +635,44 @@ class Pipeline:
             )
         self._input_edges.append((param, target, in_port))
 
-    def feed(self, source: Node | MapGroup, from_port: str, target: Node, to_port: str) -> DataDep:
+    def feed(
+        self,
+        source: Node | MapGroup,
+        from_port: str,
+        target: Node,
+        to_port: str,
+        *,
+        previous_pass: bool = False,
+    ) -> DataDep:
         """Declare that ``target`` reads a value from ``source``, with no control edge.
 
         Needed whenever data and control diverge — most often across a gate. The
         gate decides *where* execution goes; the node it routes to still has to
         read the value produced before the gate, and Conductor will not infer
         that under ``context.mode: explicit``.
+
+        ``previous_pass`` is how one member of a parallel group reads another.
+        Ordinarily that is refused, because the two run at once and the
+        reference resolves to nothing. Inside a loop it resolves to something
+        useful instead: the engine keys a group's result by the group's name and
+        overwrites it only when the group next *finishes*, so a member running
+        its second pass still sees its siblings' first. Saying so explicitly is
+        the point — the value is a round behind, and a caller that did not mean
+        that has written a subtle bug. The lint refuses the flag on a graph with
+        no loop, where there is no previous pass to read.
         """
         self._require_routable(source, "data source")
         self._require_member(target, "data target")
         if isinstance(source, Node):
             shared = self.group_of(source)
-            if shared is not None and shared is self.group_of(target):
+            if shared is not None and shared is self.group_of(target) and not previous_pass:
                 raise CompositionError(
                     f"{target.node_id!r} cannot read {source.node_id!r}: both run inside "
                     f"parallel group {shared.group_id!r}, at the same time. A member's "
                     "output is only addressable once the whole group has finished, so the "
                     "reference resolves to nothing while the reader is running. Put the "
-                    "reader after the group."
+                    "reader after the group, or pass previous_pass=True if you mean to "
+                    "read what it produced last time round the loop."
                 )
         if isinstance(source, Node) and self.map_of(source) is not None:
             mapped = self.map_of(source)
@@ -574,7 +691,12 @@ class Pipeline:
                 f"to {target.node_id}.{in_port.name} ({in_port.port_type.value}): "
                 "port types differ"
             )
-        dep = DataDep(source=source, target=target, connection=PortConnection(out_port, in_port))
+        dep = DataDep(
+            source=source,
+            target=target,
+            connection=PortConnection(out_port, in_port),
+            previous_pass=previous_pass,
+        )
         self._deps.append(dep)
         return dep
 
@@ -1030,9 +1152,36 @@ class Pipeline:
                 "explicit max_iterations) so the bound is a decision, not an accident."
             )
 
-    def node_count(self) -> int:
-        """How many steps this graph contains, for a backend pricing the run."""
-        return len(self._nodes)
+    def total_cost(self) -> int:
+        """Every step in this graph, run once.
+
+        Executions, not nodes: a parallel group costs one per member and a map
+        group up to one per item, because the engine charges a group's whole
+        fan-out against the same budget as a single step. ``len(nodes)`` is the
+        number that reads like a step count and is not one — it prices a
+        four-node fan-out over ten items at four.
+        """
+        grouped = {m.node_id for g in self._groups.values() for m in g.members}
+        grouped |= {m.body.node_id for m in self._maps.values()}
+        loose = sum(1 for n in self._nodes if n.node_id not in grouped)
+        collections: tuple[RouteEnd, ...] = (*self.groups, *self.maps)
+        return loose + sum(self.step_cost(g) for g in collections)
+
+    def budget_cost(self) -> int:
+        """Step executions this graph can reach, loops included.
+
+        What a run has to be allowed to spend, as opposed to what it usually
+        will. Derived here rather than in a backend so the number a person is
+        shown before starting and the number compiled into the workflow's own
+        limit come from one place and cannot drift apart.
+
+        Callers that need the bound to be a decision rather than a default
+        should call ``require_loop_bound`` first; this treats an unbounded loop
+        as a single pass.
+        """
+        if not self.has_cycle():
+            return max(1, self.total_cost())
+        return max(1, self.total_cost() + self.loop_cost(self.loop_passes or 1))
 
     def loop_cost(self, passes: int) -> int:
         """Extra step executions the graph's loops buy beyond one pass each.
@@ -1127,7 +1276,7 @@ class Pipeline:
             current, cost, seen = stack.pop()
             visits += 1
             if visits > self._PATH_BUDGET:
-                return self._total_cost(), frozenset(n.node_id for n in self._nodes)
+                return self.total_cost(), frozenset(n.node_id for n in self._nodes)
             if current is goal:
                 if cost > best:
                     best, span = cost, seen
@@ -1137,14 +1286,6 @@ class Pipeline:
                     continue
                 stack.append((nxt, cost + self.step_cost(nxt), seen | {nxt.node_id}))
         return (best or self.step_cost(goal)), span
-
-    def _total_cost(self) -> int:
-        """Every step in the graph, run once."""
-        grouped = {m.node_id for g in self._groups.values() for m in g.members}
-        grouped |= {m.body.node_id for m in self._maps.values()}
-        loose = sum(1 for n in self._nodes if n.node_id not in grouped)
-        collections: tuple[RouteEnd, ...] = (*self.groups, *self.maps)
-        return loose + sum(self.step_cost(g) for g in collections)
 
     def _route_successors(self, end: RouteEnd) -> Iterable[RouteEnd]:
         """What runs after ``end``, following routes only.

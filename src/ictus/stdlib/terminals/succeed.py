@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ictus.graph.node import TerminateNode
+from ictus.graph.ref import as_template
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ictus.graph.ports import InputPort
-    from ictus.graph.ref import Template
+    from ictus.graph.ref import Ref, Template
 
 __all__ = ["succeed"]
 
@@ -21,7 +22,7 @@ def succeed(
     reason: str | Template,
     description: str = "",
     inputs: Sequence[InputPort] = (),
-    result: Mapping[str, str | Template] | None = None,
+    result: Mapping[str, str | Template | Ref] | None = None,
 ) -> TerminateNode:
     """End the run successfully. Emits ``type: terminate``.
 
@@ -39,5 +40,5 @@ def succeed(
         inputs=tuple(inputs),
         status="success",
         reason=reason,
-        result=dict(result) if result else None,
+        result={name: as_template(v) for name, v in result.items()} if result else None,
     )
