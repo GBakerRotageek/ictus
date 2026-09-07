@@ -307,9 +307,9 @@ the cost of wall-clock, and order matters because whoever speaks last has heard
 everyone. Both need `max_turns` on anyone given tools.
 
 Reach for `ictus.stdlib` before hand-rolling: `council`, `roundtable`,
-`converge`, `briefing_gate`, `resolve_unknowns`, `validate_mcps`, `script_sequence`,
-`approval_gate`, `choice_gate`, `ask_human`, `shell`, `save_text`, `constant`,
-`counter`, `wait`, `succeed`, `fail`.
+`converge`, `try_shell`, `briefing_gate`, `resolve_unknowns`, `validate_mcps`,
+`script_sequence`, `approval_gate`, `choice_gate`, `ask_human`, `shell`,
+`save_text`, `constant`, `counter`, `wait`, `succeed`, `fail`.
 
 ## 6. Gotchas that have each cost a real run
 
@@ -321,6 +321,20 @@ Reach for `ictus.stdlib` before hand-rolling: `council`, `roundtable`,
   workflow refuses to load; set, the *value* is substituted into the prompt and
   sent to the provider. Tokens belong in an MCP header.
 - **A `shell` step declaring `outputs` must print a JSON object** on stdout.
+- **A command's non-zero exit is not a failure, and declaring `outputs` turns
+  that into the opposite bug.** Conductor returns `exit_code` beside `stdout`
+  and routes on nothing, so the next step runs regardless; declare `outputs`
+  and a non-JSON stdout raises *before* routes are evaluated, so the branch you
+  wrote for the failure never fires either way. Use `try_shell` — a scope with
+  outcomes `ok`/`failed` carrying `stdout`, `stderr`, `exit_code`. It does not
+  cover a command that never started (a missing binary and a `timeout` both
+  raise `ExecutionError`), so keep `require_executable`.
+- **`equals` needs a value of the port's own type.** A route is tested against
+  the value the engine stored, not its rendered text, so `exit_code` is a real
+  `0` and a verdict a real `True`. `equals(ref, "0")` and `equals(ref, "true")`
+  render `== '0'` / `== 'true'`, are never true, and route every run down the
+  catch-all. Pass `0` (renders `| int == 0`) or `True` (renders `== true`); a
+  mismatch and any `ARRAY`/`OBJECT` port are refused at composition.
 - **Set `constant`'s `output_type`** unless the value is free text — `"no"`
   comes back `False`, `"3"` an integer.
 - **A council needs `rounds >= 2`** and a `verify=` if it is to measure anything

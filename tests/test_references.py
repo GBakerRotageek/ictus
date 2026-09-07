@@ -23,6 +23,7 @@ from ictus import (
     at_least,
     equals,
     every,
+    not_equals,
     not_every,
     optional,
     ref_to,
@@ -279,6 +280,93 @@ class TestTypedConditions:
     def test_an_empty_conjunction_is_refused(self) -> None:
         with pytest.raises(CompositionError, match="at least one reference"):
             every()
+
+
+class TestComparingAgainstNonStrings:
+    """`equals` quotes its value, and a quote against anything but a string is
+    silently false.
+
+    A route condition is evaluated against the value the engine stored, not its
+    rendered text, so the type is real on that side. The mismatch is well-formed,
+    never true, and sends every run down the catch-all — a branch nobody took
+    rather than an error anybody saw. A script step's `exit_code` is where it
+    bites hardest: the one number a graph routinely routes on.
+    """
+
+    @staticmethod
+    def _ref(port_type: PortType) -> Ref:
+        p = Pipeline(pipeline_id="n")
+        node = p.add(
+            AgentNode(node_id="n", prompt="x", declared_outputs=(OutputPort("v", port_type),))
+        )
+        return node.ref("v")
+
+    @staticmethod
+    def _render(port_type: PortType, build: Callable[[Ref], object]) -> str:
+        """The condition has to be built from *this* graph's node, or the
+        compiler reads it as a forward reference and wraps it in a guard."""
+        p = Pipeline(pipeline_id="r")
+        node = p.add(
+            AgentNode(node_id="n", prompt="x", declared_outputs=(OutputPort("v", port_type),))
+        )
+        done = p.add(succeed(node_id="done", reason="d"))
+        other = p.add(succeed(node_id="other", reason="o"))
+        p.set_entry(node)
+        p.route(node, done, when=build(node.ref("v")))  # type: ignore[arg-type]
+        p.route(node, other)
+        agents = conductor.document(p)["agents"]
+        assert isinstance(agents, list)
+        entry = next(a for a in agents if isinstance(a, dict) and a["name"] == "n")
+        routes = entry["routes"]
+        assert isinstance(routes, list)
+        first = routes[0]
+        assert isinstance(first, dict)
+        return str(first["when"])
+
+    def test_an_int_coerces_before_comparing(self) -> None:
+        assert self._render(NUM, lambda r: equals(r, 0)) == "{{ n.output.v | int == 0 }}"
+
+    def test_a_negated_int_comparison_uses_the_same_coercion(self) -> None:
+        assert self._render(NUM, lambda r: not_equals(r, 0)) == "{{ n.output.v | int != 0 }}"
+
+    def test_a_bool_renders_jinja_s_bare_literal(self) -> None:
+        """Quoted, it would compare against the string 'False' and never match."""
+        assert self._render(BOOL, lambda r: equals(r, False)) == "{{ n.output.v == false }}"
+
+    def test_a_negated_bool_comparison_uses_the_same_literal(self) -> None:
+        assert self._render(BOOL, lambda r: not_equals(r, True)) == "{{ n.output.v != true }}"
+
+    def test_a_string_still_renders_quoted(self) -> None:
+        assert self._render(STR, lambda r: equals(r, "ship")) == "{{ n.output.v == 'ship' }}"
+
+    @pytest.mark.parametrize(
+        ("port_type", "value"),
+        [
+            (NUM, "0"),
+            (STR, 0),
+            (BOOL, "true"),
+            (BOOL, "True"),
+            (BOOL, 1),
+            (NUM, True),
+            (STR, True),
+        ],
+    )
+    def test_a_value_of_the_wrong_type_is_refused(self, port_type: PortType, value: object) -> None:
+        """`bool` is a subclass of `int`, so `True` against a number port is the
+        one a naive isinstance check lets through."""
+        with pytest.raises(CompositionError, match="never true"):
+            equals(self._ref(port_type), value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("port_type", [PortType.ARRAY, PortType.OBJECT])
+    def test_a_container_cannot_be_compared_at_all(self, port_type: PortType) -> None:
+        """A list never equals a scalar literal; the test is false on every run."""
+        with pytest.raises(CompositionError, match="cannot compare"):
+            equals(self._ref(port_type), "x")
+
+    def test_the_error_shows_what_the_condition_would_have_become(self) -> None:
+        """An error a reader can check beats one they have to trust."""
+        with pytest.raises(CompositionError, match=r"renders `== 'true'`"):
+            equals(self._ref(BOOL), "true")
 
 
 class TestConditionalFieldsThatAlwaysRan:

@@ -84,7 +84,9 @@ def test_the_outcome_vocabularies_are_stated_correctly() -> None:
     assert stdlib.AGREED == "agreed"
     assert stdlib.UNRESOLVED == "unresolved"
     assert stdlib.HALTED == "halted"
-    for constant in ("converged", "exhausted", "agreed", "unresolved", "halted"):
+    assert stdlib.OK == "ok"
+    assert stdlib.FAILED == "failed"
+    for constant in ("converged", "exhausted", "agreed", "unresolved", "halted", "ok", "failed"):
         assert f"`{constant}`" in DOC, f"outcome {constant!r} is not named in STDLIB.md"
 
 

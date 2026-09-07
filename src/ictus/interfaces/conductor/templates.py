@@ -205,7 +205,19 @@ def _part(
     if isinstance(part, Comparison):
         operator = "!=" if part.negated else "=="
         path = reference_path(pipeline, part.ref)
-        test = f"{path} {operator} '{part.value}'"
+        # One spelling per value type, and bool is tested first because it is a
+        # subclass of int. `| int` for a number, for AtLeast's reason: the value
+        # arrives as whatever `_maybe_parse_json` made of it, and an unfiltered
+        # `0 == 0` against a rendered string is false rather than an error.
+        # A bool renders Jinja's bare literal — quoted, it would never match the
+        # real bool the engine stored. Which spelling is legal for which port is
+        # settled at composition by `equals`.
+        if isinstance(part.value, bool):
+            test = f"{path} {operator} {str(part.value).lower()}"
+        elif isinstance(part.value, int):
+            test = f"{path} | int {operator} {part.value}"
+        else:
+            test = f"{path} {operator} '{part.value}'"
         return _condition(pipeline, node, test, (part.ref,))
     if isinstance(part, Every):
         # `not (a and b)` rather than `not a or not b`: one negation to read, and

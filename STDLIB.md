@@ -45,7 +45,7 @@ No provider call, still 1 iteration each.
 | `bindings` | Several named values at once | `values`, `outputs` | one port per declared output |
 | `counter` | Count passes through a point, from one | — | `value: number` |
 | `save_text` | Write a value another step produced to a file | `text`, `to`, `append`, `working_dir` | `path: string` |
-| `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir` | whatever `outputs` declares |
+| `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs` | whatever `outputs` declares |
 | `wait` | Pause | `seconds`, `reason` | — |
 
 ## Terminals
@@ -71,6 +71,7 @@ No provider call, still 1 iteration each.
 
 | Constructor | Use | Options | Outcomes | Carries |
 | --- | --- | --- | --- | --- |
+| `try_shell` | Run one command whose failure the caller routes on | `command`, `args`, `parameter`, `outputs`, `stdin`, `timeout`, `working_dir`, `node_id` | `ok`, `failed` | `stdout`, `stderr`, `exit_code` |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
 | `roundtable` | Several people taking turns, in order, until they agree | `speakers`, `subject`, `charge`, `rounds`, `study`, `interject`, `remember`, `closing` | `agreed`, `unresolved`, `halted` (with `interject`) | `minutes`, `dissent`, `rounds` |
 | `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `deliberate`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
@@ -78,6 +79,28 @@ No provider call, still 1 iteration each.
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
 `Speaker(node_id, persona, focus, tools=, max_turns=)`.
+
+- **`try_shell` is the only way to route on a command that failed**, and it
+  costs you the stdout contract to get there. A script step's non-zero exit is
+  not a failure to Conductor: `exit_code` comes back beside `stdout` and
+  `stderr`, nothing branches on it, and the next step runs — so a restore that
+  fails is followed by the configuration queries that were meant to land on
+  what it restored. Declaring `outputs` looks like the fix and is the opposite
+  one: the engine then parses stdout as JSON and *raises* when it cannot, and
+  that raise lands before routes are evaluated, so the branch written for the
+  failure can never be taken. `try_shell` emits the ports without the schema
+  (`shell(enforce_outputs=False)`), so nothing is checked, nothing raises, and
+  `exit_code` decides the exit. Both outcomes carry `stdout`, `stderr` and
+  `exit_code`, so the failure branch can say what went wrong.
+- **What `try_shell` does not convert: a command that never started.** A
+  missing binary and a `timeout` both leave the executor as an `ExecutionError`,
+  which is not a value and not routable. Declare the tool with
+  `require_executable` so `ictus preflight` refuses the launch instead.
+- **`outputs` on a `try_shell` must be printed on every zero exit.** Conductor
+  renders with `StrictUndefined`, so a declared field the command omitted raises
+  at the reference — reinstating, on the success path only, the crash the scope
+  removes. The `failed` exit does not read them; they arrive there as empty
+  values of their declared type.
 
 - **A context ceiling is per *stage*, and only one strategy survives a loop.**
   `Pipeline(context_max_tokens=, context_trim=)` emits `workflow.context`, and
@@ -149,9 +172,16 @@ the polling shape, usually with `pause_between`).
 
 Built from references so they stay correct when what they were derived from changes.
 
+`equals` refuses a value whose Python type does not match the port's, because
+the condition it would render is well-formed and never true. A route is tested
+against the value the engine stored, not its rendered text, so `exit_code` is a
+real `0` and a verdict is a real `True` — `== '0'` and `== 'true'` both send
+every run down the catch-all with nothing to see. An `ARRAY` or `OBJECT` port
+cannot be compared at all; route on a scalar the step also declares.
+
 | Helper | Renders |
 | --- | --- |
-| `equals(ref, value)` / `not_equals` | `{{ x == 'value' }}` |
+| `equals(ref, value)` / `not_equals` | `{{ x == 'value' }}` for a string, `{{ x \| int == 0 }}` for an int, `{{ x == true }}` for a bool — the value's type must match the port's |
 | `every(*refs)` / `not_every` | `{{ a and b and c }}` |
 | `at_least(ref, n)` | `{{ x \| int >= n }}` |
 | `tpl(...)`, `optional(...)`, `ref_to(id, port, type)` | prompt text with typed references |

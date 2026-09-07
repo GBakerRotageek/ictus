@@ -13,6 +13,7 @@ from ictus.stdlib.stages.council import AGREED, HALTED, UNRESOLVED, Voice, counc
 from ictus.stdlib.stages.resolve_unknowns import resolve_unknowns
 from ictus.stdlib.stages.roundtable import Speaker, roundtable
 from ictus.stdlib.stages.script_sequence import ScriptStep, script_sequence
+from ictus.stdlib.stages.try_shell import FAILED, OK, try_shell
 from ictus.stdlib.stages.validate_mcps import validate_mcps
 
 __all__ = [
@@ -20,7 +21,9 @@ __all__ = [
     "APPROVE_OR_REJECT",
     "CONVERGED",
     "EXHAUSTED",
+    "FAILED",
     "HALTED",
+    "OK",
     "UNRESOLVED",
     "Attempt",
     "ReviewOption",
@@ -33,5 +36,6 @@ __all__ = [
     "resolve_unknowns",
     "roundtable",
     "script_sequence",
+    "try_shell",
     "validate_mcps",
 ]

@@ -19,6 +19,8 @@ from ictus.lint import lint_pipeline
 from ictus.stdlib import (
     CONVERGED,
     EXHAUSTED,
+    FAILED,
+    OK,
     Attempt,
     ReviewOption,
     ScriptStep,
@@ -26,6 +28,7 @@ from ictus.stdlib import (
     converge,
     script_sequence,
     succeed,
+    try_shell,
 )
 
 if TYPE_CHECKING:
@@ -409,3 +412,107 @@ def _agent_in(pipeline: Pipeline, name: str) -> YamlDict:
         if isinstance(candidate, dict) and candidate.get("name") == name:
             return candidate
     raise AssertionError(name)
+
+
+class TestTryShell:
+    """A command that fails has to arrive as a value, or the branch is decoration."""
+
+    @staticmethod
+    def _scope(**kwargs: object) -> Scope:
+        settings: dict[str, object] = {"stage_id": "reset", "command": "/bin/false"}
+        settings.update(kwargs)
+        return try_shell(**settings)  # type: ignore[arg-type]
+
+    def _script(self, scope: Scope) -> YamlDict:
+        agents = ConductorBackend().document(scope.body)["agents"]
+        assert isinstance(agents, list)
+        found = [a for a in agents if isinstance(a, dict) and a.get("type") == "script"]
+        assert len(found) == 1
+        return found[0]
+
+    def test_the_step_emits_no_output_schema(self) -> None:
+        """The whole construct. With `output:` the engine raises on non-JSON stdout
+        *before* routes are evaluated, so the failure branch can never be taken."""
+        assert "output" not in self._script(self._scope())
+
+    def test_the_ports_survive_for_composition_anyway(self) -> None:
+        """Dropping the run-time contract must not drop the compile-time one."""
+        scope = self._scope()
+        run = next(n for n in scope.body.nodes if n.node_id == "run")
+        assert [p.name for p in run.outputs] == ["stdout", "stderr", "exit_code"]
+        with pytest.raises(Exception, match="typo"):
+            run.ref("typo")
+
+    def test_success_is_tested_and_failure_is_the_catch_all(self) -> None:
+        """A signal-killed child exits -9. `exit_code >= 1` reads that as success,
+        which is the exact bug the scope exists to remove."""
+        routes = self._script(self._scope())["routes"]
+        assert isinstance(routes, list)
+        assert routes == [
+            {"to": "ok", "when": "{{ run.output.exit_code | int == 0 }}"},
+            {"to": "failed"},
+        ]
+
+    def test_both_outcomes_carry_the_baseline(self) -> None:
+        """A key on one branch and absent on the other is a StrictUndefined error
+        waiting for whichever branch nobody exercised."""
+        scope = self._scope(outputs=(OutputPort("revision", STR, "What it restored"),))
+        agents = ConductorBackend().document(scope.body)["agents"]
+        assert isinstance(agents, list)
+        exits = {
+            a["name"]: a["output_template"]
+            for a in agents
+            if isinstance(a, dict) and a.get("type") == "terminate"
+        }
+        assert set(exits) == {OK, FAILED}
+        for template in exits.values():
+            assert isinstance(template, dict)
+            assert set(template) == {"outcome", "stdout", "stderr", "exit_code", "revision"}
+        broke, worked = exits[FAILED], exits[OK]
+        assert isinstance(broke, dict) and isinstance(worked, dict)
+        assert broke["revision"] == "", "the failed path must not read a field of the JSON"
+        assert worked["revision"] == "{{ run.output.revision }}"
+
+    def test_a_declared_field_shadowing_the_baseline_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="already supplies"):
+            self._scope(outputs=(OutputPort("exit_code", PortType.NUMBER, "mine"),))
+
+    def test_the_parameter_reaches_the_command_as_its_last_argument(self) -> None:
+        script = self._script(self._scope(args=("--full",), parameter="backup"))
+        assert script["args"] == ["--full", "{{ workflow.input.backup }}"]
+
+    def test_the_caller_cannot_leave_the_failure_unrouted(self) -> None:
+        """Refused where it is written, not reported as a dead end at lint time."""
+        parent = Pipeline(pipeline_id="provision")
+        reset = self._scope().instantiate(parent, node_id="reset")
+        parent.set_entry(reset)
+        done = parent.add(succeed(node_id="live", reason="live"))
+        with pytest.raises(CompositionError, match=r"unrouted outcome\(s\) \['failed'\]"):
+            parent.branch_on_outcome(reset, {OK: done})
+
+    def test_the_body_is_lint_clean_and_loads_in_conductor(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        scope = self._scope(
+            args=("--full",),
+            parameter="backup",
+            outputs=(OutputPort("revision", STR, "What it restored"),),
+        )
+        assert lint_pipeline(scope.body) == []
+        validates(scope.body)
+
+    def test_it_composes_into_a_parent_that_branches_on_it(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        """The reset-the-database shape: the failure gets its own exit, carrying
+        stderr, instead of ending the run before the parent sees anything."""
+        parent = Pipeline(pipeline_id="provision")
+        backup = parent.declare_input("backup", STR)
+        reset = self._scope(parameter="backup").instantiate(parent, node_id="reset")
+        parent.set_entry(reset)
+        parent.connect_input(backup, reset, "backup")
+        live = parent.add(succeed(node_id="live", reason="Restored"))
+        stop = parent.add(succeed(node_id="stop", reason="Restore failed", result={"why": "x"}))
+        parent.branch_on_outcome(reset, {OK: live, FAILED: stop})
+        assert lint_pipeline(parent) == []
+        validates(parent)

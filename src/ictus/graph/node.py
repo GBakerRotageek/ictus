@@ -622,6 +622,21 @@ class ScriptNode(Node):
     timeout: int | None = None
     working_dir: str | None = None
     declared_outputs: tuple[OutputPort, ...] = ()
+    enforce_outputs: bool = True
+    """Whether ``declared_outputs`` is also emitted as Conductor's ``output:``.
+
+    On, stdout is a contract: the engine parses it as JSON and raises unless it
+    is an object carrying these fields. Off, the ports still type every
+    reference at composition and still name what a route may read — Conductor
+    merges parsed stdout over ``{stdout, stderr, exit_code}`` either way — but
+    nothing is checked once the command has run.
+
+    Off exists for one reason. The validation raise happens *before* routes are
+    evaluated, so a command that dies takes the workflow with it and a route
+    written for its failure can never fire. Giving the enforcement up is the
+    price of the branch, and ``stdlib.try_shell`` is where that trade is made
+    deliberately rather than by hand.
+    """
 
     def __post_init__(self) -> None:
         if not self.command.strip():
@@ -638,7 +653,7 @@ class ScriptNode(Node):
 
     @property
     def emits_output_schema(self) -> bool:
-        return True
+        return self.enforce_outputs
 
     def template_strings(self) -> Iterator[str]:
         yield from (arg for arg in self.args if isinstance(arg, str))
