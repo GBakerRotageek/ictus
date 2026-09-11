@@ -307,9 +307,10 @@ the cost of wall-clock, and order matters because whoever speaks last has heard
 everyone. Both need `max_turns` on anyone given tools.
 
 Reach for `ictus.stdlib` before hand-rolling: `council`, `roundtable`,
-`converge`, `try_shell`, `briefing_gate`, `resolve_unknowns`, `validate_mcps`,
-`script_sequence`, `approval_gate`, `choice_gate`, `ask_human`, `shell`,
-`save_text`, `constant`, `counter`, `wait`, `succeed`, `fail`.
+`converge`, `classify`, `tiered`, `try_shell`, `briefing_gate`,
+`resolve_unknowns`, `validate_mcps`, `script_sequence`, `approval_gate`,
+`choice_gate`, `ask_human`, `shell`, `save_text`, `constant`, `counter`, `wait`,
+`succeed`, `fail`.
 
 ## 6. Gotchas that have each cost a real run
 
@@ -329,6 +330,19 @@ Reach for `ictus.stdlib` before hand-rolling: `council`, `roundtable`,
   outcomes `ok`/`failed` carrying `stdout`, `stderr`, `exit_code`. It does not
   cover a command that never started (a missing binary and a `timeout` both
   raise `ExecutionError`), so keep `require_executable`.
+- **A model can choose the *direction*, never the *effort*.** Routes are
+  rendered, so `route(src, dst, when=equals(src.ref("choice"), "x"))` lets a
+  step pick which declared edge is taken. `model`, `max_turns`, `tools` and
+  `provider` are read raw off the agent definition, so nothing a step produces
+  can reach them, and `claude-agent-sdk` declares
+  `capabilities.reasoning_effort=None` and never wires `reasoning` through.
+  Express effort as structure: `tiered` triages, then branches to a node already
+  declared with that model and budget. `classify` is the same shape without the
+  work — N outcomes plus `unclear` for an answer outside the vocabulary.
+- **Do not branch to bare nodes and read them downstream.** A reference to a
+  step that did not run renders *empty*, not an error, so "the cheap branch ran"
+  and "the expensive branch returned nothing" are indistinguishable. Put the
+  branches in a scope so every exit carries the same keys.
 - **`equals` needs a value of the port's own type.** A route is tested against
   the value the engine stored, not its rendered text, so `exit_code` is a real
   `0` and a verdict a real `True`. `equals(ref, "0")` and `equals(ref, "true")`

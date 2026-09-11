@@ -1,0 +1,105 @@
+workflow:
+  name: staged-fanout
+  description: Split a brief across areas and plan each one.
+  version: '1'
+  entry_point: confirm_start
+  runtime:
+    provider:
+      name: claude-agent-sdk
+    checkpoint:
+      every_agent: true
+  input:
+    brief:
+      type: string
+      required: true
+      description: The brief to act on
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 9
+  metadata:
+    generator: ictus
+    pipeline: staged-fanout
+agents:
+  - name: split
+    description: Split a brief into one piece of work per area it touches
+    type: workflow
+    workflow: ./split-work.yaml
+    input:
+      - workflow.input.brief
+    input_mapping:
+      brief: '{{ workflow.input.brief }}'
+    routes:
+      - to: workers
+        when: "{{ split.output.outcome == 'found' }}"
+      - to: nothing_to_do
+        when: "{{ split.output.outcome == 'missing' }}"
+  - name: planned
+    type: terminate
+    status: success
+    reason: Every area has a plan.
+    output_template:
+      plans: '{{ workers.outputs | tojson }}'
+    input:
+      - workers.outputs
+  - name: nothing_to_do
+    type: terminate
+    status: success
+    reason: The brief named no area to work on.
+  - name: confirm_start
+    description: Confirm before anything runs
+    type: human_gate
+    prompt: |
+      Start **staged-fanout**?
+
+      Split a brief across areas and plan each one.
+
+      7 step(s), beginning with `split`.
+
+      ---
+
+      **brief**
+
+      ```
+      {{ workflow.input.brief }}
+      ```
+    input:
+      - workflow.input.brief
+    options:
+      - label: Start the run
+        value: start
+        route: split
+      - label: Stop — do not run
+        value: cancel
+        route: not_started
+  - name: not_started
+    type: terminate
+    status: success
+    reason: Stopped at the start gate; nothing was run.
+    output_template:
+      started: 'false'
+for_each:
+  - name: workers
+    type: for_each
+    source: split.output.pieces
+    as: piece
+    agent:
+      name: worker
+      description: Plan one area's share of the brief
+      type: agent
+      prompt: |-
+        Area: {{ piece.area }}
+        Work: {{ piece.task }}
+
+        Write the plan for this area alone.
+      output:
+        plan:
+          type: string
+          description: What to do in this area
+    max_concurrent: 2
+    description: One planner per area
+    key_by: piece.area
+    routes:
+      - to: planned
+output:
+  plans: '{{ workers.outputs | tojson }}'

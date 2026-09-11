@@ -22,13 +22,14 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from ictus.baseline import AGENT_BASELINE, NO_BASELINE
 from ictus.errors import IctusError
+from ictus.graph.pipeline import BudgetMode
 
 if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline
@@ -39,7 +40,9 @@ CONFIG_FILE = "config.yaml"
 
 MINIMAL = "provider: claude-agent-sdk\n"
 
-_BUDGET_MODES = frozenset({"audit", "enforce"})
+# Derived from the type rather than restated: two spellings of the same
+# vocabulary is how a value passes one check and fails the other.
+_BUDGET_MODES: tuple[BudgetMode, ...] = get_args(BudgetMode)
 
 _KNOWN = frozenset(
     {
@@ -72,7 +75,7 @@ class PipelineConfig:
     """Whether a person confirms before anything runs. See ``ictus.gate``."""
 
     budget_usd: float | None = None
-    budget_mode: str = "audit"
+    budget_mode: BudgetMode | None = None
     max_iterations: int | None = None
     timeout_seconds: int | None = None
     """A wall-clock ceiling on the whole run, in seconds.
@@ -138,9 +141,18 @@ class PipelineConfig:
         engine's default — which is how a check meant to catch "this provider
         cannot do that" reported the wrong provider.
 
-        A value set in both places and set *differently* is refused rather than
-        silently resolved: two sources of truth that disagree is exactly the
-        state where whichever one you read is the wrong one.
+        Two rules, and which one a field gets is worth knowing:
+
+        * The policy fields below are **refused** when both places set them and
+          set them differently — two sources of truth that disagree is exactly
+          the state where whichever one you read is the wrong one. Each is
+          `None` when unstated, so "the file was silent" is a value rather than
+          a guess; `budget_mode` was not, and pushed its default over a pipeline
+          that had asked to enforce a ceiling.
+        * ``instructions`` and ``system_prompt`` only **fill a gap**: a
+          composition that set them keeps them, and the file supplies one when
+          it did not. They are long text rather than a setting, and a stage that
+          carries its own is saying something the file cannot know.
         """
         for child in pipeline.children.values():
             self.apply(child, where=where)
@@ -148,6 +160,7 @@ class PipelineConfig:
             ("provider", self.provider),
             ("default_model", self.default_model),
             ("budget_usd", self.budget_usd),
+            ("budget_mode", self.budget_mode),
             ("max_iterations", self.max_iterations),
             ("timeout_seconds", self.timeout_seconds),
         ):
@@ -160,7 +173,6 @@ class PipelineConfig:
                     "Policy belongs in config.yaml; take it out of the composition."
                 )
             setattr(pipeline, field, value)
-        pipeline.budget_mode = self.budget_mode  # type: ignore[assignment]
         if self.instructions and not pipeline.instructions:
             pipeline.instructions = list(self.instructions)
         if pipeline.system_prompt is None:
@@ -199,9 +211,6 @@ def read_config(path: Path) -> PipelineConfig:
             "own is copilot, and inheriting it silently is how a pipeline ends up running "
             "somewhere nobody chose."
         )
-    mode = loaded.get("budget_mode", "audit")
-    if mode not in _BUDGET_MODES:
-        raise ConfigError(f"{where}: budget_mode must be one of {sorted(_BUDGET_MODES)}")
     timeout_seconds = _optional_int(loaded, "timeout_seconds", where)
     if timeout_seconds is not None and timeout_seconds < 1:
         raise ConfigError(
@@ -215,7 +224,7 @@ def read_config(path: Path) -> PipelineConfig:
         default_model=_optional_str(loaded, "default_model", where),
         start_gate=_flag(loaded, "start_gate", where, default=True),
         budget_usd=_optional_number(loaded, "budget_usd", where),
-        budget_mode=mode,
+        budget_mode=_budget_mode(loaded, where),
         max_iterations=_optional_int(loaded, "max_iterations", where),
         timeout_seconds=timeout_seconds,
         dashboard=_flag(loaded, "dashboard", where, default=True),
@@ -273,6 +282,26 @@ def _instructions(data: dict[str, object], where: str, *, beside: Path) -> tuple
             )
         out.append(target.read_text(encoding="utf-8"))
     return tuple(out)
+
+
+def _budget_mode(data: dict[str, object], where: str) -> BudgetMode | None:
+    """Read ``budget_mode`` as the Literal the graph layer expects, or None.
+
+    Validated here *and* typed here. Storing it as a plain `str` meant `apply`
+    had to override the type checker to put it back — the only place in the
+    library that did, and a parse at the edge that throws away its own proof.
+
+    `None` for absent, so "the file did not say" is a state rather than a
+    guess. With a default value here instead, `apply` could not tell it from a
+    deliberate `audit` and pushed one over a pipeline that had asked to enforce.
+    """
+    if "budget_mode" not in data:
+        return None
+    value = data["budget_mode"]
+    for mode in _BUDGET_MODES:
+        if value == mode:
+            return mode
+    raise ConfigError(f"{where}: budget_mode must be one of {list(_BUDGET_MODES)}, got {value!r}")
 
 
 def _flag(data: dict[str, object], key: str, where: str, *, default: bool) -> bool:

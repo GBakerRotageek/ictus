@@ -147,6 +147,24 @@ def slugify(label: str) -> str:
     return out.strip("_")
 
 
+def check_route_name(value: str, *, what: str) -> None:
+    """Refuse a value that cannot name a route.
+
+    Conductor routes on these strings, so anything that is not a slug is
+    unroutable. The rule lives beside ``slugify`` rather than in each caller
+    because three of them need it — a node's own id, and the `Choice` and `Tier`
+    values that become exit nodes. Each of those is where a caller writes the
+    bad value, which is where they should hear about it.
+    """
+    if not value:
+        raise CompositionError(f"{what} cannot be empty")
+    if slugify(value) != value:
+        raise CompositionError(
+            f"{what} {value!r} is not a routing identifier; "
+            f"use {slugify(value)!r} (lowercase, digits and underscore only)"
+        )
+
+
 @dataclass(frozen=True, kw_only=True, eq=False)
 class Node(ABC):
     """A single step in a workflow.
@@ -167,13 +185,7 @@ class Node(ABC):
     inputs: tuple[InputPort, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.node_id:
-            raise CompositionError("node_id cannot be empty")
-        if slugify(self.node_id) != self.node_id:
-            raise CompositionError(
-                f"node_id {self.node_id!r} is not a routing identifier; "
-                f"use {slugify(self.node_id)!r} (lowercase, digits and underscore only)"
-            )
+        check_route_name(self.node_id, what="node_id")
         seen: set[str] = set()
         names = [p.name for p in self.inputs] + [p.name for p in self.outputs]
         for name in names:

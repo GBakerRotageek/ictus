@@ -1,0 +1,127 @@
+workflow:
+  name: gated-loop
+  description: Draft something, gate it on a person, revise until approved.
+  version: '1'
+  entry_point: confirm_start
+  runtime:
+    provider:
+      name: claude-agent-sdk
+    mcp_servers:
+      github:
+        type: http
+        url: https://api.githubcopilot.com/mcp/
+        headers:
+          Authorization: Bearer ${GITHUB_TOKEN:-}
+    checkpoint:
+      every_agent: true
+  input:
+    brief:
+      type: string
+      required: true
+      description: What to draft
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 7
+    budget_usd: 1.0
+    budget_mode: enforce
+  metadata:
+    generator: ictus
+    pipeline: gated-loop
+agents:
+  - name: draft
+    description: Write a draft against the brief
+    type: agent
+    prompt: |-
+      Draft a response to this brief.
+
+      {{ workflow.input.brief }}
+
+      {% if review is defined and review.output.additional_input is defined and review.output.additional_input.notes is defined %}A previous draft was rejected with these notes — address them:
+      {{ review.output.additional_input.notes }}{% endif %}
+    system_prompt: |-
+      You are one step in an automated workflow. Your output is read by later steps and by a person who was not watching you work, so it has to stand on its own.
+
+      Check before you assert. If you say that something behaves a particular way, is missing, or cannot be done, you must have looked at the thing itself — the source, the schema, the file — and not at a summary, a README, or your own recollection. You have tools; a claim you could have checked in a minute and did not is not worth making.
+
+      Check the case you are actually claiming. A description covering one case is not evidence about a different one, so a claim that two things differ has to be checked in both. Where the question is what something *does* rather than what it accepts, read the code that runs, not the comment above it. Before reporting something as missing, look for where it would already be handled — a thing that turns out to be wired is a different and much cheaper finding.
+
+      A tool that errors tells you about this environment, not about the thing you were reaching for. `command not found`, a missing module and an empty result mean you asked the wrong path, the wrong interpreter or the wrong question; none of them mean the thing does not exist. Try another route, and if you still cannot get there, report that you could not rather than what you would have found.
+
+      Say what you did not check. An answer that names its own gaps is more useful than one that reads as complete and is not, because the next step will build on whatever you hand it. Being confidently wrong costs more here than in a conversation, where somebody would have corrected you.
+
+      Send independent lookups together. Several tool calls in one turn cost one turn; the same calls one per turn cost several, and how many questions you get to answer is set by how efficiently you ask them. The turn ceiling is finite and reaching it kills the step rather than throttling it, so a step that spends its budget one `grep` at a time stops before it has finished looking.
+
+      Prefer the specific. Name files, symbols, line numbers and exact values rather than describing them. Quote what you found.
+
+      You will not be asked a follow-up question. Nobody is going to clarify the task or tell you that you misread it, so where a task is ambiguous, say which reading you took and why, then do the work under that reading.
+    input:
+      - workflow.input.brief
+      - review.output.additional_input.notes?
+    output:
+      draft:
+        type: string
+        description: The draft
+    routes:
+      - to: review
+  - name: review
+    description: Human review of the draft
+    type: human_gate
+    prompt: |-
+      Approve this draft?
+
+      {{ draft.output.draft }}
+    input:
+      - draft.output.draft
+    options:
+      - label: Approve
+        value: approved
+        route: done
+      - label: Reject and revise
+        value: rejected
+        route: draft
+        prompt_for: notes
+        multiline: true
+  - name: done
+    description: Draft approved
+    type: terminate
+    status: success
+    reason: A person approved the draft.
+    output_template:
+      draft: '{{ draft.output.draft }}'
+    input:
+      - draft.output.draft
+  - name: confirm_start
+    description: Confirm before anything runs
+    type: human_gate
+    prompt: |
+      Start **gated-loop**?
+
+      Draft something, gate it on a person, revise until approved.
+
+      3 step(s) on one pass, up to 5 with loops, beginning with `draft`.
+
+      ---
+
+      **brief**
+
+      ```
+      {{ workflow.input.brief }}
+      ```
+    input:
+      - workflow.input.brief
+    options:
+      - label: Start the run
+        value: start
+        route: draft
+      - label: Stop — do not run
+        value: cancel
+        route: not_started
+  - name: not_started
+    type: terminate
+    status: success
+    reason: Stopped at the start gate; nothing was run.
+    output_template:
+      started: 'false'
+output:
+  draft: '{{ draft.output.draft | tojson }}'

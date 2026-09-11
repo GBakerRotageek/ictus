@@ -15,14 +15,19 @@ from __future__ import annotations
 
 import inspect
 import re
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from conftest import REPO_ROOT, pipeline_roots
 
 import ictus.stdlib as stdlib
 
-CATALOGUE = Path(__file__).resolve().parent.parent / "STDLIB.md"
+if TYPE_CHECKING:
+    from pathlib import Path
+
+CATALOGUE = REPO_ROOT / "STDLIB.md"
 DOC = CATALOGUE.read_text(encoding="utf-8")
+README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
 # Constructors live above the "## Running" section; below it are tables about
 # settings and commands, whose first column looks the same and is not a
@@ -86,13 +91,24 @@ def test_the_outcome_vocabularies_are_stated_correctly() -> None:
     assert stdlib.HALTED == "halted"
     assert stdlib.OK == "ok"
     assert stdlib.FAILED == "failed"
-    for constant in ("converged", "exhausted", "agreed", "unresolved", "halted", "ok", "failed"):
+    assert stdlib.UNCLEAR == "unclear"
+    assert stdlib.DONE == "done"
+    for constant in (
+        "converged",
+        "exhausted",
+        "agreed",
+        "unresolved",
+        "halted",
+        "ok",
+        "failed",
+        "unclear",
+        "done",
+    ):
         assert f"`{constant}`" in DOC, f"outcome {constant!r} is not named in STDLIB.md"
 
 
 def test_the_readme_points_at_the_catalogue() -> None:
-    readme = (CATALOGUE.parent / "README.md").read_text(encoding="utf-8")
-    assert "STDLIB.md" in readme
+    assert "STDLIB.md" in README
 
 
 @pytest.mark.parametrize("gone", ["revise_loop", "poll_until"])
@@ -106,11 +122,23 @@ def test_deleted_constructors_are_not_offered_as_usable(gone: str) -> None:
     assert not hasattr(stdlib, gone)
     assert gone not in ROWS, f"STDLIB.md still offers {gone} as a constructor"
     assert gone not in CODE, f"STDLIB.md has copyable code using {gone}"
-    readme = (CATALOGUE.parent / "README.md").read_text(encoding="utf-8")
-    assert f"`{gone}`" not in readme, f"README.md still lists {gone}"
+    assert f"`{gone}`" not in README, f"README.md still lists {gone}"
 
 
-AGENTS = CATALOGUE.parent / "AGENTS.md"
+AGENTS = REPO_ROOT / "AGENTS.md"
+
+# Every instruction file the repo owns, root first. A subtree one is loaded only
+# when something in that subtree is read, which is what keeps the always-on
+# budget to the root file alone.
+#
+# Scoped to the directories we author rather than rglob from the root: `.venv`
+# is under it, and a dependency shipping its own AGENTS.md would fail this on a
+# file nobody here wrote.
+OURS = ("src", "tests", "tools")
+INSTRUCTIONS = [
+    AGENTS,
+    *sorted(p for d in OURS for p in (REPO_ROOT / d).rglob("AGENTS.md")),
+]
 
 
 class TestRepositoryInstructions:
@@ -133,6 +161,28 @@ class TestRepositoryInstructions:
         assert AGENTS.is_file(), "AGENTS.md is what a run against this repo reads"
         assert AGENTS.stat().st_size > 0
 
+    @pytest.mark.parametrize(
+        "agents", INSTRUCTIONS, ids=lambda p: "root" if p.parent == REPO_ROOT else p.parent.name
+    )
+    def test_every_instruction_file_is_paired_with_a_claude_pointer(self, agents: Path) -> None:
+        """Claude Code discovers `CLAUDE.md` and does *not* discover `AGENTS.md`.
+
+        Measured rather than assumed: the same canary text placed in a scratch
+        repo was recovered from `CLAUDE.md` and not from `AGENTS.md` (Claude
+        Code 2.1.268). So the file every *other* tool reads is invisible to the
+        one most often pointed at this repo unless a pointer sits beside it —
+        and a subtree file nobody loads is worse than none, because it reads as
+        covered.
+
+        A one-line `@AGENTS.md` import rather than a copy: two files saying the
+        same thing is the drift this module exists to prevent.
+        """
+        pointer = agents.parent / "CLAUDE.md"
+        assert pointer.is_file(), f"{agents} has no CLAUDE.md beside it, so Claude Code ignores it"
+        body = pointer.read_text(encoding="utf-8")
+        assert "@AGENTS.md" in body, f"{pointer} must import AGENTS.md, not restate it"
+        assert len(body.split()) < 20, f"{pointer} is a pointer; the account lives beside it"
+
     def test_it_says_how_to_reach_the_engine_source(self) -> None:
         """Every "the engine cannot do X" claim is settled by this lookup."""
         text = AGENTS.read_text(encoding="utf-8")
@@ -140,12 +190,29 @@ class TestRepositoryInstructions:
         assert "config/schema.py" in text
         assert "not importable" in text or "not* importable" in text
 
-    def test_the_council_context_does_not_restate_the_project(self) -> None:
-        """Duplicated, the two drift and the run reads whichever is stale."""
-        context = (
-            CATALOGUE.parent / "demo_work" / "pipelines" / "needs-council" / "context.md"
-        ).read_text(encoding="utf-8")
-        assert "readlink -f" not in context, (
-            "the engine lookup belongs in AGENTS.md, which the run discovers"
-        )
-        assert "conductor-cli" not in context
+    def test_no_pipeline_context_restates_the_project(self) -> None:
+        """Duplicated, the two drift and the run reads whichever is stale.
+
+        Written for one council's `context.md` and widened to all of them: the
+        rule is a property of every pipeline in the repo, and pinning it to a
+        single path meant it stopped being checked the moment that pipeline
+        stopped being committed.
+
+        What is forbidden is restating the *lookup* — the resolution recipe and
+        the machine-specific path it prints. Naming `conductor-cli` is not:
+        several unrelated products are called Conductor, and a pipeline that
+        tells its voices which one it means is doing its own job. Widening this
+        check is what showed that the original spelling would have failed that
+        file for a legitimate reason.
+        """
+        # The lookup, not the subject: `readlink -f` is the recipe in AGENTS.md
+        # and `share/uv/tools` is the path it resolves to on this machine.
+        restated = ("readlink -f", "share/uv/tools")
+        contexts = [c for root in pipeline_roots() for c in sorted(root.glob("*/context.md"))]
+        for path in contexts:
+            context = path.read_text(encoding="utf-8")
+            for marker in restated:
+                assert marker not in context, (
+                    f"{path} restates {marker!r}; the engine lookup belongs in AGENTS.md, "
+                    "which the run discovers"
+                )

@@ -165,7 +165,12 @@ def test_an_outcome_json_would_coerce_is_refused(name: str) -> None:
 
 @pytest.mark.parametrize("name", ["yes", "no", "off", "n1", "found"])
 def test_an_outcome_json_leaves_alone_is_allowed(name: str) -> None:
-    outcome_scope(stage_id="s", outcomes=("ok", name))
+    """The counterpart above: these survive `_maybe_parse_json` as themselves.
+
+    Asserting the vocabulary rather than only that nothing raised — a stub
+    returning `None` would satisfy "did not raise" and satisfies nothing here.
+    """
+    assert outcome_scope(stage_id="s", outcomes=("ok", name)).outcomes == ("ok", name)
 
 
 def test_an_undeclared_outcome_is_refused_at_the_exit() -> None:

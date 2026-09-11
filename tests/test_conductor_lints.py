@@ -7,10 +7,10 @@ without a backend, because none of them is a claim about graphs in general.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conftest import pipeline_roots
 
 from ictus import (
     END,
@@ -374,11 +374,11 @@ class TestTheProviderInUse:
         for field in ("working_dir", "skills", "plugins"):
             assert "claude-agent-sdk" in HONOURED_BY[field], field
 
-    def test_the_demo_pipelines_all_use_it(self) -> None:
+    def test_every_authored_pipeline_uses_it(self) -> None:
         """If that changes, the two lints above stop describing what you run."""
-        folders = sorted(Path("demo_work/pipelines").glob("*/config.yaml"))
-        assert folders
-        for config in folders:
+        configs = sorted(c for root in pipeline_roots() for c in root.glob("*/config.yaml"))
+        assert configs, "no pipeline configs were found, so this asserted nothing"
+        for config in configs:
             assert "claude-agent-sdk" in config.read_text(encoding="utf-8"), config
 
 

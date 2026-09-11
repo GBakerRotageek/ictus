@@ -71,15 +71,48 @@ No provider call, still 1 iteration each.
 
 | Constructor | Use | Options | Outcomes | Carries |
 | --- | --- | --- | --- | --- |
+| `classify` | Let a model pick one of N answers, as an outcome you route | `question`, `choices`, `model`, `provider`, `tools`, `max_turns`, `node_id`, `brief` | one per choice, plus `unclear` | `answer`, `rationale` |
+| `tiered` | Triage the work, then do it at the effort tier that picked | `question`, `tiers`, `produces`, `triage_model`, `triage_provider`, `brief` | `done`, `unclear` | `tier`, `rationale`, whatever `produces` declares |
 | `try_shell` | Run one command whose failure the caller routes on | `command`, `args`, `parameter`, `outputs`, `stdin`, `timeout`, `working_dir`, `node_id` | `ok`, `failed` | `stdout`, `stderr`, `exit_code` |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
 | `roundtable` | Several people taking turns, in order, until they agree | `speakers`, `subject`, `charge`, `rounds`, `study`, `interject`, `remember`, `closing` | `agreed`, `unresolved`, `halted` (with `interject`) | `minutes`, `dissent`, `rounds` |
 | `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `deliberate`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
 
+`Choice(value, meaning)` and `Tier(name, meaning, prompt, model=, provider=, tools=, max_turns=)` — the `meaning` is what the deciding model reads, not
+documentation.
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
 `Speaker(node_id, persona, focus, tools=, max_turns=)`.
 
+- **`classify` closes a vocabulary that a hand-written branch leaves open.**
+  `verdict` answers yes or no; anything wider used to be an `AgentNode` plus a
+  route per answer, with the list of answers living in the prompt and the list
+  of routes written separately and nothing checking they match. A model that
+  answers with a sixth word lands on whichever route was written last. As a
+  scope the choices *are* the outcomes, so `branch_on_outcome` refuses to leave
+  one unrouted, and an answer outside the list takes `unclear` — carrying what
+  the model actually said, because "I could not classify this" and "I classified
+  this as the last option" are different facts and only one is worth acting on.
+  Conductor's schema cannot help: `PortType` is the five wire types and nothing
+  narrower, so there is no enum to emit and the vocabulary is enforced by where
+  a wrong answer *ends up*, not by the provider.
+- **`tiered` exists because effort cannot be decided at run time.** Conductor
+  renders Jinja in the prompt, `working_dir`, a terminal's reason, a wait's
+  duration, route conditions and output templates — nowhere else. `model`,
+  `max_turns`, `tools` and `provider` are read straight off the agent
+  definition, so no value a step produced can reach them, and `reasoning` is not
+  wired by `claude-agent-sdk` at all. So the tiers are structure: triage names
+  one, the graph branches to a node already declared with that model and turn
+  budget, and the choice is something the lint sees, `ictus trace` reports and a
+  cost estimate can bound — none of which is true of a model string a model
+  invented.
+- **Both are scopes rather than branches you write, for the same reason.** After
+  a branch, reading `deep.output.result` when `quick` ran renders *empty* rather
+  than failing, because ictus guards a reference to a step that did not run — so
+  "the cheap tier ran" and "the expensive tier returned nothing" look identical
+  downstream. Every exit carries the same keys, so the branch is over by the
+  time the caller reads anything. `tiered` gives each tier its own exit for
+  exactly this: one shared exit would have to read every tier's ports.
 - **`try_shell` is the only way to route on a command that failed**, and it
   costs you the stdout contract to get there. A script step's non-zero exit is
   not a failure to Conductor: `exit_code` comes back beside `stdout` and

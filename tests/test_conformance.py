@@ -8,10 +8,10 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from conftest import REPO_ROOT, pipeline_roots
 
 from ictus import (
     END,
@@ -30,15 +30,26 @@ from ictus.stdlib import approval_gate, choice_gate, succeed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 S = PortType.STRING
 
 
 def _authored_pipelines() -> list[tuple[str, PipelineType]]:
     out: list[tuple[str, PipelineType]] = []
-    for path in sorted((REPO_ROOT / "demo_work" / "pipelines").glob("*/pipeline.py")):
-        spec = importlib.util.spec_from_file_location(path.parent.name, path)
+    for root in pipeline_roots():
+        out.extend(_pipelines_under(root))
+    assert out, "no authored pipelines were found; the conformance suite would check nothing"
+    return out
+
+
+def _pipelines_under(root: Path) -> list[tuple[str, PipelineType]]:
+    out: list[tuple[str, PipelineType]] = []
+    for path in sorted(root.glob("*/pipeline.py")):
+        # Folder names are unique per root but not across roots, and every
+        # folder's module is called `pipeline`; qualifying by root keeps two
+        # of them from overwriting each other in sys.modules.
+        spec = importlib.util.spec_from_file_location(f"{root.name}.{path.parent.name}", path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
@@ -61,22 +72,36 @@ def _authored_pipelines() -> list[tuple[str, PipelineType]]:
     return out
 
 
+# Evaluated once: each entry executes a pipeline module, so calling this twice
+# to build the ids as well would import every folder a second time.
+AUTHORED = _authored_pipelines()
+
+
 @pytest.mark.parametrize(
     "pipeline",
-    [p for _, p in _authored_pipelines()],
-    ids=[label for label, _ in _authored_pipelines()],
+    [p for _, p in AUTHORED],
+    ids=[label for label, _ in AUTHORED],
 )
 def test_authored_pipelines_load_in_conductor(
     pipeline: PipelineType, validates: Callable[[PipelineType], None]
 ) -> None:
-    """Every pipeline under pipelines/ must be loadable."""
+    """Every pipeline under a pipelines/ root must be loadable."""
     validates(pipeline)
 
 
-def test_committed_yaml_matches_a_fresh_emit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("root", pipeline_roots(), ids=lambda r: r.name)
+def test_committed_yaml_matches_a_fresh_emit(root: Path, tmp_path: Path) -> None:
     """Each folder's build/ is committed so diffs show what runs; it must be current."""
     result = subprocess.run(
-        [sys.executable, "-m", "ictus.cli", "emit", "demo_work/pipelines", "--out", str(tmp_path)],
+        [
+            sys.executable,
+            "-m",
+            "ictus.cli",
+            "emit",
+            str(root.relative_to(REPO_ROOT)),
+            "--out",
+            str(tmp_path),
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -84,11 +109,11 @@ def test_committed_yaml_matches_a_fresh_emit(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     fresh = {p.name: p.read_text() for p in tmp_path.glob("*.yaml")}
-    on_disk = {
-        p.name: p.read_text()
-        for p in (REPO_ROOT / "demo_work" / "pipelines").glob("*/build/*.yaml")
-    }
-    assert fresh == on_disk, "a pipeline folder's build/ is stale; run `make emit`"
+    on_disk = {p.name: p.read_text() for p in root.glob("*/build/*.yaml")}
+    assert fresh, f"{root} emitted nothing, so this compared two empty sets"
+    assert fresh == on_disk, (
+        f"a pipeline folder's build/ under {root.name} is stale; run `make emit`"
+    )
 
 
 def test_every_node_kind_loads(validates: Callable[[PipelineType], None]) -> None:

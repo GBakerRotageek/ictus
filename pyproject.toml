@@ -38,6 +38,11 @@ select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "RET", "SIM", "TCH", "ARG", 
 
 [tool.mypy]
 python_version = "3.12"
+# Every pipeline folder holds a file called `pipeline.py`, so a bulk run sees
+# several modules with one name, and a hyphen is not a valid module component
+# so package-based disambiguation is not available. They are checked a folder
+# at a time instead — see the `soundcheck` target.
+exclude = "/pipelines/[^/]+/pipeline\\.py$"
 strict = true
 warn_unreachable = true
 disallow_any_explicit = true

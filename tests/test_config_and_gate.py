@@ -112,6 +112,44 @@ def test_two_sources_of_truth_that_disagree_are_refused(tmp_path: Path) -> None:
         settings.apply(pipeline, where="config.yaml")
 
 
+class TestBudgetModeIsPolicyLikeEveryOtherField:
+    """`budget_mode` alone used to override the composition without saying so.
+
+    Its default is a value rather than `None`, so it could not use the "unset in
+    the file means leave the pipeline alone" rule the other policy fields use,
+    and was assigned unconditionally instead. A `config.yaml` that never
+    mentioned it therefore pushed `audit` over a pipeline that had asked for
+    `enforce` — a spend ceiling silently turned off, in the one direction nobody
+    would check.
+    """
+
+    def test_a_file_that_is_silent_leaves_the_composition_alone(self, tmp_path: Path) -> None:
+        settings = read_config(_config(tmp_path, "provider: claude\n"))
+        pipeline = _pipeline()
+        pipeline.budget_mode = "enforce"
+        settings.apply(pipeline, where="config.yaml")
+        assert pipeline.budget_mode == "enforce"
+
+    def test_it_still_reaches_the_pipeline_when_the_file_does_state_it(
+        self, tmp_path: Path
+    ) -> None:
+        settings = read_config(_config(tmp_path, "provider: claude\nbudget_mode: enforce\n"))
+        pipeline = _pipeline()
+        settings.apply(pipeline, where="config.yaml")
+        assert pipeline.budget_mode == "enforce"
+
+    def test_a_disagreement_is_refused_like_any_other(self, tmp_path: Path) -> None:
+        settings = read_config(_config(tmp_path, "provider: claude\nbudget_mode: enforce\n"))
+        pipeline = _pipeline()
+        pipeline.budget_mode = "audit"
+        with pytest.raises(ConfigError, match="take it out of the composition"):
+            settings.apply(pipeline, where="config.yaml")
+
+    def test_an_unknown_mode_names_the_value_it_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match=r"budget_mode must be one of .*got 'hard'"):
+            read_config(_config(tmp_path, "provider: claude\nbudget_mode: hard\n"))
+
+
 def test_a_wall_clock_ceiling_is_policy_and_reaches_the_emitted_limits(tmp_path: Path) -> None:
     """Where the run happens decides how long it may take; the graph has no view."""
     settings = read_config(_config(tmp_path, "provider: claude\ntimeout_seconds: 900\n"))

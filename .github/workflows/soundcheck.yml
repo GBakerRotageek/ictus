@@ -1,0 +1,41 @@
+name: soundcheck
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A second push to the same branch cancels the first: the gate's answer is
+# about the tip, and a queue of stale runs hides which one that was.
+concurrency:
+  group: soundcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  soundcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # Conductor is the schema authority, and `make soundcheck` ends by asking
+      # it whether the emitted YAML loads. Without it `tests/conftest.py` fails
+      # hard rather than skipping, which is deliberate: a run that cannot check
+      # its own output has verified nothing.
+      #
+      # Installed from git, pinned, and NOT from PyPI: the name `conductor-cli`
+      # on PyPI belongs to an unrelated project ("a research computing
+      # orchestrator"). Several products are called Conductor; this is the one
+      # ictus compiles for.
+      - name: Install the Conductor CLI
+        run: uv tool install git+https://github.com/microsoft/conductor.git@v0.1.36
+
+      - run: uv sync --frozen
+
+      # No credentials are set, and that is the point. `ictus validate` asks
+      # "is this workflow well-formed?", which must be answerable on a machine
+      # with no secrets — otherwise CI could never check the committed artifact.
+      - run: make soundcheck

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ictus.graph.values import YamlDict
 
 from ictus.errors import EmitError
+from ictus.graph.pipeline import DEFAULT_BUDGET_MODE
 from ictus.interfaces.conductor.mcp import mcp_servers_block
 
 __all__ = ["NOTHING_INHERITED", "Inherited", "workflow_block"]
@@ -143,7 +144,7 @@ def workflow_block(pipeline: Pipeline, inherited: Inherited = NOTHING_INHERITED)
         limits["timeout_seconds"] = pipeline.timeout_seconds
     if pipeline.budget_usd is not None:
         limits["budget_usd"] = pipeline.budget_usd
-        limits["budget_mode"] = pipeline.budget_mode
+        limits["budget_mode"] = pipeline.budget_mode or DEFAULT_BUDGET_MODE
     block["limits"] = limits
 
     if pipeline.metadata:

@@ -18,16 +18,22 @@ from ictus.interfaces.conductor import ConductorBackend
 from ictus.lint import lint_pipeline
 from ictus.stdlib import (
     CONVERGED,
+    DONE,
     EXHAUSTED,
     FAILED,
     OK,
+    UNCLEAR,
     Attempt,
+    Choice,
     ReviewOption,
     ScriptStep,
+    Tier,
     briefing_gate,
+    classify,
     converge,
     script_sequence,
     succeed,
+    tiered,
     try_shell,
 )
 
@@ -516,3 +522,215 @@ class TestTryShell:
         parent.branch_on_outcome(reset, {OK: live, FAILED: stop})
         assert lint_pipeline(parent) == []
         validates(parent)
+
+
+def _terminal_in(pipeline: Pipeline, name: str) -> YamlDict:
+    found = _agent_in(pipeline, name)
+    assert found["type"] == "terminate"
+    return found
+
+
+CHOICES = (
+    Choice("simple", "mechanical, one file, nothing to decide"),
+    Choice("hard", "spans modules or needs a design decision"),
+)
+
+
+class TestClassify:
+    """An N-way model decision whose vocabulary is checked on both ends."""
+
+    @staticmethod
+    def _scope(**kwargs: object) -> Scope:
+        settings: dict[str, object] = {
+            "stage_id": "triage",
+            "question": "How hard is this?",
+            "choices": CHOICES,
+        }
+        settings.update(kwargs)
+        return classify(**settings)  # type: ignore[arg-type]
+
+    def test_every_choice_becomes_an_outcome_plus_unclear(self) -> None:
+        assert self._scope().outcomes == ("simple", "hard", UNCLEAR)
+
+    def test_an_answer_outside_the_vocabulary_is_its_own_exit(self) -> None:
+        """Not the last choice in the list. "I could not classify this" and "I
+        classified this as the last option" are different facts."""
+        routes = _agent_in(self._scope().body, "decide")["routes"]
+        assert isinstance(routes, list)
+        assert routes == [
+            {"to": "is_simple", "when": "{{ decide.output.choice == 'simple' }}"},
+            {"to": "is_hard", "when": "{{ decide.output.choice == 'hard' }}"},
+            {"to": UNCLEAR},
+        ]
+
+    def test_the_unclear_exit_carries_what_the_model_actually_said(self) -> None:
+        """Without it, an invented category is indistinguishable from a hedge."""
+        template = _terminal_in(self._scope().body, UNCLEAR)["output_template"]
+        assert isinstance(template, dict)
+        assert template["answer"] == "{{ decide.output.choice }}"
+
+    def test_the_caller_must_route_every_choice(self) -> None:
+        parent = Pipeline(pipeline_id="p")
+        node = self._scope().instantiate(parent, node_id="triage")
+        parent.set_entry(node)
+        done = parent.add(succeed(node_id="done", reason="d"))
+        with pytest.raises(CompositionError, match=r"unrouted outcome"):
+            parent.branch_on_outcome(node, {"simple": done, "hard": done})
+
+    def test_one_choice_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="at least two choices"):
+            self._scope(choices=(CHOICES[0],))
+
+    def test_a_repeated_choice_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="repeats the choice"):
+            self._scope(choices=(*CHOICES, Choice("simple", "again")))
+
+    def test_a_choice_named_unclear_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="already goes"):
+            self._scope(choices=(*CHOICES, Choice(UNCLEAR, "no idea")))
+
+    def test_a_choice_without_a_meaning_is_refused(self) -> None:
+        """A vocabulary of bare words is a classifier that guesses."""
+        with pytest.raises(CompositionError, match="needs a meaning"):
+            Choice("simple", "")
+
+    @pytest.mark.parametrize("value", ["needs work", "high-risk", "Simple", "a/b"])
+    def test_a_choice_that_cannot_name_a_route_is_refused_where_it_is_written(
+        self, value: str
+    ) -> None:
+        """The value becomes an outcome *and* an exit node id, so it has to be one.
+
+        It was caught before this, but two layers down and under a name nobody
+        wrote: `Choice("needs work", ...)` failed with "node_id 'is_needs work'
+        is not a routing identifier", about an id the caller never typed and
+        after half a scope had been built. Fail where the bad value enters.
+        """
+        with pytest.raises(CompositionError, match="routing identifier"):
+            Choice(value, "a meaning")
+
+    def test_tools_without_a_turn_budget_are_refused(self) -> None:
+        with pytest.raises(CompositionError, match="max_turns"):
+            self._scope(tools=None)
+
+    def test_it_denies_tools_by_default(self) -> None:
+        """A classifier reading what it was handed should not open files."""
+        assert _agent_in(self._scope().body, "decide")["tools"] == []
+
+    def test_the_body_is_lint_clean_and_loads_in_conductor(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        assert lint_pipeline(self._scope().body) == []
+        validates(self._scope().body)
+
+
+TIERS = (
+    Tier("quick", "a mechanical change", "Make the change.", model="cheap-model"),
+    Tier("deep", "needs a design decision", "Work it out first.", tools=None, max_turns=200),
+)
+RESULT = (OutputPort("result", STR, "What was done"),)
+
+
+class TestTiered:
+    """Effort is not a value a step can produce, so the tiers are structure."""
+
+    @staticmethod
+    def _scope(**kwargs: object) -> Scope:
+        settings: dict[str, object] = {
+            "stage_id": "work",
+            "question": "How much effort?",
+            "tiers": TIERS,
+            "produces": RESULT,
+        }
+        settings.update(kwargs)
+        return tiered(**settings)  # type: ignore[arg-type]
+
+    def test_the_outcomes_are_done_and_unclear_not_one_per_tier(self) -> None:
+        """A caller almost never branches on which tier ran; it reads `tier`."""
+        assert self._scope().outcomes == (DONE, UNCLEAR)
+
+    def test_each_tier_carries_its_own_ports_through_its_own_exit(self) -> None:
+        """A shared exit would read every tier's ports, and the ones that did
+        not run render empty rather than failing — the ambiguity this removes."""
+        scope = self._scope()
+        for tier in TIERS:
+            template = _terminal_in(scope.body, f"{DONE}_{tier.name}")["output_template"]
+            assert isinstance(template, dict)
+            assert template["outcome"] == DONE
+            assert template["tier"] == tier.name
+            assert template["result"] == f"{{{{ {tier.name}.output.result }}}}"
+
+    def test_the_unclear_exit_still_carries_every_declared_key(self) -> None:
+        template = _terminal_in(self._scope().body, UNCLEAR)["output_template"]
+        assert isinstance(template, dict)
+        assert set(template) == {"outcome", "tier", "rationale", "result"}
+        assert template["result"] == ""
+
+    def test_a_tier_reaches_the_provider_as_a_declared_model(self) -> None:
+        """The whole point: `model` is read raw, so it cannot come from a step."""
+        assert _agent_in(self._scope().body, "quick")["model"] == "cheap-model"
+
+    def test_a_tier_given_tools_keeps_them_and_its_turn_budget(self) -> None:
+        deep = _agent_in(self._scope().body, "deep")
+        assert "tools" not in deep, "None means the workflow default, not denied"
+        assert deep["max_agent_iterations"] == 200
+
+    def test_triage_never_gets_tools(self) -> None:
+        """A router that opens files has become the work it was meant to route."""
+        assert _agent_in(self._scope().body, "triage")["tools"] == []
+
+    def test_a_tier_with_tools_and_no_budget_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="max_turns"):
+            Tier("x", "m", "p", tools=None)
+
+    @pytest.mark.parametrize("name", ["quick pass", "deep-dive", "Quick", "a/b"])
+    def test_a_tier_that_cannot_name_a_route_is_refused_where_it_is_written(
+        self, name: str
+    ) -> None:
+        """Same boundary as `Choice`: the name is the node the branch routes to."""
+        with pytest.raises(CompositionError, match="routing identifier"):
+            Tier(name, "m", "p")
+
+    def test_a_tier_named_after_an_outcome_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="already uses"):
+            self._scope(tiers=(*TIERS, Tier(DONE, "m", "p")))
+
+    def test_produces_must_not_shadow_the_carry(self) -> None:
+        with pytest.raises(CompositionError, match="already carries"):
+            self._scope(produces=(OutputPort("tier", STR, "mine"),))
+
+    def test_no_produces_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="no produces"):
+            self._scope(produces=())
+
+    def test_the_body_is_lint_clean_and_loads_in_conductor(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        assert lint_pipeline(self._scope().body) == []
+        validates(self._scope().body)
+
+    def test_it_composes_into_a_parent_that_reads_one_shape(
+        self, validates: Callable[[Pipeline], None]
+    ) -> None:
+        parent = Pipeline(pipeline_id="p")
+        work = parent.declare_input("brief", STR)
+        node = self._scope().instantiate(parent, node_id="work")
+        parent.set_entry(node)
+        parent.connect_input(work, node, "brief")
+        shipped = parent.add(succeed(node_id="shipped", reason="Done"))
+        stuck = parent.add(succeed(node_id="stuck", reason="Nobody could place it"))
+        parent.branch_on_outcome(node, {DONE: shipped, UNCLEAR: stuck})
+        assert lint_pipeline(parent) == []
+        validates(parent)
+
+
+def test_the_two_scopes_share_one_unclear() -> None:
+    """A flat namespace would export whichever module imported last, silently.
+
+    `import_module` because the package binds each module's name to the
+    constructor it exports, so `stages.classify` is the function, not the file.
+    """
+    import importlib
+
+    a = importlib.import_module("ictus.stdlib.stages.classify")
+    b = importlib.import_module("ictus.stdlib.stages.tiered")
+    assert a.UNCLEAR is b.UNCLEAR is UNCLEAR

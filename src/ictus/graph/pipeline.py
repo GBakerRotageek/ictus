@@ -43,6 +43,9 @@ _GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
 
 ContextMode = Literal["accumulate", "last_only", "explicit"]
 BudgetMode = Literal["audit", "enforce"]
+# What a budget means when nobody says. Emitted explicitly rather than left
+# to the engine, so the choice is visible in the diff.
+DEFAULT_BUDGET_MODE: BudgetMode = "audit"
 
 
 class FailureMode(StrEnum):
@@ -231,7 +234,7 @@ class Pipeline:
         context_trim: TrimStrategy | None = None,
         loop_passes: int | None = None,
         budget_usd: float | None = None,
-        budget_mode: BudgetMode = "audit",
+        budget_mode: BudgetMode | None = None,
         max_iterations: int | None = None,
         timeout_seconds: int | None = None,
         metadata: Mapping[str, str] | None = None,
@@ -276,7 +279,9 @@ class Pipeline:
         """
         self.loop_passes = loop_passes
         self.budget_usd = budget_usd
-        self.budget_mode: BudgetMode = budget_mode
+        # `None` is "the composition did not say", which is what lets
+        # `config.yaml` set it without a disagreement that was never real.
+        self.budget_mode: BudgetMode | None = budget_mode
         self.max_iterations = max_iterations
         # A wall-clock ceiling on the whole run, as against a step's own
         # `timeout_seconds`, which bounds one model call. Nothing else bounds
