@@ -88,7 +88,7 @@ class PipelineConfig:
     model call and leaves the workflow to carry on."""
 
     dashboard: bool = True
-    """Whether ``ictus run`` serves the dashboard. A gated run needs one."""
+    """Whether ``ictus run`` serves the dashboard; disabled runs use the terminal."""
 
     system_prompt: str | None = AGENT_BASELINE
     """What every model call is told about how to work, unless it sets its own.

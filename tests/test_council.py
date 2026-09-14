@@ -476,7 +476,7 @@ class TestUnverifiedClaims:
         for name in ("agreed", "unresolved"):
             template = _agent(_council().body, name)["output_template"]
             assert isinstance(template, dict)
-            assert template["unverified"] == "{{ report.output.unverified }}"
+            assert template["unverified"] == "{{ report.output.unverified | tojson }}"
 
 
 class TestVoiceTurnBudget:

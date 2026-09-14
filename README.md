@@ -84,6 +84,22 @@ without a backend reports only what is true anywhere.
 
 Not a plan to leave Conductor — a way to keep the coupling countable.
 
+Map groups follow that boundary too. The graph checks array types, item fields,
+positive concurrency, and that every parameter of the mapped body receives a
+value. The Conductor backend checks reserved loop names, supported body kinds,
+and its concurrency ceiling of 100, during lint and compilation. Parallel groups
+sit the same way: the graph knows a group needs two members and that a member
+belongs to one of them, and the backend knows which *kinds* an engine will run
+at once.
+
+A map body may be a whole stage — `stdlib.map_stage`. Its parameters come from
+two places: `bind` gives the ones each item decides, ordinary `feed` and
+`connect_input` give the ones every iteration shares, and supplying one
+parameter both ways is refused. Every value is emitted through `| tojson`,
+because the engine parses each rendered `input_mapping` entry back with
+`json.loads` — only `number` survives that bare, and a string holding `"false"`
+would otherwise reach the child as a boolean.
+
 ## Composition is checked where it is written
 
 Node references are objects, never strings. A target that is not in the graph is
@@ -112,6 +128,11 @@ resolved against the finished graph by the lint. The guard such a reference
 needs on the first pass is emitted by the compiler, which already knows the
 reference is deferred. A live run once died on exactly that omission.
 
+Stage identities are checked when they are placed: distinct bodies need distinct
+`stage_id` values, including across nested branches. Reusing one `Stage` instance
+emits one child file. Compilation also checks that shared stages inherit
+compatible settings, so one parent's provider or prompt cannot silently win.
+
 `connect` wires control **and** data. Conductor keeps those separate — `routes:`
 decides what runs next, `input:` decides what a node may read — so when they
 diverge, say them separately:
@@ -137,6 +158,10 @@ is silent until a run is already in flight:
 - a duplicate agent name
 - a stage whose contract has drifted from the workflow it hosts
 - a required input nothing is wired to
+- a route on a script step's `exit_code`, `stdout` or `stderr` when the command
+  can overwrite them — Conductor merges a JSON stdout over all three, so
+  printing `{"exit_code": 0}` and exiting 1 takes the success branch. A step
+  declared `trusted_status=True` is lowered so it cannot, and is exempt.
 
 ## The stdlib
 
@@ -208,8 +233,9 @@ while the server never reaches the model. Only asking the model to *use* it
 proves the connection end to end — and being a node, it is visible in the
 dashboard while it happens.
 
-An agent is also the only node type Conductor permits inside a parallel group;
-scripts, waits, gates, sub-workflows and terminals are all rejected as members.
+Agents and computations are the only node types Conductor runs inside a parallel
+group; scripts, waits, gates, sub-workflows and terminals are all rejected as
+members, which `ictus lint` reports before anything is emitted.
 
 The gate offers three ways out, not two:
 
@@ -361,6 +387,44 @@ should not have to treat "a person looked at it and said no" as an error.
     ictus emit pipelines/      # each folder's own build/
     ictus lint pipelines/      # composition rules only, writes nothing
     ictus validate pipelines/  # hands the emitted YAML to conductor
+
+    ictus resume ~/pipelines/review          # continue the newest run, after saying what repeats
+    ictus resume ~/pipelines/review --run 20260914-101500-123456-ab12
+
+Input files may supply a subset of the required values; `-i` overrides are
+merged before required inputs are checked. `--dry-run` does not require values.
+`dashboard: false` runs in the foreground by default. `--web` and `--no-web`
+override that setting; explicit `--background` requires the dashboard.
+
+## Resuming an interrupted run
+
+Every `ictus run` records itself under `$XDG_STATE_HOME/ictus` (override with
+`ICTUS_STATE_DIR`): a manifest of what was launched, and a directory the engine
+keeps its checkpoints and event logs in. Left to itself the engine uses
+`$TMPDIR`, which is often a tmpfs — so a shutdown, the interruption most worth
+surviving, used to delete every resume point.
+
+`ictus resume <folder>` continues the newest run from its last checkpoint, in
+the directory that run worked in. It refuses when `build/` has changed since
+launch, or when the source no longer compiles to what was running: continuing a
+different workflow from a checkpoint taken in this one is not resuming. Then it
+says what will happen again, because the engine resumes at the granularity it
+checkpoints at, and that is coarser than a run looks:
+
+- the step that was running starts over, and is paid for again;
+- a stage restarts from its **first** step — nothing inside one is checkpointed —
+  so a command in it that already ran runs twice;
+- a parallel or map group runs every member or item again;
+- on a provider that cannot carry a session across (every one but `copilot` and
+  `hermes`), a step that remembers a conversation starts without it.
+
+It asks before resuming; `--yes` skips the question once the plan is printed. A
+new `ictus run` while an interrupted one exists says so, and leaves it
+resumable with `--run`. Runs that can no longer be resumed are kept for their
+event logs — `ictus trace` reads the newest — up to twenty per pipeline.
+
+Commands a run executes see `TMPDIR` pointed at that run's state, so their
+temporary files are kept with it rather than in `/tmp`.
 
 `soundcheck` ends with `conductor validate`, and that step is not optional: a
 green build that never asked Conductor whether the output loads has checked

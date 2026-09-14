@@ -15,6 +15,7 @@ import pytest
 from ictus import (
     END,
     AgentNode,
+    ComputeNode,
     InputPort,
     OutputPort,
     Pipeline,
@@ -30,14 +31,17 @@ from ictus import (
     tpl,
 )
 from ictus.errors import CompositionError
+from ictus.graph.mapping import Item
 from ictus.interfaces.conductor import conductor
 from ictus.lint import lint_pipeline
-from ictus.stdlib import approval_gate, succeed
+from ictus.stdlib import approval_gate, ask_human_for, succeed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ictus.graph.ref import Ref
+    from conftest import Executes
+
+    from ictus.graph.ref import Ref, Template
     from ictus.graph.values import YamlDict
 
 STR, NUM, BOOL = PortType.STRING, PortType.NUMBER, PortType.BOOLEAN
@@ -280,6 +284,27 @@ class TestTypedConditions:
     def test_an_empty_conjunction_is_refused(self) -> None:
         with pytest.raises(CompositionError, match="at least one reference"):
             every()
+
+    @pytest.mark.parametrize("port_type", [STR, NUM, PortType.ARRAY, PortType.OBJECT])
+    def test_a_conjunction_over_something_that_is_not_a_boolean_is_refused(
+        self, port_type: PortType
+    ) -> None:
+        """Jinja calls a non-empty string true, so the condition holds on every run.
+
+        That is the failure a route exists to prevent, arriving as a branch
+        nobody took — the same reason `equals` refuses a mistyped literal.
+        """
+        ref = _producer(port_type=port_type).ref("v")
+        with pytest.raises(CompositionError, match=r"every\(\) tests booleans"):
+            every(ref)
+        with pytest.raises(CompositionError, match=r"not_every\(\) tests booleans"):
+            not_every(ref)
+
+    def test_a_conjunction_names_the_member_that_is_not_a_boolean(self) -> None:
+        """A council conjunction is built from a list; the message has to say which."""
+        refs = (_producer("a", BOOL).ref("v"), _producer("b", STR).ref("v"))
+        with pytest.raises(CompositionError, match=r"b\.v is string"):
+            every(*refs)
 
 
 class TestComparingAgainstNonStrings:
@@ -593,8 +618,244 @@ class TestTerminalResults:
         done = next(a for a in agents if isinstance(a, dict) and a["name"] == "done")
         template = done["output_template"]
         assert isinstance(template, dict)
-        assert template["v"] == "{{ work.output.v }}"
+        assert template["v"] == "{{ work.output.v | tojson }}"
 
     def test_a_reference_in_a_result_is_checked_like_any_other(self) -> None:
         p = self._pipeline(ref_to("ghost", "v", STR))
         assert any("unknown node 'ghost'" in problem for problem in lint_pipeline(p))
+
+
+class TestAReferenceResolvesToWhatItWasBuiltFrom:
+    """A reference carries its source. Sharing a name is not being the same thing.
+
+    ``Ref.source`` was always kept "so a lint can check the referenced node is
+    actually in the pipeline". Nothing checked it: resolution was by ``node_id``
+    alone, so a reference built from another graph's node landed on whichever
+    local node happened to share the name — and the emitted template then read
+    that one. Every layer agreed, and the value was wrong.
+    """
+
+    @staticmethod
+    def _local() -> tuple[Pipeline, AgentNode]:
+        p = Pipeline(pipeline_id="t")
+        work = p.add(_producer("work"))
+        p.set_entry(work)
+        return p, work
+
+    @staticmethod
+    def _read(p: Pipeline, local: AgentNode, value: Ref) -> Pipeline:
+        reader = p.add(
+            AgentNode(
+                node_id="reader",
+                inputs=(InputPort("v", STR),),
+                prompt=tpl("see ", value),
+                declared_outputs=(OutputPort("summary", STR),),
+            )
+        )
+        p.connect(local, "v", reader, "v")
+        p.route(reader, END)
+        return p
+
+    @staticmethod
+    def _foreign_node() -> AgentNode:
+        other = Pipeline(pipeline_id="other")
+        node = other.add(_producer("work"))
+        other.route(node, END)
+        return node
+
+    def test_a_foreign_node_shadowed_by_a_local_name_is_reported(self) -> None:
+        p, local = self._local()
+        self._read(p, local, self._foreign_node().ref("v"))
+        assert [x for x in lint_pipeline(p, backend=conductor) if "a different node" in x]
+
+    def test_the_local_node_of_that_name_still_reads_clean(self) -> None:
+        """The check has to distinguish the two, not refuse the name."""
+        p, local = self._local()
+        self._read(p, local, local.ref("v"))
+        assert lint_pipeline(p, backend=conductor) == []
+
+    def test_a_forward_reference_is_still_resolved_by_name(self) -> None:
+        """`ref_to` has no source to compare; naming the node is all it can do."""
+        p, local = self._local()
+        self._read(p, local, ref_to("work", "v", STR))
+        assert lint_pipeline(p, backend=conductor) == []
+
+    def test_a_foreign_workflow_input_shadowed_by_a_local_one_is_reported(self) -> None:
+        """Every stage declares `brief`, so this is the collision most likely to happen."""
+        outer = Pipeline(pipeline_id="outer")
+        theirs = outer.declare_input("brief", STR)
+        inner = Pipeline(pipeline_id="inner")
+        inner.declare_input("brief", STR)
+        node = inner.add(AgentNode(node_id="a", prompt=tpl("see ", theirs.ref())))
+        inner.route(node, END)
+        assert [x for x in lint_pipeline(inner) if "a different pipeline input" in x]
+
+    def test_a_foreign_map_group_shadowed_by_a_local_one_is_reported(self) -> None:
+        """A group resolves by name too, and its aggregate ports are identical."""
+        theirs = _fanout("first").maps[0]
+        mine = _fanout("second")
+        peek = mine.add(
+            AgentNode(
+                node_id="peek",
+                inputs=(InputPort("n", NUM),),
+                prompt=tpl("count ", theirs.ref("count")),
+            )
+        )
+        mine.route(mine.maps[0], peek)
+        mine.route(peek, END)
+        assert [x for x in lint_pipeline(mine) if "a different map group" in x]
+
+
+def _fanout(pipeline_id: str) -> Pipeline:
+    """A pipeline whose one map group is always called `workers`."""
+    shape = {"repo": STR}
+    p = Pipeline(pipeline_id=pipeline_id)
+    split = p.add(
+        AgentNode(
+            node_id="split",
+            prompt="split it",
+            declared_outputs=(OutputPort("pieces", PortType.ARRAY, "each", element=shape),),
+        )
+    )
+    piece = Item(name="piece", fields=shape)
+    body = p.add(
+        AgentNode(
+            node_id="work",
+            prompt=tpl("do ", piece.ref("repo")),
+            declared_outputs=(OutputPort("summary", STR),),
+        )
+    )
+    p.set_entry(split)
+    group = p.map_over("workers", source=split.ref("pieces"), item=piece, body=body, expect_items=4)
+    p.route(split, group)
+    return p
+
+
+class TestAGroupsConditionsResolveLikeAStepsConditions:
+    """A group routes like a step, so what its conditions read is checked like one.
+
+    Only nodes' routes were resolved: `reference_problems` walks a node's
+    outgoing edges, and a parallel or map group is not a node. So a group
+    condition built from another graph's `flag`, beside a local `flag`, linted
+    clean — and on a live run the group took the branch the *local* flag chose.
+    """
+
+    @staticmethod
+    def _flag(p: Pipeline, value: str) -> ComputeNode:
+        return p.add(
+            ComputeNode(
+                node_id="flag",
+                value=value,
+                value_type=BOOL,
+                declared_outputs=(OutputPort("value", BOOL),),
+            )
+        )
+
+    def _grouped(self, condition: Callable[[ComputeNode], Template]) -> Pipeline:
+        """Local flag → a parallel group → a branch chosen by `condition`."""
+        p = Pipeline(pipeline_id="grp", provider="claude-agent-sdk")
+        flag = self._flag(p, "false")
+        members = [
+            p.add(
+                ComputeNode(
+                    node_id=name,
+                    value="1",
+                    value_type=NUM,
+                    declared_outputs=(OutputPort("value", NUM),),
+                )
+            )
+            for name in ("a", "b")
+        ]
+        group = p.parallel("both", members)
+        p.set_entry(flag)
+        p.route(flag, group)
+        yes = p.add(succeed(node_id="yes", reason="the condition held"))
+        no = p.add(succeed(node_id="no", reason="it did not"))
+        p.route(group, yes, when=condition(flag))
+        p.route(group, no)
+        return p
+
+    def test_a_foreign_node_in_a_parallel_groups_condition_is_reported(self) -> None:
+        foreign = self._flag(Pipeline(pipeline_id="elsewhere"), "true")
+        p = self._grouped(lambda _local: tpl(foreign.ref("value")))
+        assert [x for x in lint_pipeline(p) if "group 'both'" in x and "a different node" in x]
+
+    def test_a_foreign_node_in_a_map_groups_condition_is_reported(self) -> None:
+        foreign = self._flag(Pipeline(pipeline_id="elsewhere"), "true")
+        p = _fanout("t")
+        done = p.add(succeed(node_id="done", reason="ok"))
+        p.route(p.maps[0], done, when=tpl(foreign.ref("value")))
+        p.route(p.maps[0], END)
+        self._flag(p, "false")
+        assert [x for x in lint_pipeline(p) if "group 'workers'" in x and "a different node" in x]
+
+    def test_an_unknown_node_in_a_groups_condition_is_reported(self) -> None:
+        p = self._grouped(lambda _local: tpl(ref_to("ghost", "value", BOOL)))
+        assert [x for x in lint_pipeline(p) if "group 'both'" in x and "unknown node 'ghost'" in x]
+
+    def test_a_loop_item_in_a_groups_condition_is_reported(self) -> None:
+        """A group routes once, after every item; there is no item there to read."""
+        piece = Item(name="piece", fields={"ready": BOOL})
+        p = self._grouped(lambda _local: tpl(piece.ref("ready")))
+        assert [x for x in lint_pipeline(p) if "group 'both'" in x and "loop item" in x]
+
+    def test_the_local_node_in_a_groups_condition_is_clean(self) -> None:
+        p = self._grouped(lambda local: tpl(local.ref("value")))
+        assert lint_pipeline(p, backend=conductor) == []
+
+    def test_the_engine_reads_whichever_node_the_name_lands_on(self, executes: Executes) -> None:
+        """Why the lint is the only guard: nothing downstream can tell the two apart.
+
+        The condition was built from a flag that says true. The emitted template
+        names `flag`, the engine resolves that to the local flag, which says
+        false, and the group takes the other branch without any error.
+        """
+        foreign = self._flag(Pipeline(pipeline_id="elsewhere"), "true")
+        run = executes(self._grouped(lambda _local: tpl(foreign.ref("value"))))
+        assert run.returncode == 0, run.stderr
+        assert run.routes()[-1] == "no"
+
+
+class TestAQuestionsSourceIsResolved:
+    """`ask_human_for(source=...)` names a value like any reference and was never resolved.
+
+    It is a dotted path the engine reads itself rather than a template, so it was
+    in neither `prompt_refs` nor `settled_refs` — and nothing walked it.
+    """
+
+    @staticmethod
+    def _asking(source: Ref) -> Pipeline:
+        """A local `find` step, then a questions step reading ``source``."""
+        p = Pipeline(pipeline_id="t")
+        found = p.add(
+            AgentNode(
+                node_id="find",
+                prompt="x",
+                declared_outputs=(OutputPort("questions", PortType.ARRAY),),
+            )
+        )
+        p.set_entry(found)
+        ask = p.add(ask_human_for(node_id="ask", source=source))
+        p.route(found, ask)
+        p.route(ask, END)
+        return p
+
+    def test_a_foreign_source_shadowed_by_a_local_step_is_reported(self) -> None:
+        other = Pipeline(pipeline_id="elsewhere")
+        foreign = other.add(
+            AgentNode(
+                node_id="find",
+                prompt="y",
+                declared_outputs=(OutputPort("questions", PortType.ARRAY),),
+            )
+        )
+        problems = lint_pipeline(self._asking(foreign.ref("questions")))
+        assert [x for x in problems if "questions 'ask'" in x and "a different node" in x]
+
+    def test_an_unknown_source_is_reported(self) -> None:
+        problems = lint_pipeline(self._asking(ref_to("ghost", "questions", PortType.ARRAY)))
+        assert [x for x in problems if "questions 'ask'" in x and "unknown node 'ghost'" in x]
+
+    def test_a_local_source_is_clean(self) -> None:
+        p = self._asking(ref_to("find", "questions", PortType.ARRAY))
+        assert not [x for x in lint_pipeline(p) if "questions 'ask'" in x]

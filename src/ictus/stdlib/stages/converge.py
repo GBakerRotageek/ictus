@@ -4,8 +4,9 @@ Every loop in the previous stdlib had the same hole. ``revise_loop`` with three
 passes and a reviewer who never approves does not "give up after three"; it runs
 until Conductor's iteration budget is spent and raises ``MaxIterationsError``,
 which ``_run_child_engine`` does not catch — so it detonates the caller past
-every route the caller declared. ``poll_until`` had it too. The bound was a
-number that decided *when* the run would crash, not what would happen.
+every route the caller declared. The previous ``poll_until`` had it too. The
+bound was a number that decided *when* the run would crash, not what would
+happen.
 
 ``converge`` counts its own passes in a ``type: set`` step (zero provider calls,
 one iteration) and routes on that count, so running out is an ordinary exit with
@@ -35,6 +36,8 @@ from ictus.stdlib.steps.wait import wait
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from ictus.graph.pipeline import Pipeline
 
 __all__ = ["CONVERGED", "EXHAUSTED", "Attempt", "converge"]
 
@@ -87,6 +90,8 @@ def converge(
       that edge the second pass knows nothing the first did not.
     * ``self`` — no judge node. The last attempt declares the verdict port
       itself, which is the shape a poll wants: one step that checks and reports.
+      For a poll whose check is a *command* rather than a model call, reach for
+      ``poll_until`` instead — same loop, no provider on the hot path.
 
     ``remember`` keeps each attempt's session across passes, so pass two revises
     what it wrote rather than writing it again from the brief and a note.
@@ -119,7 +124,10 @@ def converge(
     elif not judge_prompt:
         raise CompositionError(f"converge {stage_id!r} needs a judge_prompt for judge={judge!r}")
 
-    carry = {p.name: p.port_type for p in last.produces}
+    # The port itself, not its type: an array's element schema is what lets the
+    # caller fan out over what the loop produced, and rebuilding the port from
+    # its type discards it one line before the boundary that has to carry it.
+    carry: dict[str, PortType | OutputPort] = {p.name: p for p in last.produces}
     carry[FEEDBACK] = PortType.STRING
     carry[PASSES] = PortType.NUMBER
 
@@ -159,6 +167,14 @@ def converge(
                         if judge == "self" or index > 0
                         else (InputPort("notes", PortType.STRING, "Last verdict", optional=True),)
                     ),
+                    # Self-judged, this step is also the one that routes on
+                    # exhaustion, and a route renders in the routing step's own
+                    # scope. See `_sees_the_count`.
+                    *(
+                        (InputPort(COUNTER, PortType.NUMBER, "Which pass this is"),)
+                        if judge == "self" and index == len(steps) - 1
+                        else ()
+                    ),
                 ),
                 session_key=f"{stage_id}-{step.node_id}" if remember else None,
                 prompt=_prompt(
@@ -196,7 +212,10 @@ def converge(
             AgentNode(
                 node_id="judge",
                 description="Judge the attempt",
-                inputs=tuple(InputPort(p.name, p.port_type) for p in last.produces),
+                inputs=(
+                    *(InputPort(p.name, p.port_type) for p in last.produces),
+                    InputPort(COUNTER, PortType.NUMBER, "Which pass this is"),
+                ),
                 prompt=tpl(judge_prompt, "\n\n", *_readback(produced, last.produces)),
                 declared_outputs=(
                     OutputPort(verdict_port, PortType.BOOLEAN, "Whether this is acceptable"),
@@ -253,10 +272,12 @@ def converge(
         body.route(retry, counter)
 
     if assessor is None:
+        _sees_the_count(body, counter, produced)
         body.route(produced, hit, when=tpl(produced.ref(verdict_port)))
         body.route(produced, gave_up, when=exhausted_when)
         body.route(produced, retry)
     elif judge == "model":
+        _sees_the_count(body, counter, assessor)
         body.route(assessor, hit, when=tpl(assessor.ref(verdict_port)))
         body.route(assessor, gave_up, when=exhausted_when)
         body.route(assessor, retry)
@@ -274,12 +295,25 @@ def converge(
                 declared_outputs=(OutputPort("value", PortType.STRING, "Rejection marker"),),
             )
         )
-        body.feed(counter, "value", rejected, COUNTER)
+        _sees_the_count(body, counter, rejected)
         assert isinstance(assessor, GateNode)
         body.branch(assessor, {"approved": hit, "rejected": rejected})
         body.route(rejected, gave_up, when=exhausted_when)
         body.route(rejected, retry)
     return scope
+
+
+def _sees_the_count(body: Pipeline, counter: Node, tester: Node) -> None:
+    """Put the pass count in scope for the step whose route tests it.
+
+    A route condition is rendered in the routing step's *own* context, not the
+    run's, so under ``context.mode: explicit`` — the default — a step that tests
+    a counter it never declared dies on the first pass with
+    ``'pass_number' is undefined``, after the attempt has already been paid for.
+    The human path never had this, but only because a gate cannot test a counter
+    at all and the check had to move to a step of its own.
+    """
+    body.feed(counter, "value", tester, COUNTER)
 
 
 def _prompt(

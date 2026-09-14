@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 from ictus.interfaces import PreflightIssue
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.requirements import Executable
 
@@ -31,10 +33,21 @@ __all__ = ["executable_issues"]
 PROBE_TIMEOUT_SECONDS = 10.0
 
 
-def executable_issues(pipeline: Pipeline, *, probe: bool) -> list[PreflightIssue]:
-    """Every declared command this machine cannot supply."""
+def executable_issues(
+    pipeline: Pipeline, *, probe: bool, implied: Iterable[Executable] = ()
+) -> list[PreflightIssue]:
+    """Every command this machine cannot supply.
+
+    ``implied`` is what a backend requires on the pipeline's behalf — a command
+    it chose to lower something onto, which the author never wrote down and so
+    never declared. A declared tool of the same name wins: it is the same
+    command, and its purpose and hint were written by someone who knew why.
+    """
+    tools = {tool.name: tool for tool in pipeline.all_executables()}
+    for tool in implied:
+        tools.setdefault(tool.name, tool)
     issues: list[PreflightIssue] = []
-    for tool in pipeline.all_executables():
+    for tool in tools.values():
         found = shutil.which(tool.name)
         if found is None:
             issues.append(

@@ -17,6 +17,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 from ictus.errors import CompositionError, UnknownPortError
@@ -272,6 +273,16 @@ class Node(ABC):
 
     def settled_refs(self) -> Iterator[Ref]:
         """Typed references in the accumulate-rendered slots."""
+        return iter(())
+
+    def path_refs(self) -> Iterator[Ref]:
+        """Typed references the engine resolves as a path rather than renders.
+
+        Kept apart from the other two because nothing about templates applies:
+        no guard, no ``input:`` entry, no dialect. What does apply is that the
+        path must name a real value — and a reference in neither of the other
+        channels was simply never resolved.
+        """
         return iter(())
 
     def ref(self, port: str) -> Ref:
@@ -619,6 +630,12 @@ class GateNode(Node):
             yield from self.prompt.refs()
 
 
+#: What a finished process reports about itself, whatever it printed.
+PROCESS_RESULT: Mapping[str, PortType] = MappingProxyType(
+    {"stdout": PortType.STRING, "stderr": PortType.STRING, "exit_code": PortType.NUMBER}
+)
+
+
 @dataclass(frozen=True, kw_only=True, eq=False)
 class ScriptNode(Node):
     """A subprocess step. Conductor ``type: script`` — no model in the loop."""
@@ -643,17 +660,61 @@ class ScriptNode(Node):
     merges parsed stdout over ``{stdout, stderr, exit_code}`` either way — but
     nothing is checked once the command has run.
 
-    Off exists for one reason. The validation raise happens *before* routes are
+    Off exists because the validation raise happens *before* routes are
     evaluated, so a command that dies takes the workflow with it and a route
-    written for its failure can never fire. Giving the enforcement up is the
-    price of the branch, and ``stdlib.try_shell`` is where that trade is made
-    deliberately rather than by hand.
+    written for its failure can never fire. It is not enough on its own to route
+    on that failure: the merge still happens, so a command that prints an
+    ``exit_code`` key overwrites its own status. That is what
+    ``trusted_status`` is for.
+    """
+
+    trusted_status: bool = False
+    """Whether ``stdout``, ``stderr`` and ``exit_code`` are the process's own.
+
+    Not a given on every engine, and not free where it has to be arranged.
+    Conductor folds a JSON stdout into the step's result, keys and all, so a
+    command that prints ``{"exit_code": 0}`` and exits 1 reads as a success. Its
+    backend keeps the three out of the command's reach by lowering the step
+    behind a reporter process, which is also what the backend then requires of
+    the machine at preflight. A route on any of the three from a step without
+    this is refused by that backend's lint.
+
+    The promise rules two things out. Fields read from stdout: stdout is data
+    here, so parse fields in a later step, once the status says it is worth it.
+    And ``enforce_outputs=False``: the result is the step's contract, and the
+    contract is what ends the run for a command that never started, instead of
+    routing it as though it had run and failed.
     """
 
     def __post_init__(self) -> None:
         if not self.command.strip():
             raise CompositionError(f"script node {self.node_id!r} requires a command")
+        if self.trusted_status:
+            self._check_trustable()
         super().__post_init__()
+
+    def _check_trustable(self) -> None:
+        """Refuse what a process-owned result cannot also be."""
+        if not self.enforce_outputs:
+            raise CompositionError(
+                f"script node {self.node_id!r} sets trusted_status with enforce_outputs=False. "
+                "The enforced result is what ends the run for a command that never started; "
+                "without it that command would route as one that ran and failed."
+            )
+        for port in self.declared_outputs:
+            expected = PROCESS_RESULT.get(port.name)
+            if expected is None:
+                raise CompositionError(
+                    f"script node {self.node_id!r} sets trusted_status and declares "
+                    f"{port.name!r}, a field read from stdout. A trusted result keeps stdout "
+                    "out of it, so there are no fields in this step — parse them in a later "
+                    f"step from its stdout. It may declare: {', '.join(PROCESS_RESULT)}"
+                )
+            if port.port_type is not expected:
+                raise CompositionError(
+                    f"script node {self.node_id!r} declares {port.name!r} as "
+                    f"{port.port_type.value}, but a process reports it as {expected.value}"
+                )
 
     @property
     def kind(self) -> NodeKind:
@@ -908,6 +969,10 @@ class QuestionsNode(Node):
             if q.id and q.id not in reserved
         ]
         return tuple(ports)
+
+    def path_refs(self) -> Iterator[Ref]:
+        if self.source is not None:
+            yield self.source
 
     def output_ref(self, port_name: str) -> str:
         fixed = {"answers", "transcript", "answered_count", "outcome"}

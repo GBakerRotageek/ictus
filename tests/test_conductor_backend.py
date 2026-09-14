@@ -298,7 +298,9 @@ class TestStages:
             "type": "workflow",
             "workflow": "./inner.yaml",
             "input": ["workflow.input.x"],
-            "input_mapping": {"x": "{{ workflow.input.x }}"},
+            # Every entry is JSON: the engine parses each one back with json.loads,
+            # and only `number` survives that bare.
+            "input_mapping": {"x": "{{ workflow.input.x | tojson }}"},
             "routes": [{"to": "done"}],
         }
 

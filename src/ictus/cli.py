@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from dataclasses import dataclass
@@ -18,12 +19,13 @@ from ictus.interfaces.conductor import conductor
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.runspec import PipelineFolder, read_input_file
+from ictus.runstate import RunRecord, changed_files, fingerprint, prune_runs, runs_of, start_run
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.interfaces import PreflightIssue
+    from ictus.interfaces import PreflightIssue, ResumePlan
 
 app = typer.Typer(
     help="Typed composition for Conductor workflows.",
@@ -249,17 +251,23 @@ def emit(
     if not pipelines:
         _fail(f"no pipelines found in {where} (nothing was emitted)")
 
+    problems = [p for pipeline in pipelines for p in lint_pipeline(pipeline, backend=BACKEND)]
+    _refuse_problems(problems, consequence="nothing was written")
+
     seen: dict[str, str] = {}
-    problems: list[str] = []
     for pipeline in pipelines:
-        for document in BACKEND.compile(pipeline):
+        try:
+            documents = BACKEND.compile(pipeline)
+        except IctusError as exc:
+            _fail(f"{pipeline.pipeline_id}: {exc}")
+            return
+        for document in documents:
             owner = seen.get(document.filename)
             if owner is not None:
                 problems.append(
                     f"{document.filename} is claimed by both {owner!r} and {pipeline.pipeline_id!r}"
                 )
             seen[document.filename] = pipeline.pipeline_id
-        problems.extend(lint_pipeline(pipeline, backend=BACKEND))
     _refuse_problems(problems, consequence="nothing was written")
 
     written: list[_Written] = []
@@ -398,8 +406,12 @@ def run(
         typer.Option(help="Work in this directory instead of the current one"),
     ] = None,
     web: Annotated[
-        bool, typer.Option(help="Serve the dashboard so gates can be answered remotely")
-    ] = True,
+        bool | None,
+        typer.Option(
+            "--web/--no-web",
+            help="Serve the dashboard (default: config.yaml, else on)",
+        ),
+    ] = None,
     probe: Annotated[bool, typer.Option(help="Open each declared connection at preflight")] = True,
     workspace_instructions: Annotated[
         bool | None,
@@ -415,13 +427,13 @@ def run(
         bool, typer.Option(help="Compile before running, so the YAML matches the source")
     ] = True,
     background: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--background/--foreground",
             "-b/-F",
-            help="Detach and let the dashboard drive, rather than tying the run to this terminal",
+            help="Detach and let the dashboard drive (default: on when the dashboard is enabled)",
         ),
-    ] = True,
+    ] = None,
     inputs: Annotated[
         list[str] | None,
         typer.Option("--input", "-i", help="Override one input as name=value; repeatable"),
@@ -446,20 +458,14 @@ def run(
     — a run that touches a checkout can then say which one in something you can
     commit.
 
-    Detached by default. A foreground run holds the terminal: Conductor puts it
-    in cbreak mode for its interrupt listener and answers gates there, and
-    anything that blocks on it blocks the same event loop that serves the
+    Detached by default when the dashboard is enabled. A foreground run holds
+    the terminal: Conductor puts it in cbreak mode for its interrupt listener and
+    answers gates there, and anything that blocks on it blocks the same event loop that serves the
     dashboard — so the browser freezes on whatever it last saw and the run looks
     hung when it is waiting for a keystroke nobody is watching. Detached, the
     dashboard is the only place anything is answered, which is the one place you
     are looking.
     """
-    if background and not web:
-        _fail(
-            "--background and --no-web cannot both hold: a detached run's gates are "
-            "only answerable through the dashboard, so there would be no way to "
-            "reach it. Drop one."
-        )
     started_in = Path.cwd()
     try:
         target = PipelineFolder.at(folder)
@@ -476,6 +482,9 @@ def run(
         lint_pipeline(pipeline, backend=BACKEND),
         consequence="nothing was compiled or launched",
     )
+
+    policy = _policy(target)
+    serves_dashboard, detached = _launch_mode(target, policy, web=web, background=background)
 
     spec = None
     source = input_file if input_file is not None else target.input_file
@@ -557,12 +566,10 @@ def run(
         preview = supplied[name].replace("\n", " ")
         typer.echo(f"  {name} = {preview[:70]}{'…' if len(preview) > 70 else ''}")
 
-    # Re-read rather than thread it through `_load`: the policy is a property of
-    # the folder, and a flag on the command line beats the file.
     reads_project = (
         workspace_instructions
         if workspace_instructions is not None
-        else _policy(target).workspace_instructions
+        else policy.workspace_instructions
     )
     if reads_project:
         typer.secho(
@@ -570,24 +577,216 @@ def run(
             fg=typer.colors.BRIGHT_BLACK,
         )
 
+    earlier = runs_of(target)
+    if earlier and _resumable(earlier[0]):
+        # Starting over is a legitimate choice, so this informs rather than
+        # refuses — but only the newest run is what `ictus resume` picks, and
+        # this launch is about to become it.
+        typer.secho(
+            f"  run {earlier[0].name} was interrupted and can still be resumed: "
+            f"ictus resume {target.root} --run {earlier[0].name}",
+            fg=typer.colors.YELLOW,
+        )
+    record = start_run(target, pipeline_id=pipeline.pipeline_id, workflow=path, working_dir=working)
+    prune_runs(target, resumable=_resumable)
+    typer.secho(
+        f"  if this run is interrupted: ictus resume {target.root}", fg=typer.colors.BRIGHT_BLACK
+    )
+
     try:
         code = BACKEND.run(
             path,
             inputs=supplied,
-            dashboard=web,
-            background=background,
+            dashboard=serves_dashboard,
+            background=detached,
             workspace_instructions=reads_project,
             working_dir=working,
+            log_file=log_file,
+            state_dir=record.engine_dir,
+        )
+    except FileNotFoundError as exc:
+        _fail(str(exc))
+        return
+    _report_activity(pipeline.pipeline_id, background=detached, state_dir=record.engine_dir)
+    raise typer.Exit(code=code)
+
+
+@app.command()
+def resume(
+    folder: Annotated[
+        Path, typer.Argument(help="The pipeline folder whose run to resume")
+    ] = Path(),
+    run_name: Annotated[
+        str | None,
+        typer.Option("--run", help="Resume this recorded run instead of the newest"),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Resume without asking, once the plan is printed")
+    ] = False,
+    web: Annotated[
+        bool | None,
+        typer.Option("--web/--no-web", help="Serve the dashboard (default: config.yaml, else on)"),
+    ] = None,
+    background: Annotated[
+        bool | None,
+        typer.Option(
+            "--background/--foreground",
+            "-b/-F",
+            help="Detach and let the dashboard drive (default: on when the dashboard is enabled)",
+        ),
+    ] = None,
+    log_file: Annotated[
+        str | None,
+        typer.Option(
+            "--log-file",
+            "-l",
+            help="Write full debug output here, or 'auto' for a generated temp file",
+        ),
+    ] = None,
+) -> None:
+    """Continue an interrupted run from its last checkpoint.
+
+    Refuses when what is on disk is no longer what was running — a changed
+    `build/`, or a source that compiles to something else — because continuing
+    a different workflow from a checkpoint taken in this one is not resuming.
+
+    Says first what will happen again: the step that was running starts over, a
+    stage restarts from its first step, and a command that had already done
+    something does it twice. Then asks, unless `--yes`.
+    """
+    try:
+        target = PipelineFolder.at(folder)
+        runs = runs_of(target)
+    except IctusError as exc:
+        _fail(str(exc))
+        return
+    if not runs:
+        _fail(f"{target.root} has no recorded run; start one with `ictus run {target.root}`")
+    chosen = runs[0] if run_name is None else next((r for r in runs if r.name == run_name), None)
+    if chosen is None:
+        known = ", ".join(r.name for r in runs)
+        _fail(f"{target.root} has no run named {run_name!r}; recorded: {known}")
+        return
+    manifest = chosen.manifest
+
+    # Before loading the source: a changed artifact is refused whatever the
+    # source says, and it is the cheaper check.
+    drifted = changed_files(manifest.fingerprint, fingerprint(target.build))
+    if drifted:
+        _fail(
+            f"build/ has changed since run {chosen.name} was launched: {', '.join(drifted)}. "
+            "Resuming would continue a different workflow from a checkpoint taken in this "
+            "one. Restore those files, or start a new run."
+        )
+    pipeline = _only(target)
+    compiled = {
+        d.filename: hashlib.sha256(d.content.encode("utf-8")).hexdigest()
+        for d in BACKEND.compile(pipeline)
+    }
+    diverged = changed_files(manifest.fingerprint, compiled)
+    if diverged:
+        _fail(
+            f"{target.module} no longer compiles to what run {chosen.name} was running "
+            f"({', '.join(diverged)}). What resumes is the emitted YAML, but what would be "
+            "reported about it comes from the source, and the two now disagree. Restore the "
+            "source, or start a new run."
+        )
+    if not manifest.working_dir.is_dir():
+        _fail(f"run {chosen.name} worked in {manifest.working_dir}, which no longer exists")
+
+    try:
+        plan = BACKEND.resume_plan(pipeline, manifest.workflow, state_dir=chosen.engine_dir)
+    except IctusError as exc:
+        _fail(str(exc))
+        return
+    if plan is None:
+        _fail(
+            f"run {chosen.name} left nothing to resume: it finished, or it stopped before "
+            "its first step completed. Start a new run."
+        )
+        return
+
+    _report_resume(pipeline.pipeline_id, chosen, plan)
+    if not yes:
+        if not sys.stdin.isatty():
+            _fail("nobody is here to answer; pass --yes to resume without being asked")
+        if not typer.confirm("Resume?", default=False):
+            typer.echo("not resumed")
+            raise typer.Exit(code=0)
+
+    policy = _policy(target)
+    serves_dashboard, detached = _launch_mode(target, policy, web=web, background=background)
+    try:
+        code = BACKEND.resume(
+            plan,
+            state_dir=chosen.engine_dir,
+            dashboard=serves_dashboard,
+            background=detached,
+            working_dir=manifest.working_dir,
             log_file=log_file,
         )
     except FileNotFoundError as exc:
         _fail(str(exc))
         return
-    _report_activity(pipeline.pipeline_id, background=background)
+    _report_activity(pipeline.pipeline_id, background=detached, state_dir=chosen.engine_dir)
     raise typer.Exit(code=code)
 
 
-def _report_activity(workflow: str, *, background: bool) -> None:
+def _report_resume(pipeline_id: str, run: RunRecord, plan: ResumePlan) -> None:
+    """Everything resuming will and will not do again, before it does any of it."""
+    typer.secho(f"{pipeline_id}: resuming run {run.name}", fg=typer.colors.CYAN)
+    typer.echo(f"  in {run.manifest.working_dir}")
+    stopped = plan.reason or "no error recorded — killed, or its machine went down"
+    typer.echo(f"  saved {plan.saved_at}; stopped: {stopped}")
+    if plan.completed:
+        counts = {name: plan.completed.count(name) for name in dict.fromkeys(plan.completed)}
+        done = ", ".join(f"{n} x{c}" if c > 1 else n for n, c in counts.items())
+        typer.echo(f"  done: {done}")
+    typer.echo(f"  resumes at: {plan.step}")
+    if plan.reruns != (plan.step,):
+        typer.secho(
+            f"  {plan.step} restarts from its first step; these run again: "
+            f"{', '.join(plan.reruns)}",
+            fg=typer.colors.YELLOW,
+        )
+    if plan.scripts:
+        typer.secho(
+            f"  commands that run again, repeating anything they did before: "
+            f"{', '.join(plan.scripts)}",
+            fg=typer.colors.YELLOW,
+        )
+    if plan.cold_sessions:
+        typer.secho(
+            f"  sessions that do not survive a resume; these start without them: "
+            f"{', '.join(plan.cold_sessions)}",
+            fg=typer.colors.YELLOW,
+        )
+
+
+def _launch_mode(
+    target: PipelineFolder, policy: PipelineConfig, *, web: bool | None, background: bool | None
+) -> tuple[bool, bool]:
+    """Whether to serve the dashboard, and whether to detach.
+
+    Flags override folder policy. Both are resolved before checking they fit
+    together: disabling the dashboard makes the default launch use the terminal.
+    """
+    serves_dashboard = web if web is not None else policy.dashboard
+    detached = background if background is not None else serves_dashboard
+    if detached and not serves_dashboard:
+        _fail(
+            "--background requires the dashboard so detached gates can be answered. "
+            f"Enable it with --web or dashboard: true in {target.config_file}, "
+            "or pass --foreground."
+        )
+    return serves_dashboard, detached
+
+
+def _resumable(run: RunRecord) -> bool:
+    return BACKEND.can_resume(run.manifest.workflow, state_dir=run.engine_dir)
+
+
+def _report_activity(workflow: str, *, background: bool, state_dir: Path | None = None) -> None:
     """Say which steps answered without looking at anything.
 
     A run's exit code says whether it finished, not whether it thought. The
@@ -598,7 +797,7 @@ def _report_activity(workflow: str, *, background: bool) -> None:
     if background:
         typer.secho(f"\nwhen it finishes: ictus trace {workflow}", fg=typer.colors.BRIGHT_BLACK)
         return
-    found = find_logs(workflow)
+    found = find_logs(workflow, state_dir=state_dir)
     if not found:
         return
     try:
@@ -698,11 +897,16 @@ def trace(
         located = PipelineFolder.at(folder or Path())
         pipeline = _only(located)
         ceilings = _declared_ceilings(pipeline)
-        found = find_logs(pipeline.pipeline_id)
+        # The newest recorded run's own directory first; a run launched straight
+        # through the engine, or before runs were recorded, left its log in LOG_DIR.
+        recorded = runs_of(located)
+        found = (
+            find_logs(pipeline.pipeline_id, state_dir=recorded[0].engine_dir) if recorded else []
+        ) or find_logs(pipeline.pipeline_id)
         if not found:
             _fail(
-                f"no run of {pipeline.pipeline_id!r} found under {LOG_DIR}. "
-                "Runs write an event log as they go; this one may not have started."
+                f"no run of {pipeline.pipeline_id!r} found in its recorded runs or under "
+                f"{LOG_DIR}. Runs write an event log as they go; this one may not have started."
             )
         path = found[0]
     if not path.is_file():

@@ -21,7 +21,6 @@ from ictus.graph.node import (
     OUTCOME_PORT,
     GateNode,
     Node,
-    NodeKind,
     QuestionsNode,
     ScopeNode,
     SubGraphNode,
@@ -37,9 +36,6 @@ if TYPE_CHECKING:
     from ictus.graph.values import YamlScalar
 
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
-
-# Conductor permits only these inside a parallel group (config/validator.py:748-785).
-_GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
 
 ContextMode = Literal["accumulate", "last_only", "explicit"]
 BudgetMode = Literal["audit", "enforce"]
@@ -74,10 +70,10 @@ class TrimStrategy(StrEnum):
 class ParallelGroup:
     """Members that run at once, addressed as one thing by the graph.
 
-    Routing goes to and from the *group*; members carry no edges of their own.
-    That is not an ictus choice — Conductor rejects a member with ``routes``,
-    and rejects gates, scripts, waits, sub-workflows and terminals as members
-    outright. Only model calls and computations may run in a group.
+    Routing goes to and from the *group*; members carry no edges of their own —
+    a member cannot decide where the run goes next, because the others have not
+    finished. Which *kinds* of step an engine will schedule this way is the
+    engine's business, and the backend reports it.
 
     ``node_id`` is deliberately the same attribute a node uses, so every routing
     path treats a group and a node identically.
@@ -333,6 +329,26 @@ class Pipeline:
         The child is a full ``Pipeline`` with its own entry point and graph;
         the parent spends exactly one iteration on it.
         """
+        # Joining branches joins their stage namespace too. Identity permits
+        # reuse of one body, while equal names alone cannot establish reuse.
+        named: dict[str, tuple[Pipeline, str]] = {}
+        seen: set[Pipeline] = set()
+        pending = [(body, f"{self.pipeline_id}/{node.node_id}"), (self, self.pipeline_id)]
+        while pending:
+            graph, path = pending.pop()
+            if graph in seen:
+                continue
+            seen.add(graph)
+            previous = named.get(graph.pipeline_id)
+            if previous is not None and previous[0] is not graph:
+                raise CompositionError(
+                    f"pipeline {self.pipeline_id!r} cannot add stage {node.node_id!r}: "
+                    f"pipeline_id {graph.pipeline_id!r} names distinct bodies at "
+                    f"{previous[1]!r} and {path!r}; give each stage a unique stage_id "
+                    "or reuse the same Stage instance"
+                )
+            named[graph.pipeline_id] = (graph, path)
+            pending.extend((child, f"{path}/{host}") for host, child in graph._children.items())
         self.add(node)
         self._children[node.node_id] = body
         return node
@@ -368,13 +384,6 @@ class Pipeline:
             )
         for member in members:
             self._require_member(member, f"member of parallel group {group_id!r}")
-            if member.kind not in _GROUPABLE:
-                raise CompositionError(
-                    f"{member.node_id!r} is a {member.kind.value} and cannot run inside a "
-                    f"parallel group. Conductor permits only model calls and computations as "
-                    "members; gates, questions, scripts, waits, sub-workflows and terminals "
-                    "are all rejected. Put it before or after the group."
-                )
             if self.group_of(member) is not None:
                 raise CompositionError(
                     f"{member.node_id!r} is already a member of another parallel group"
@@ -400,6 +409,7 @@ class Pipeline:
         max_concurrent: int = 10,
         failure_mode: FailureMode | None = None,
         key_by: str | None = None,
+        bind: Mapping[str, Ref] | None = None,
     ) -> MapGroup:
         """Run ``body`` once per element of ``source``, however many there are.
 
@@ -408,6 +418,11 @@ class Pipeline:
         stops being an ordinary step — it gets no routes of its own, since an
         item cannot decide where the run goes next, and it is not emitted in
         ``agents:``; it becomes the group's inline template.
+
+        ``bind`` names which of a stage body's parameters the *item* supplies.
+        Everything else about placing that stage is unchanged — its shared
+        parameters are wired with ``feed`` and ``connect_input`` like any other
+        placement, and its contract is cross-checked like any other stage.
         """
         if group_id in self._groups or group_id in self._maps or group_id in self._by_id:
             raise CompositionError(
@@ -419,6 +434,20 @@ class Pipeline:
             raise CompositionError(f"{body.node_id!r} is already a member of a parallel group")
         if self.map_of(body) is not None:
             raise CompositionError(f"{body.node_id!r} is already the body of a map group")
+        exposed = next((name for name, o in self._outputs.items() if o.source is body), None)
+        if exposed is not None:
+            raise CompositionError(
+                f"{body.node_id!r} cannot be the body of map group {group_id!r}: it is exposed "
+                f"as pipeline output {exposed!r}, and a body stores nothing under its own name "
+                "for that output to read. Expose the group's outputs instead."
+            )
+        iterating = next((m for m in self._maps.values() if m.source.source is body), None)
+        if iterating is not None:
+            raise CompositionError(
+                f"{body.node_id!r} cannot be the body of map group {group_id!r}: map group "
+                f"{iterating.group_id!r} iterates its {iterating.source.port!r}, and a body "
+                "has nothing stored under its own name for that to read."
+            )
         if any(e.source is body for e in self._edges):
             raise CompositionError(
                 f"{body.node_id!r} has routes of its own and cannot be a map body; "
@@ -435,9 +464,89 @@ class Pipeline:
             max_concurrent=max_concurrent,
             failure_mode=failure_mode,
             key_by=key_by,
+            bind=dict(bind or {}),
         )
+        # After the group has vouched for its own invariants: "a value an edge
+        # already supplies" and "a source that is not the one of that name here"
+        # are facts about this pipeline, not about the group.
+        self._check_source(group_id, source)
+        self._check_bindable(group_id, body, group.bind)
         self._maps[group_id] = group
         return group
+
+    def _check_source(self, group_id: str, source: Ref) -> None:
+        """Refuse a source that names something here but was built from something else.
+
+        Only the case that is already decidable. A source whose step has not been
+        added yet is a forward reference, legitimately, and the lint resolves it
+        once the graph is finished — including the step arriving later with the
+        same name and a different identity.
+        """
+        if source.source is None:
+            return
+        local: object
+        if source.origin is Origin.WORKFLOW_INPUT:
+            local, what = self._inputs.get(source.source_id), "pipeline input"
+        elif source.source_id in self._maps:
+            local, what = self._maps[source.source_id], "map group"
+        else:
+            local, what = self._by_id.get(source.source_id), "node"
+        if local is not None and local is not source.source:
+            raise CompositionError(
+                f"map group {group_id!r} maps over {source.source_id}.{source.port}, but "
+                f"{source.source_id!r} in pipeline {self.pipeline_id!r} is a different {what} "
+                "from the one this reference was built from — the group would iterate the "
+                "local array instead. Reference the one this pipeline holds."
+            )
+        mapped = self.map_of(source.source) if isinstance(source.source, Node) else None
+        if mapped is not None:
+            raise CompositionError(
+                f"map group {group_id!r} maps over {source.source_id}.{source.port}, but "
+                f"{source.source_id!r} is the body of map group {mapped.group_id!r}: it runs "
+                "once per item and nothing is stored under its own name, so the source "
+                f"resolves to nothing. Map over {mapped.group_id}.outputs, republished as a "
+                "field of a step."
+            )
+
+    def _check_bindable(self, group_id: str, body: Node, bind: Mapping[str, Ref]) -> None:
+        """Resolve each bound name against the body's own ports.
+
+        Here rather than in ``MapGroup`` because "already wired by an edge" is a
+        fact about the pipeline, not about the group. The reverse order — an
+        edge added after the group — is left to the lint, which is the only
+        place that sees the finished graph.
+        """
+        for name, ref in bind.items():
+            port = next((p for p in body.inputs if p.name == name), None)
+            if port is None:
+                known = ", ".join(p.name for p in body.inputs) or "(none)"
+                raise CompositionError(
+                    f"map group {group_id!r} binds {name!r}, which {body.node_id!r} does "
+                    f"not declare; its parameters: {known}"
+                )
+            if port.port_type is not ref.port_type:
+                raise CompositionError(
+                    f"map group {group_id!r} binds {name!r} from {ref.source_id}.{ref.port}, "
+                    f"which is {ref.port_type.value}, but {body.node_id!r} declares it "
+                    f"{port.port_type.value}"
+                )
+            if name in self.wired_inputs(body):
+                raise CompositionError(
+                    f"map group {group_id!r} binds {name!r} on {body.node_id!r}, which an "
+                    "edge already supplies. Only one value reaches the child; wire the "
+                    "shared one or bind the item's, not both."
+                )
+
+    def wired_inputs(self, node: Node) -> set[str]:
+        """Input port names of ``node`` that an edge already fills.
+
+        Both halves of "wired": a workflow parameter bound straight to the port,
+        and a value another step produces. A map group's ``bind`` is deliberately
+        not counted — it is the other source, and telling them apart is what lets
+        a lint refuse a port both of them fill.
+        """
+        names = {port.name for _, target, port in self.input_bindings if target is node}
+        return names | {d.connection.target.name for d in self.deps_into(node)}
 
     @property
     def maps(self) -> tuple[MapGroup, ...]:
@@ -825,6 +934,13 @@ class Pipeline:
         a parent with the same checking as any other edge.
         """
         self._require_routable(node, "output source")
+        mapped = self.map_of(node) if isinstance(node, Node) else None
+        if mapped is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} cannot expose {node.node_id}.{from_port}: "
+                f"{node.node_id!r} is the body of map group {mapped.group_id!r}, which stores "
+                "nothing under the body's own name. Expose the group's outputs instead."
+            )
         port = node.get_output(from_port)
         if name in self._outputs:
             raise CompositionError(f"pipeline output {name!r} is already exposed")

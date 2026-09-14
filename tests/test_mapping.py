@@ -11,10 +11,20 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ictus import Pipeline, PortType
-from ictus.errors import CompositionError
+from ictus import END, Pipeline, PortType
+from ictus.errors import CompositionError, EmitError
 from ictus.graph.mapping import Item
-from ictus.graph.node import AgentNode, GateChoice, GateNode
+from ictus.graph.node import (
+    AgentNode,
+    ComputeNode,
+    GateChoice,
+    GateNode,
+    Node,
+    Question,
+    QuestionsNode,
+    ScriptNode,
+    WaitNode,
+)
 from ictus.graph.ports import InputPort, OutputPort
 from ictus.graph.ref import tpl
 from ictus.interfaces.conductor import conductor
@@ -174,27 +184,108 @@ def test_mapping_over_something_that_is_not_a_list_is_refused() -> None:
 
 
 @pytest.mark.parametrize("name", ["workflow", "context", "output", "_index", "_key"])
-def test_a_reserved_loop_variable_is_refused(name: str) -> None:
+def test_only_the_backend_reserves_loop_variables(name: str) -> None:
     p = Pipeline(pipeline_id="f")
     src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
     body = p.add(AgentNode(node_id="b", prompt="y"))
-    with pytest.raises(CompositionError, match="reserved by Conductor"):
-        p.map_over("g", source=src.ref("v"), item=Item(name), body=body, expect_items=3)
+    group = p.map_over("g", source=src.ref("v"), item=Item(name), body=body, expect_items=3)
+    p.route(src, group)
+    p.route(group, END)
+    p.set_entry(src)
+    assert lint_pipeline(p) == []
+    assert any("reserved by Conductor" in problem for problem in conductor.lint(p))
+    with pytest.raises(EmitError, match="reserved by Conductor"):
+        conductor.compile(p)
 
 
-def test_a_body_conductor_cannot_run_inline_is_refused() -> None:
-    """A gate wants the one dashboard prompt slot that N items cannot share."""
-    p = Pipeline(pipeline_id="f")
-    src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
-    gate = p.add(
+@pytest.mark.parametrize(
+    "body",
+    [
         GateNode(
-            node_id="g2",
+            node_id="body",
             prompt="ok?",
             choices=(GateChoice("yes", "Yes"), GateChoice("no", "No")),
-        )
+        ),
+        ScriptNode(node_id="body", command="true"),
+        WaitNode(node_id="body", duration=1),
+        QuestionsNode(node_id="body", questions=(Question(id="answer", text="Which?"),)),
+        succeed(node_id="body", reason="done"),
+    ],
+)
+def test_only_the_backend_restricts_map_body_kinds(body: Node) -> None:
+    p = Pipeline(pipeline_id="f")
+    src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
+    p.add(body)
+    group = p.map_over("g", source=src.ref("v"), item=Item("piece"), body=body, expect_items=3)
+    p.route(src, group)
+    p.route(group, END)
+    p.set_entry(src)
+    assert lint_pipeline(p) == []
+    assert any("cannot iterate" in problem for problem in conductor.lint(p))
+    with pytest.raises(EmitError, match="cannot iterate"):
+        conductor.compile(p)
+
+
+def test_only_the_backend_caps_map_concurrency() -> None:
+    p = Pipeline(pipeline_id="f")
+    src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
+    body = p.add(AgentNode(node_id="b", prompt="y"))
+    group = p.map_over(
+        "g",
+        source=src.ref("v"),
+        item=Item("piece"),
+        body=body,
+        expect_items=200,
+        max_concurrent=101,
     )
-    with pytest.raises(CompositionError, match="cannot iterate a human_decision"):
-        p.map_over("g", source=src.ref("v"), item=Item("piece"), body=gate, expect_items=3)
+    p.route(src, group)
+    p.route(group, END)
+    p.set_entry(src)
+    assert lint_pipeline(p) == []
+    assert any("max_concurrent" in problem for problem in conductor.lint(p))
+    with pytest.raises(EmitError, match="max_concurrent"):
+        conductor.compile(p)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [AgentNode(node_id="body", prompt="work"), ComputeNode(node_id="body", value="done")],
+)
+def test_supported_map_bodies_validate_at_the_concurrency_limit(
+    body: Node, validates: Callable[[Pipeline], None]
+) -> None:
+    p = Pipeline(pipeline_id="f", provider="claude-agent-sdk")
+    src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
+    p.add(body)
+    group = p.map_over(
+        "g",
+        source=src.ref("v"),
+        item=Item("piece"),
+        body=body,
+        expect_items=100,
+        max_concurrent=100,
+    )
+    p.set_entry(src)
+    p.route(src, group)
+    p.route(group, END)
+    assert lint_pipeline(p, backend=conductor) == []
+    validates(p)
+
+
+@pytest.mark.parametrize("concurrent", [0, -1])
+def test_nonpositive_concurrency_is_a_composition_error(concurrent: int) -> None:
+    p = Pipeline(pipeline_id="f")
+    src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
+    body = p.add(AgentNode(node_id="b", prompt="y"))
+    with pytest.raises(CompositionError, match="max_concurrent"):
+        p.map_over(
+            "g",
+            source=src.ref("v"),
+            item=Item("piece"),
+            body=body,
+            expect_items=3,
+            max_concurrent=concurrent,
+        )
 
 
 def test_a_body_with_its_own_route_is_refused() -> None:
@@ -226,27 +317,53 @@ def test_an_unknown_aggregate_port_is_refused() -> None:
         fanout.ref("summary")  # type: ignore[attr-defined]
 
 
-def test_mapping_over_a_stage_is_refused_rather_than_silently_wrong() -> None:
-    """Conductor would accept it; ictus cannot yet bind an item to a child's ports.
+def test_a_stage_may_be_a_map_body_once_its_parameters_are_bound() -> None:
+    """What made this refusable was the binding, not the kind.
 
     `input_mapping` is built from graph edges and a loop item is not a node an
-    edge can start from, so the emitted group handed every iteration the
-    parent's own workflow inputs instead of its item.
+    edge can start from, so an unbound stage handed every iteration the parent's
+    own workflow inputs. `bind` is that missing edge; `tests/test_map_stage.py`
+    is where the whole construct is pinned.
     """
     from ictus.graph.stage import Stage
 
     p = Pipeline(pipeline_id="f")
-    src = p.add(AgentNode(node_id="s", prompt="x", declared_outputs=(OutputPort("v", ARR),)))
+    src = p.add(
+        AgentNode(
+            node_id="s",
+            prompt="x",
+            declared_outputs=(OutputPort("v", ARR, "each", element={"thing": STR}),),
+        )
+    )
     stage = Stage(stage_id="child")
-    stage.body.declare_input("thing", STR)
+    thing = stage.body.declare_input("thing", STR)
     inner = stage.body.add(
-        AgentNode(node_id="inner", prompt="y", declared_outputs=(OutputPort("r", STR),))
+        AgentNode(
+            node_id="inner",
+            inputs=(InputPort("thing", STR),),
+            prompt=tpl("y ", thing.ref()),
+            declared_outputs=(OutputPort("r", STR),),
+        )
     )
     stage.body.set_entry(inner)
+    stage.body.connect_input(thing, inner, "thing")
+    stage.body.route(inner, END)
     stage.body.expose_output("r", inner, "r")
     host = stage.instantiate(p, node_id="child")
-    with pytest.raises(CompositionError, match="cannot iterate a stage yet"):
-        p.map_over("g", source=src.ref("v"), item=Item("piece"), body=host, expect_items=3)
+    piece = Item("piece", {"thing": STR})
+    group = p.map_over(
+        "g",
+        source=src.ref("v"),
+        item=piece,
+        body=host,
+        expect_items=3,
+        bind={"thing": piece.ref("thing")},
+    )
+    p.route(src, group)
+    p.route(group, END)
+    p.set_entry(src)
+    assert lint_pipeline(p, backend=conductor) == []
+    assert [d.filename for d in conductor.compile(p)] == ["f.yaml", "child.yaml"]
 
 
 def test_a_map_body_cannot_be_read_as_an_ordinary_step() -> None:

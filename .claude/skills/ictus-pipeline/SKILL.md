@@ -243,7 +243,14 @@ ictus validate  pipelines/<name>    # Conductor's own loader
 ictus preflight pipelines/<name>    # can THIS machine run it?
 ictus run       pipelines/<name> --repo ~/work/target
 ictus trace     <name>              # what each step actually did
+ictus resume    pipelines/<name>    # continue an interrupted run
 ```
+
+`ictus resume` restarts the step that was running and any **stage** it was in
+from the stage's first step — nothing inside a stage is checkpointed. So a
+command with a side effect repeats if it sits in a stage ahead of where a run
+stopped. Put destructive commands at the root of a long pipeline, or make them
+safe to run twice. Resume prints what will repeat before it starts.
 
 Run `lint` and `validate` both — neither is sufficient. `lint` catches what
 Conductor's loader cannot see (unreachable nodes, drifted stage contracts,

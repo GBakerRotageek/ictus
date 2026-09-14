@@ -161,14 +161,21 @@ def render(pipeline: Pipeline, node: RouteEnd, value: str | Template) -> str:
 
 
 def render_settled(pipeline: Pipeline, node: RouteEnd, value: str | Template) -> str:
-    """Render a value whose rendered text Conductor parses back with ``json.loads``.
+    """Render a value whose rendered text Conductor parses back as JSON.
 
-    ``output_template``, ``input_mapping`` and the workflow ``output:`` map are
-    all round-tripped through JSON, so a structured value interpolated bare
+    ``output_template`` and the workflow ``output:`` map are both round-tripped
+    through ``_maybe_parse_json``, so a structured value interpolated bare
     arrives as a Python repr — single quotes, so the parse fails and the value
     survives as a string that looks like data. ``| tojson`` is what makes the
     round trip lossless, and it only applies to a lone reference: a structured
     value spliced into surrounding prose is prose.
+
+    ``string`` needs it as much as the containers do, and for the opposite
+    reason: that parser is not ``json.loads``. It also accepts anything
+    ``int()`` or ``float()`` reads, so a command's ``stdout`` of ``0700`` leaves
+    a scope as the number ``700`` and ``1.5`` as a float — against a port that
+    says ``string``, on the branch that exists to report what went wrong.
+    Quoting it is what keeps the declared type true.
 
     A fallback does not opt the value out of that. It used to: the reference fell
     through to ``| default('[]')``, which both dropped ``| tojson`` from the
@@ -179,15 +186,21 @@ def render_settled(pipeline: Pipeline, node: RouteEnd, value: str | Template) ->
     """
     if isinstance(value, Template) and len(value.parts) == 1:
         part = value.parts[0]
-        if isinstance(part, Ref) and part.port_type in _STRUCTURED:
+        if isinstance(part, Ref) and part.port_type in _RETYPED:
             live = "{{ " + reference_path(pipeline, part) + " | tojson }}"
             # A reference that needs no guard is always defined, so `default()`
             # could never have fired and there is no branch for a fallback to be.
             if not _needs_guard(pipeline, node, part):
                 return live
-            # Raw, not quoted: a structured fallback is already a JSON literal —
-            # `_EMPTY_FOR` spells the empty ones "{}" and "[]".
-            return _guarded(guard_test(pipeline, part), live, part.fallback)
+            # A structured fallback is already a JSON literal — `_EMPTY_FOR`
+            # spells the empty ones "{}" and "[]" — but a string's is prose, and
+            # both branches have to arrive as the same type.
+            fallback = (
+                json.dumps(part.fallback)
+                if part.port_type is PortType.STRING and part.fallback is not None
+                else part.fallback
+            )
+            return _guarded(guard_test(pipeline, part), live, fallback)
     return render(pipeline, node, value)
 
 

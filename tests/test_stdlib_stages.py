@@ -7,6 +7,7 @@ wire to. Both stages and their bodies go through the real Conductor validator.
 
 from __future__ import annotations
 
+import shutil
 from typing import TYPE_CHECKING
 
 import pytest
@@ -39,12 +40,15 @@ from ictus.stdlib import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
+
+    from conftest import Executes, Execution
 
     from ictus.graph.scope import Scope
     from ictus.graph.stage import Stage
     from ictus.graph.values import YamlDict
 
-STR, OBJ = PortType.STRING, PortType.OBJECT
+STR, OBJ, NUM = PortType.STRING, PortType.OBJECT, PortType.NUMBER
 
 
 def _cases() -> dict[str, Stage]:
@@ -84,6 +88,21 @@ DRAFT = Attempt(
     node_id="draft",
     prompt="Write it.",
     produces=(OutputPort("text", STR, "The draft"),),
+)
+
+
+SELF_CHECK = Attempt(
+    node_id="check",
+    prompt="Is it ready?",
+    produces=(OutputPort("ok", PortType.BOOLEAN, "Ready"), OutputPort("status", STR, "Seen")),
+)
+
+FOUND = Attempt(
+    node_id="search",
+    prompt="Find the repositories.",
+    produces=(
+        OutputPort("repos", PortType.ARRAY, "One per repo", element={"name": STR, "url": STR}),
+    ),
 )
 
 
@@ -155,8 +174,8 @@ class TestConverge:
         gave_up = next(a for a in agents if isinstance(a, dict) and a["name"] == "exhausted")
         template = gave_up["output_template"]
         assert isinstance(template, dict)
-        assert template["text"] == "{{ draft.output.text }}"
-        assert template["feedback"] == "{{ judge.output.notes }}"
+        assert template["text"] == "{{ draft.output.text | tojson }}"
+        assert template["feedback"] == "{{ judge.output.notes | tojson }}"
         assert template["passes"] == "{{ pass_number.output }}"
 
     def test_the_counter_reads_its_own_previous_value(self) -> None:
@@ -215,20 +234,49 @@ class TestConverge:
         targets = [e.describe_target for e in scope.body.outgoing(rejected)]
         assert targets == ["exhausted", "pass_number"]
 
+    @staticmethod
+    def _placed(judged: str, **kwargs: object) -> Pipeline:
+        """The stage as a caller actually uses it: hosted, wired and branched on."""
+        # A provider that can resume a session: converge keeps each attempt's,
+        # so pass two revises rather than starting again.
+        parent = Pipeline(pipeline_id=f"c-{judged}", provider="claude-agent-sdk")
+        brief = parent.declare_input("brief", STR)
+        node = _converge(stage_id=f"loop-{judged}", judge=judged, **kwargs).instantiate(parent)
+        parent.set_entry(node)
+        parent.connect_input(brief, node, "brief")
+        ok = parent.add(succeed(node_id="ok", reason="ok"))
+        no = parent.add(succeed(node_id="no", reason="gave up"))
+        parent.branch_on_outcome(node, {CONVERGED: ok, EXHAUSTED: no})
+        return parent
+
+    @pytest.mark.parametrize("judged", ["model", "human", "self"])
+    def test_the_step_that_routes_on_exhaustion_can_see_the_count(self, judged: str) -> None:
+        """A route condition renders in the routing step's own scope, not the run's.
+
+        Under `context.mode: explicit` — the default — a step sees only what its
+        `input:` names, so routing on an unwired counter is
+        `'pass_number' is undefined` on the first pass, after the attempt has
+        been paid for. The human path had this right from the start only because
+        a gate cannot test a counter at all; the other two routed on a value they
+        never declared, and nothing placed one to notice.
+        """
+        extra = {"judge_prompt": "", "verdict_port": "ok", "attempt": SELF_CHECK}
+        parent = self._placed(judged, **(extra if judged == "self" else {}))
+        assert lint_pipeline(parent, backend=ConductorBackend()) == []
+
+    def test_an_arrays_element_shape_survives_the_scope_boundary(self) -> None:
+        """A carried array without its item schema cannot be fanned out over.
+
+        The scope contract takes an `OutputPort` for exactly this reason;
+        rebuilding it from the port *type* threw the shape away one line later.
+        """
+        scope = _converge(attempt=FOUND, judge="model", judge_prompt="Enough?")
+        repos = next(p for p in scope.output_ports if p.name == "repos")
+        assert repos.element == {"name": STR, "url": STR}
+
     def test_it_loads_in_conductor(self, validates: Callable[[Pipeline], None]) -> None:
         for judged in ("model", "human"):
-            # A provider that can resume a session: converge keeps each
-            # attempt's, so pass two revises rather than starting again.
-            parent = Pipeline(pipeline_id=f"c-{judged}", provider="claude-agent-sdk")
-            brief = parent.declare_input("brief", STR)
-            node = _converge(stage_id=f"loop-{judged}", judge=judged).instantiate(parent)
-            parent.set_entry(node)
-            parent.connect_input(brief, node, "brief")
-            ok = parent.add(succeed(node_id="ok", reason="ok"))
-            no = parent.add(succeed(node_id="no", reason="gave up"))
-            parent.branch_on_outcome(node, {CONVERGED: ok, EXHAUSTED: no})
-            assert lint_pipeline(parent) == []
-            validates(parent)
+            validates(self._placed(judged))
 
 
 class TestBriefingGate:
@@ -404,8 +452,9 @@ class TestConvergeSequence:
         assert "{{ write.output.code }}" in prompt
 
     def test_the_loop_converges_on_the_last_step(self) -> None:
+        """The judge reads the final step's output, and the count it routes on."""
         judge = _agent_in(self._scope().body, "judge")
-        assert judge["input"] == ["test.output.report"]
+        assert judge["input"] == ["test.output.report", "pass_number.output"]
 
     def test_it_is_lint_clean(self) -> None:
         assert lint_pipeline(self._scope().body) == []
@@ -436,10 +485,43 @@ class TestTryShell:
         assert len(found) == 1
         return found[0]
 
-    def test_the_step_emits_no_output_schema(self) -> None:
-        """The whole construct. With `output:` the engine raises on non-JSON stdout
-        *before* routes are evaluated, so the failure branch can never be taken."""
-        assert "output" not in self._script(self._scope())
+    def test_the_command_step_declares_only_what_the_reporter_always_prints(self) -> None:
+        """A schema naming a field would raise on a failing command before routing.
+
+        The reporter prints these three for every command that ran, whatever it
+        exited with, so this schema can only refuse a command that never ran.
+        """
+        scope = self._scope(outputs=(OutputPort("revision", STR, "What it restored"),))
+        run = _agent_in(scope.body, "run")
+        output = run["output"]
+        assert isinstance(output, dict)
+        assert set(output) == {"stdout", "stderr", "exit_code"}
+
+    def test_fields_are_parsed_only_after_the_status_said_zero(self) -> None:
+        scope = self._scope(outputs=(OutputPort("revision", STR, "What it restored"),))
+        assert _agent_in(scope.body, "run")["routes"] == [
+            {"to": "run_fields", "when": "{{ run.output.exit_code | int == 0 }}"},
+            {"to": "failed"},
+        ]
+        fields = _agent_in(scope.body, "run_fields")
+        assert fields["routes"] == [{"to": "ok"}]
+        output = fields["output"]
+        assert isinstance(output, dict)
+        assert set(output) == {"revision"}
+
+    def test_a_command_with_no_fields_has_no_step_to_parse_them(self) -> None:
+        assert "run_fields" not in {n.node_id for n in self._scope().body.nodes}
+
+    def test_preflight_is_told_the_command_needs_python(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = shutil.which
+        monkeypatch.setattr(
+            "ictus.interfaces.environment.shutil.which",
+            lambda name, *a, **k: None if name == "python3" else real(name, *a, **k),
+        )
+        issues = ConductorBackend().preflight(self._scope().body, probe=False)
+        assert [i for i in issues if i.requirement == "exe:python3"]
 
     def test_the_ports_survive_for_composition_anyway(self) -> None:
         """Dropping the run-time contract must not drop the compile-time one."""
@@ -477,15 +559,17 @@ class TestTryShell:
         broke, worked = exits[FAILED], exits[OK]
         assert isinstance(broke, dict) and isinstance(worked, dict)
         assert broke["revision"] == "", "the failed path must not read a field of the JSON"
-        assert worked["revision"] == "{{ run.output.revision }}"
+        assert worked["revision"] == "{{ run_fields.output.revision | tojson }}"
 
     def test_a_declared_field_shadowing_the_baseline_is_refused(self) -> None:
-        with pytest.raises(CompositionError, match="already supplies"):
+        with pytest.raises(CompositionError, match="already carries"):
             self._scope(outputs=(OutputPort("exit_code", PortType.NUMBER, "mine"),))
 
     def test_the_parameter_reaches_the_command_as_its_last_argument(self) -> None:
         script = self._script(self._scope(args=("--full",), parameter="backup"))
-        assert script["args"] == ["--full", "{{ workflow.input.backup }}"]
+        args = script["args"]
+        assert isinstance(args, list)
+        assert args[-3:] == ["/bin/false", "--full", "{{ workflow.input.backup }}"]
 
     def test_the_caller_cannot_leave_the_failure_unrouted(self) -> None:
         """Refused where it is written, not reported as a dead end at lint time."""
@@ -522,6 +606,127 @@ class TestTryShell:
         parent.branch_on_outcome(reset, {OK: live, FAILED: stop})
         assert lint_pipeline(parent) == []
         validates(parent)
+
+
+class TestTryShellRunsThroughTheEngine:
+    """Executed, not inspected. Every command is a shell one-liner; nothing bills.
+
+    What these pin is the split the construct is built on: the status comes from
+    a step whose stdout the command cannot write to, and the fields the command
+    prints are parsed by a second step that only runs once that status said 0.
+    """
+
+    FIELDS = (OutputPort("revision", STR, "What it restored"), OutputPort("count", NUM, "How many"))
+
+    @staticmethod
+    def _run(
+        executes: Executes, script: str, *, outputs: tuple[OutputPort, ...] = (), **kwargs: object
+    ) -> Execution:
+        settings: dict[str, object] = {
+            "stage_id": "reset",
+            "command": "/bin/sh",
+            "args": ("-c", script),
+            "outputs": outputs,
+        }
+        settings.update(kwargs)
+        scope = try_shell(**settings)  # type: ignore[arg-type]
+        scope.body.provider = "claude-agent-sdk"
+        return executes(scope.body)
+
+    def test_a_status_printed_on_stdout_cannot_make_a_failed_command_ok(
+        self, executes: Executes
+    ) -> None:
+        """Reproduced before the fix: this exited 1 and the scope reported `ok`."""
+        forged = '{"exit_code": 0}'
+        run = self._run(executes, f"printf '%s' '{forged}'; exit 1")
+        assert run.output is not None, run.stderr
+        assert run.output["outcome"] == FAILED
+        assert run.output["exit_code"] == 1
+        assert run.output["stdout"] == forged
+
+    def test_a_field_printed_by_a_successful_command_cannot_forge_the_status(
+        self, executes: Executes
+    ) -> None:
+        """The other direction: an `exit_code` key among the fields, on a clean exit."""
+        run = self._run(
+            executes,
+            """printf '%s' '{"revision": "r1", "count": 1, "exit_code": 7}'""",
+            outputs=self.FIELDS,
+        )
+        assert run.output is not None, run.stderr
+        assert run.output["outcome"] == OK
+        assert run.output["exit_code"] == 0
+        assert run.output["revision"] == "r1"
+
+    def test_the_fields_of_a_successful_command_arrive_at_their_declared_types(
+        self, executes: Executes
+    ) -> None:
+        run = self._run(
+            executes, """printf '%s' '{"revision": "0700", "count": 3}'""", outputs=self.FIELDS
+        )
+        assert run.output is not None, run.stderr
+        assert run.output["outcome"] == OK
+        assert run.output["revision"] == "0700"
+        assert run.output["count"] == 3
+
+    def test_a_successful_command_that_omits_a_field_is_refused_naming_the_field(
+        self, executes: Executes
+    ) -> None:
+        """Before: a StrictUndefined error at whichever template read it, later."""
+        run = self._run(executes, """printf '%s' '{"count": 3}'""", outputs=self.FIELDS)
+        assert run.returncode != 0
+        assert run.output is None or run.output.get("outcome") not in (OK, FAILED)
+        assert [said for said in run.failures("run_fields") if "revision" in said]
+
+    def test_a_failed_command_with_declared_fields_takes_the_failed_exit(
+        self, executes: Executes
+    ) -> None:
+        """Its fields are never parsed: a failing command owes nobody JSON."""
+        run = self._run(executes, "echo boom >&2; exit 2", outputs=self.FIELDS)
+        assert run.output is not None, run.stderr
+        assert run.output["outcome"] == FAILED
+        assert run.output["exit_code"] == 2
+        assert run.output["stderr"] == "boom\n"
+        assert run.output["revision"] == ""
+        assert run.count("script_started", "run_fields") == 0
+
+    def test_stdin_reaches_the_command(self, executes: Executes) -> None:
+        run = self._run(executes, "cat", stdin="handed over")
+        assert run.output is not None, run.stderr
+        assert run.output["outcome"] == OK
+        assert run.output["stdout"] == "handed over"
+
+    def test_the_parameter_reaches_the_command_as_its_last_argument(
+        self, executes: Executes
+    ) -> None:
+        scope = try_shell(
+            stage_id="reset",
+            command="/bin/sh",
+            args=("-c", 'printf %s "$1"', "sh"),
+            parameter="backup",
+        )
+        scope.body.provider = "claude-agent-sdk"
+        run = executes(scope.body, backup="false")
+        assert run.output is not None, run.stderr
+        assert run.output["stdout"] == "false"
+
+    def test_a_command_that_cannot_start_ends_the_run_outside_the_outcomes(
+        self, executes: Executes, tmp_path: Path
+    ) -> None:
+        scope = try_shell(stage_id="reset", command=str(tmp_path / "not-installed"))
+        scope.body.provider = "claude-agent-sdk"
+        run = executes(scope.body)
+        assert run.returncode != 0
+        assert run.output is None or run.output.get("outcome") not in (OK, FAILED)
+        assert [said for said in run.failures("run") if "could not start" in said]
+
+    def test_a_command_that_times_out_ends_the_run_outside_the_outcomes(
+        self, executes: Executes
+    ) -> None:
+        run = self._run(executes, "sleep 30", timeout=1)
+        assert run.returncode != 0
+        assert run.output is None or run.output.get("outcome") not in (OK, FAILED)
+        assert [said for said in run.failures("run") if "timed out after 1 seconds" in said]
 
 
 def _terminal_in(pipeline: Pipeline, name: str) -> YamlDict:
@@ -567,7 +772,7 @@ class TestClassify:
         """Without it, an invented category is indistinguishable from a hedge."""
         template = _terminal_in(self._scope().body, UNCLEAR)["output_template"]
         assert isinstance(template, dict)
-        assert template["answer"] == "{{ decide.output.choice }}"
+        assert template["answer"] == "{{ decide.output.choice | tojson }}"
 
     def test_the_caller_must_route_every_choice(self) -> None:
         parent = Pipeline(pipeline_id="p")
@@ -657,7 +862,7 @@ class TestTiered:
             assert isinstance(template, dict)
             assert template["outcome"] == DONE
             assert template["tier"] == tier.name
-            assert template["result"] == f"{{{{ {tier.name}.output.result }}}}"
+            assert template["result"] == f"{{{{ {tier.name}.output.result | tojson }}}}"
 
     def test_the_unclear_exit_still_carries_every_declared_key(self) -> None:
         template = _terminal_in(self._scope().body, UNCLEAR)["output_template"]

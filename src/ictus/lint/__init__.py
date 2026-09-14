@@ -20,7 +20,10 @@ from ictus.errors import CompositionError, LintError
 from ictus.graph.node import SubGraphNode
 from ictus.lint.rules import (
     describe,
+    group_condition_problems,
     group_routing_problems,
+    map_binding_problems,
+    map_source_problems,
     node_problems,
     placeholder_problems,
     previous_pass_problems,
@@ -38,7 +41,8 @@ def lint_pipeline(
     pipeline: Pipeline,
     *,
     backend: Backend | None = None,
-    _seen: set[str] | None = None,
+    _seen: set[Pipeline] | None = None,
+    _names: dict[str, Pipeline] | None = None,
 ) -> list[str]:
     """Every violation in ``pipeline`` and its nested stages.
 
@@ -47,20 +51,28 @@ def lint_pipeline(
     no opinion about where the pipeline will run.
     """
     seen = _seen if _seen is not None else set()
-    if pipeline.pipeline_id in seen:
+    if pipeline in seen:
         return []
-    seen.add(pipeline.pipeline_id)
+    seen.add(pipeline)
 
     where = pipeline.pipeline_id
+    names = _names if _names is not None else {}
+    previous = names.setdefault(where, pipeline)
+    problems: list[str] = []
+    if previous is not pipeline:
+        problems.append(
+            f"{where}: pipeline_id {where!r} names distinct bodies; "
+            "give each stage a unique stage_id or reuse the same Stage instance"
+        )
     if not pipeline.nodes:
-        return [f"{where}: pipeline has no nodes"]
+        return [*problems, f"{where}: pipeline has no nodes"]
 
     try:
         entry = pipeline.entry()
     except CompositionError as exc:
-        return [f"{where}: {exc}"]
+        return [*problems, f"{where}: {exc}"]
 
-    problems: list[str] = placeholder_problems(pipeline, where)
+    problems.extend(placeholder_problems(pipeline, where))
     problems.extend(previous_pass_problems(pipeline, where))
     reachable = pipeline.reachable_from_entry()
     problems.extend(
@@ -74,13 +86,17 @@ def lint_pipeline(
     collections: tuple[RouteEnd, ...] = (*pipeline.groups, *pipeline.maps)
     for group in collections:
         problems.extend(group_routing_problems(pipeline, group, where))
+        problems.extend(group_condition_problems(pipeline, group, where))
+    for mapped in pipeline.maps:
+        problems.extend(map_source_problems(pipeline, mapped, where))
+        problems.extend(map_binding_problems(pipeline, mapped, where))
 
     by_id = {n.node_id: n for n in pipeline.nodes}
     for host_id, child in pipeline.children.items():
         host = by_id.get(host_id)
         if isinstance(host, SubGraphNode):
             problems.extend(stage_contract_problems(where, host, child))
-        problems.extend(lint_pipeline(child, backend=backend, _seen=seen))
+        problems.extend(lint_pipeline(child, backend=backend, _seen=seen, _names=names))
 
     if backend is not None:
         problems.extend(backend.lint(pipeline))

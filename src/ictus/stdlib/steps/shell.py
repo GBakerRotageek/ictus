@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ictus.graph.node import ScriptNode
+from ictus.graph.ports import OutputPort, PortType
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.graph.ports import InputPort, OutputPort
+    from ictus.graph.ports import InputPort
     from ictus.graph.ref import Template
 
 __all__ = ["shell"]
@@ -27,6 +28,7 @@ def shell(
     timeout: int | None = None,
     working_dir: str | None = None,
     enforce_outputs: bool = True,
+    trusted_status: bool = False,
 ) -> ScriptNode:
     """Run a command, with no model in the loop.
 
@@ -51,11 +53,24 @@ def shell(
 
     ``enforce_outputs=False`` keeps the ports and drops the contract: references
     are still typed at composition, and the baseline three are still readable by
-    a route, but stdout is no longer parsed or checked. That is the only way to
-    route on a command that failed — the contract's raise lands before routes
-    are evaluated, so with it on a dying command ends the run rather than taking
-    a branch. ``stdlib.try_shell`` is that shape, already wired.
+    a route, but nothing is checked once the command has run. The contract's
+    raise lands before routes are evaluated, so with it on a dying command ends
+    the run rather than taking a branch.
+
+    Off does not make ``exit_code`` trustworthy. A JSON stdout is still merged
+    over it, so a command that prints ``{"exit_code": 0}`` and exits 1 routes as
+    a success. ``trusted_status=True`` is what does: the three values are then
+    the process's own, and the backend lint refuses a route on them from a step
+    without it. The step then has no stdout fields — leave ``outputs`` empty and
+    it declares the three for you. ``stdlib.try_shell`` is the whole shape, with
+    fields parsed in a second step once the status says 0.
     """
+    if trusted_status and not outputs:
+        outputs = (
+            OutputPort("stdout", PortType.STRING, "What the command printed"),
+            OutputPort("stderr", PortType.STRING, "What it printed to stderr"),
+            OutputPort("exit_code", PortType.NUMBER, "The status it exited with"),
+        )
     return ScriptNode(
         node_id=node_id,
         description=description,
@@ -67,4 +82,5 @@ def shell(
         working_dir=working_dir,
         declared_outputs=tuple(outputs),
         enforce_outputs=enforce_outputs,
+        trusted_status=trusted_status,
     )

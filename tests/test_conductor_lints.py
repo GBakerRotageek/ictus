@@ -7,6 +7,7 @@ without a backend, because none of them is a claim about graphs in general.
 
 from __future__ import annotations
 
+import shutil
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,7 +27,10 @@ from ictus import (
     RetryOn,
     RetryPolicy,
     ScriptNode,
+    Stage,
     Validator,
+    equals,
+    tpl,
 )
 from ictus.graph.pipeline import TrimStrategy
 from ictus.interfaces.conductor import conductor
@@ -36,9 +40,10 @@ from ictus.interfaces.conductor.lints import (
     VALIDATED_UPSTREAM,
 )
 from ictus.lint import lint_pipeline
-from ictus.stdlib import Voice, approval_gate, council, succeed
+from ictus.stdlib import Voice, approval_gate, council, poll_until, succeed, try_shell
 
 if TYPE_CHECKING:
+    from ictus.graph.node import Node
     from ictus.graph.values import YamlDict
 
 S = PortType.STRING
@@ -695,3 +700,186 @@ class TestContextCeiling:
         """Nothing reads a previous pass, so nothing can be emptied behind it."""
         p = self._flat(context_max_tokens=120_000, context_trim=TrimStrategy.DROP_OLDEST)
         assert not _problems(p, "graph that loops")
+
+
+class TestRoutingOnAScriptsResult:
+    """A route on what a script step reports, where the command can forge it.
+
+    Conductor merges a JSON stdout over a script step's own
+    ``{stdout, stderr, exit_code}``, so a command that prints
+    ``{"exit_code": 0}`` and exits 1 takes the success branch. Nothing upstream
+    notices: the workflow loads, validates and runs. A step declared
+    ``trusted_status=True`` is lowered so its output cannot reach those three,
+    which is the only thing that makes routing on them safe.
+    """
+
+    RESULT = (
+        OutputPort("stdout", S),
+        OutputPort("stderr", S),
+        OutputPort("exit_code", PortType.NUMBER),
+    )
+
+    def _routed(self, *, trusted: bool, port: str = "exit_code", on: str | None = None) -> Pipeline:
+        p = Pipeline(pipeline_id="deploy", provider="claude-agent-sdk")
+        check = p.add(
+            ScriptNode(
+                node_id="check",
+                command="/usr/bin/health",
+                declared_outputs=self.RESULT,
+                trusted_status=trusted,
+            )
+        )
+        good = p.add(succeed(node_id="good", reason="up"))
+        bad = p.add(succeed(node_id="bad", reason="down"))
+        p.set_entry(check)
+        test = equals(check.ref(port), 0 if port == "exit_code" else "ready")
+        router: Node = check
+        if on is not None:
+            router = p.add(
+                AgentNode(
+                    node_id=on,
+                    inputs=(InputPort(port, check.get_output(port).port_type),),
+                    prompt="decide",
+                )
+            )
+            p.connect(check, port, router, port)
+        p.route(router, good, when=test)
+        p.route(router, bad)
+        return p
+
+    def test_a_route_on_an_untrusted_exit_code_is_reported(self) -> None:
+        problems = _problems(self._routed(trusted=False), "check.exit_code")
+        assert problems
+        assert "trusted_status" in problems[0]
+
+    def test_the_same_route_on_a_trusted_step_is_clean(self) -> None:
+        assert lint_pipeline(self._routed(trusted=True), backend=conductor) == []
+
+    def test_a_route_on_untrusted_stdout_is_reported_too(self) -> None:
+        """Same merge, same forgery: a JSON `stdout` key replaces the real one."""
+        assert _problems(self._routed(trusted=False, port="stdout"), "check.stdout")
+
+    def test_a_later_step_routing_on_the_scripts_status_is_reported(self) -> None:
+        """Where the condition is written does not matter; whose value it reads does."""
+        assert _problems(self._routed(trusted=False, on="decide"), "check.exit_code")
+
+    def test_a_route_on_a_field_the_command_prints_is_not_this_rule(self) -> None:
+        """A field *is* stdout's to write; only the process's own result is forgeable."""
+        p = Pipeline(pipeline_id="deploy")
+        check = p.add(
+            ScriptNode(
+                node_id="check",
+                command="/usr/bin/health",
+                declared_outputs=(OutputPort("healthy", PortType.BOOLEAN),),
+            )
+        )
+        p.set_entry(check)
+        good = p.add(succeed(node_id="good", reason="up"))
+        p.route(check, good, when=tpl(check.ref("healthy")))
+        p.route(check, END)
+        assert not _problems(p, "trusted_status")
+
+    def test_the_stdlib_scopes_that_route_on_a_command_are_clean(self) -> None:
+        for scope in (
+            try_shell(stage_id="reset", command="/bin/false"),
+            try_shell(stage_id="fields", command="/bin/true", outputs=(OutputPort("v", S),)),
+            poll_until(stage_id="wait", command="/bin/true", max_attempts=2, interval_seconds=1),
+        ):
+            assert not _problems(scope.body, "trusted_status"), scope.stage_id
+
+
+class TestATrustedStatus:
+    """What `trusted_status=True` promises, and what it therefore cannot allow."""
+
+    def test_it_cannot_also_read_fields_from_stdout(self) -> None:
+        with pytest.raises(CompositionError, match="fields"):
+            ScriptNode(
+                node_id="check",
+                command="/bin/true",
+                declared_outputs=(OutputPort("healthy", PortType.BOOLEAN),),
+                trusted_status=True,
+            )
+
+    def test_it_cannot_drop_the_schema_that_stops_a_command_that_never_ran(self) -> None:
+        with pytest.raises(CompositionError, match="enforce_outputs"):
+            ScriptNode(
+                node_id="check",
+                command="/bin/true",
+                declared_outputs=(OutputPort("exit_code", PortType.NUMBER),),
+                enforce_outputs=False,
+                trusted_status=True,
+            )
+
+    def test_a_result_port_at_the_wrong_type_is_refused(self) -> None:
+        with pytest.raises(CompositionError, match="exit_code"):
+            ScriptNode(
+                node_id="check",
+                command="/bin/true",
+                declared_outputs=(OutputPort("exit_code", S),),
+                trusted_status=True,
+            )
+
+    def test_it_is_lowered_through_the_reporter_with_the_whole_result_as_schema(self) -> None:
+        """The command and its arguments move behind the reporter, in order."""
+        p = Pipeline(pipeline_id="t")
+        node = p.add(
+            ScriptNode(
+                node_id="check",
+                command="/usr/bin/health",
+                args=("--deep",),
+                timeout=30,
+                declared_outputs=(OutputPort("exit_code", PortType.NUMBER),),
+                trusted_status=True,
+            )
+        )
+        p.route(node, END)
+        agents = conductor.document(p)["agents"]
+        assert isinstance(agents, list)
+        emitted = agents[0]
+        assert isinstance(emitted, dict)
+        assert emitted["command"] == "python3"
+        args = emitted["args"]
+        assert isinstance(args, list)
+        assert args[0] == "-c"
+        assert args[2:] == ["30", "/usr/bin/health", "--deep"]
+        timeout = emitted["timeout"]
+        assert isinstance(timeout, int)
+        assert timeout > 30, "the engine's own kill reaches the reporter, not the command"
+        output = emitted["output"]
+        assert isinstance(output, dict)
+        assert set(output) == {"stdout", "stderr", "exit_code"}
+
+    def test_preflight_requires_the_interpreter_it_is_lowered_onto(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The author never declared python3; the backend chose it, so it says so."""
+        stage = Stage(stage_id="inner")
+        node = stage.body.add(
+            ScriptNode(
+                node_id="check",
+                command="/bin/true",
+                declared_outputs=(OutputPort("exit_code", PortType.NUMBER),),
+                trusted_status=True,
+            )
+        )
+        stage.body.route(node, END)
+        stage.body.expose_output("code", node, "exit_code")
+        parent = Pipeline(pipeline_id="outer")
+        host = stage.instantiate(parent)
+        parent.route(host, END)
+        real_which = shutil.which
+        monkeypatch.setattr(
+            "ictus.interfaces.environment.shutil.which",
+            lambda name, *a, **k: None if name == "python3" else real_which(name, *a, **k),
+        )
+        issues = conductor.preflight(parent, probe=False)
+        assert [i for i in issues if i.requirement == "exe:python3"]
+
+    def test_preflight_asks_nothing_of_a_pipeline_that_does_not_need_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p = Pipeline(pipeline_id="t")
+        node = p.add(ScriptNode(node_id="plain", command="/bin/true"))
+        p.route(node, END)
+        monkeypatch.setattr("ictus.interfaces.environment.shutil.which", lambda *_, **__: None)
+        assert not [i for i in conductor.preflight(p, probe=False) if "python3" in i.requirement]

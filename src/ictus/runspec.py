@@ -170,12 +170,15 @@ def split_frontmatter(text: str, *, where: str) -> tuple[dict[str, object], str]
 
 
 def read_input_file(path: Path, pipeline: Pipeline, *, cwd: Path) -> RunSpec:
-    """Read an ``input.md`` into the values a run needs.
+    """Read the values supplied by an ``input.md``.
 
     Every key must be an input the pipeline declares — ``repo`` excepted, which
     is always meaningful. A key matching nothing is refused rather than ignored:
     silently dropping ``targt:`` is how a run ends up doing the default thing and
     nobody notices until the output is wrong.
+
+    Required inputs are checked by the caller after command-line overrides are
+    merged. A file can supply only some values, and a dry run needs none.
     """
     where = str(path)
     front, body = split_frontmatter(path.read_text(encoding="utf-8"), where=where)
@@ -209,15 +212,6 @@ def read_input_file(path: Path, pipeline: Pipeline, *, cwd: Path) -> RunSpec:
                 "the text into a frontmatter key."
             )
         values[prose[0].name] = body
-
-    missing = sorted(
-        name for name, param in declared.items() if param.required and name not in values
-    )
-    if missing:
-        raise RunSpecError(
-            f"{where}: pipeline {pipeline.pipeline_id!r} requires {missing}, which the input "
-            "file does not supply"
-        )
 
     target = front.get(REPO_KEY)
     working = cwd if target is None else _resolve_repo(str(target), beside=path)

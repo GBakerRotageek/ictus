@@ -110,12 +110,18 @@ class Trace:
         return [s for s in self.steps.values() if not s.looked and s.turns]
 
 
-def find_logs(workflow: str | None = None) -> list[Path]:
-    """Event logs, newest first, optionally for one workflow."""
-    if not LOG_DIR.is_dir():
+def find_logs(workflow: str | None = None, *, state_dir: Path | None = None) -> list[Path]:
+    """Event logs, newest first, optionally for one workflow.
+
+    ``state_dir`` is a run's own state directory, which the backend points the
+    engine at in place of ``$TMPDIR``; without one this reads where an engine
+    left to itself writes.
+    """
+    directory = LOG_DIR if state_dir is None else state_dir / "conductor"
+    if not directory.is_dir():
         return []
     stem = f"conductor-{workflow}-*" if workflow else "*"
-    found = {*LOG_DIR.glob(f"{stem}.events.jsonl"), *LOG_DIR.glob(f"{stem}.events.json")}
+    found = {*directory.glob(f"{stem}.events.jsonl"), *directory.glob(f"{stem}.events.json")}
     return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
 
 

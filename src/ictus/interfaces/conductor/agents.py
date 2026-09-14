@@ -34,6 +34,12 @@ from ictus.graph.node import (
 )
 from ictus.graph.pipeline import DataDep, FailureMode, Pipeline
 from ictus.graph.ports import PortType
+from ictus.interfaces.conductor.status import (
+    REPORTER_INTERPRETER,
+    reported_args,
+    reported_timeout,
+    result_ports,
+)
 from ictus.interfaces.conductor.templates import (
     guard_test,
     output_path,
@@ -163,15 +169,23 @@ def kind_fields(pipeline: Pipeline, node: Node, system_prompt: str | None) -> Ya
         case GateNode():
             return {"prompt": render(pipeline, node, node.prompt)}
         case ScriptNode():
+            args = [render(pipeline, node, arg) for arg in node.args]
+            timeout = node.timeout
             fields = {"command": node.command}
-            if node.args:
-                fields["args"] = [render(pipeline, node, arg) for arg in node.args]
+            if node.trusted_status:
+                # The command becomes the reporter's argument; see status.py for
+                # why the result cannot otherwise be trusted on this engine.
+                fields = {"command": REPORTER_INTERPRETER}
+                args = reported_args(node.command, args, node.timeout)
+                timeout = reported_timeout(node.timeout)
+            if args:
+                fields["args"] = list(args)
             if node.env:
                 fields["env"] = dict(node.env)
             if node.stdin is not None:
                 fields["stdin"] = render(pipeline, node, node.stdin)
-            if node.timeout is not None:
-                fields["timeout"] = node.timeout
+            if timeout is not None:
+                fields["timeout"] = timeout
             if node.working_dir is not None:
                 fields["working_dir"] = node.working_dir
             return fields
@@ -238,7 +252,9 @@ def agent_entry(pipeline: Pipeline, node: Node, system_prompt: str | None = None
     refs = input_refs(pipeline, node)
     if refs:
         agent["input"] = list(refs)
-    if node.emits_output_schema and node.outputs:
+    if isinstance(node, ScriptNode) and node.trusted_status:
+        agent["output"] = render_output_schema(result_ports(node))
+    elif node.emits_output_schema and node.outputs:
         agent["output"] = render_output_schema(node.outputs)
 
     if isinstance(node, SubGraphNode):
@@ -306,29 +322,30 @@ def input_mapping(pipeline: Pipeline, node: SubGraphNode) -> YamlDict:
     Derived from the same edges that produced ``input:``, so a stage is wired
     with ordinary ``connect``/``feed`` calls and the parameter binding cannot
     drift from the data dependency it was meant to express.
+
+    Every value is ``| tojson``, whatever its type, because the engine renders
+    each entry to text and hands it to ``json.loads`` with a fall back to the
+    raw string (``_build_subworkflow_inputs``). Only ``number`` survives that
+    bare. A ``boolean`` renders as Python's ``True``, which is not JSON, so it
+    reaches the child as the string ``"True"``; a ``string`` holding ``"false"``
+    or ``"0700"`` parses as something that is not a string at all. Both are
+    quiet — the child gets a value of the wrong type and runs anyway.
     """
     mapping: YamlDict = {}
     for param, target, port in pipeline.input_bindings:
         if target is node:
-            # Rendered to text and parsed back like every other boundary: without
-            # `| tojson` a structured parameter reaches the child as a Python
-            # repr, which json.loads cannot read, so it survives as a string
-            # that looks like data.
-            expression = "workflow.input." + param.name
-            if param.port_type in _STRUCTURED:
-                expression += " | tojson"
-            mapping[port.name] = "{{ " + expression + " }}"
+            mapping[port.name] = "{{ workflow.input." + param.name + " | tojson }}"
     for dep in pipeline.deps_into(node):
         expression = output_path(pipeline, dep.source, dep.connection.source.name)
-        if dep.connection.source.port_type in _STRUCTURED:
-            expression += " | tojson"
-        rendered = "{{ " + expression + " }}"
+        rendered = "{{ " + expression + " | tojson }}"
         if _may_be_absent(pipeline, node, dep):
             # The mapping is rendered against the same explicit context as the
             # step's own templates, so a source that may not have run is an
             # undefined variable here too — and the engine turns that into an
             # ExecutionError rather than an empty string.
             empty = _EMPTY_FOR[dep.connection.source.port_type]
+            # Both branches have to be the same JSON, or the parameter arrives
+            # as a different type depending on which one ran.
             rendered = (
                 "{% if "
                 + guard_test(pipeline, dep.source.ref(dep.connection.source.name))
@@ -346,7 +363,10 @@ def input_mapping(pipeline: Pipeline, node: SubGraphNode) -> YamlDict:
 # same as an empty one, but the child declared the parameter, so something of the
 # right type has to arrive.
 _EMPTY_FOR = {
-    PortType.STRING: "",
+    # A JSON string literal, not nothing: the live branch is `| tojson`, and an
+    # empty render would parse as a failure and survive as a raw empty string
+    # only by luck.
+    PortType.STRING: '""',
     PortType.OBJECT: "{}",
     PortType.ARRAY: "[]",
     PortType.NUMBER: "0",

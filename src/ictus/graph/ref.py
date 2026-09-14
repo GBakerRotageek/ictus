@@ -24,6 +24,7 @@ from ictus.graph.ports import PortType
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
+    from ictus.graph.mapping import Item, MapGroup
     from ictus.graph.node import Node
     from ictus.graph.pipeline import WorkflowInput
 
@@ -63,17 +64,21 @@ class Origin(StrEnum):
 class Ref:
     """A reference to one output port of one node, a workflow input, or a loop item.
 
-    ``source`` is kept so a lint can check the referenced node is actually in
-    the pipeline — an identity check the old regex over prompt text could never
-    make. ``origin`` is set by whichever constructor made the reference, so
-    nothing has to re-derive which sort it is.
+    ``source`` is what the reference was built from, and the lint resolves the
+    finished graph back to it: matching ``source_id`` is *not* the same as being
+    the same thing, and a reference carried in from another graph lands on
+    whichever local node, input or group shares the name. Only ``ref_to`` leaves
+    it unset, because a forward reference has nothing to point at yet.
+
+    ``origin`` is set by whichever constructor made the reference, so nothing
+    has to re-derive which sort it is.
     """
 
     source_id: str
     port: str
     port_type: PortType
     origin: Origin = Origin.NODE
-    source: Node | WorkflowInput | None = None
+    source: Node | WorkflowInput | MapGroup | Item | None = None
     element: Mapping[str, PortType] | None = None
     """An array's item shape, carried from the port so a fan-out can check it."""
     fallback: str | None = None
@@ -322,16 +327,38 @@ def _rendered(value: str | int | bool) -> str:
 
 def every(*refs: Ref) -> Template:
     """A condition that holds when all of ``refs`` are true."""
-    if not refs:
-        raise CompositionError("every() needs at least one reference to test")
+    _check_testable(refs, "every()")
     return Template((Every(refs_=tuple(refs)),))
 
 
 def not_every(*refs: Ref) -> Template:
     """A condition that holds while any of ``refs`` is still false."""
-    if not refs:
-        raise CompositionError("not_every() needs at least one reference to test")
+    _check_testable(refs, "not_every()")
     return Template((Every(refs_=tuple(refs), negated=True),))
+
+
+def _check_testable(refs: tuple[Ref, ...], what: str) -> None:
+    """Refuse a conjunction over anything Jinja would judge by emptiness.
+
+    The same failure :func:`_check_comparable` refuses, reached the other way.
+    A conjunction renders its members bare, so Jinja applies its own truthiness:
+    a non-empty string, a non-zero number and a populated list are all true, and
+    the condition holds on every run that produced anything at all. Well-formed,
+    never false, and visible only as a branch nobody took.
+
+    The set is usually derived — a council's conjunction is built from whoever
+    the council was given — so the message names the member, not just the call.
+    """
+    if not refs:
+        raise CompositionError(f"{what} needs at least one reference to test")
+    wrong = next((r for r in refs if r.port_type is not PortType.BOOLEAN), None)
+    if wrong is not None:
+        raise CompositionError(
+            f"{what} tests booleans, but {wrong.source_id}.{wrong.port} is "
+            f"{wrong.port_type.value}: rendered bare it is true whenever it is non-empty, "
+            f"so the condition would hold on every run. Use equals() to test a value, "
+            f"at_least() for a number, or a boolean the step declares."
+        )
 
 
 def at_least(ref: Ref, threshold: int) -> Template:

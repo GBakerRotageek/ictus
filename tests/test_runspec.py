@@ -109,10 +109,10 @@ def test_a_key_that_matches_no_input_is_refused(tmp_path: Path) -> None:
         read_input_file(folder / "input.md", _pipeline(), cwd=tmp_path)
 
 
-def test_a_missing_required_input_is_refused(tmp_path: Path) -> None:
+def test_input_files_can_leave_required_values_for_cli_overrides(tmp_path: Path) -> None:
     folder = _folder(tmp_path, "---\ncharge: hello\n---\n")
-    with pytest.raises(RunSpecError, match=r"requires \['target'\]"):
-        read_input_file(folder / "input.md", _pipeline(extra_required=True), cwd=tmp_path)
+    spec = read_input_file(folder / "input.md", _pipeline(extra_required=True), cwd=tmp_path)
+    assert spec.inputs == {"charge": "hello"}
 
 
 def test_values_cross_the_wire_as_text(tmp_path: Path) -> None:

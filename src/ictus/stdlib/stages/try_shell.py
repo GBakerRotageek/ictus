@@ -5,7 +5,7 @@ branches, an agent has a validator, a loop has ``converge`` — but a command th
 exits non-zero produced a value nothing could read, and a command that died
 produced an exception that ended the run.
 
-Both halves are worth stating exactly, because they are different bugs:
+Three facts about Conductor decide the shape, and each one was a bug here:
 
 * **A non-zero exit is not a failure to Conductor.** ``executor/script.py``
   returns ``exit_code`` alongside stdout and stderr, and nothing in
@@ -13,20 +13,29 @@ Both halves are worth stating exactly, because they are different bugs:
   database, then apply the admin configuration" that is the expensive shape:
   the restore fails, the configuration lands on the database the restore was
   supposed to replace, and the run reports success.
-* **Declaring ``output:`` converts that into the opposite bug.** The engine
-  parses stdout as JSON and raises when it is not an object — and that raise
-  lands *before* ``_evaluate_routes``, so the route written for the failure
-  never fires. The bound became "when the run crashes", not "what happens".
+* **Declaring ``output:`` raises before routing.** The engine parses stdout as
+  JSON and raises when it is not an object carrying the declared fields — and
+  that lands *before* ``_evaluate_routes``, so a route written for a failing
+  command, which owes nobody JSON, never fires.
+* **Stdout can overwrite the status.** Whenever stdout parses as a JSON object
+  the engine merges it over ``{stdout, stderr, exit_code}``. The previous
+  version emitted no ``output:`` to avoid the second fact and so routed on a
+  field its command could write: reproduced on a live run, a command printing
+  ``{"exit_code": 0}`` and exiting 1 reported ``ok``, and one printing
+  ``"exit_code": 7`` among its fields and exiting 0 reported ``failed``.
 
-``try_shell`` gives the contract up to get the branch: the step declares its
-ports for composition and wiring but emits no ``output:``, so stdout is never
-parsed, nothing raises, and ``exit_code`` — always present in the baseline the
-engine stores — decides which exit is taken.
+So the status and the fields come from two steps, because one step cannot give
+both. ``run`` sets ``trusted_status``, which the Conductor backend lowers so the
+command's stdout cannot reach its result (``interfaces/conductor/status.py``),
+and whose only schema is that result, so a failing command routes normally. Only once that
+status says 0 does ``<node_id>_fields`` pipe the command's real stdout through
+``cat`` with the declared ``outputs`` as its schema — Conductor's own parser and
+validator, applied on the one branch where the command promised the fields.
 
-What it does not convert, and ``require_executable`` still has to: a command
-that never started. ``FileNotFoundError`` and a ``timeout`` both leave the
-executor as ``ExecutionError``, which is not a value and not routable. This
-scope handles a command that ran and failed.
+What stays outside the outcomes: a command that never started, and one that ran
+past ``timeout``. The reporter prints nothing for either, ``run``'s schema
+refuses that, and the run ends. A missing binary is also worth
+``require_executable``, so ``ictus preflight`` refuses it before anything runs.
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
+from ictus.graph.node import PROCESS_RESULT
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import equals, tpl
 from ictus.graph.scope import outcome_scope
@@ -52,17 +62,16 @@ OK = "ok"
 FAILED = "failed"
 
 STDOUT = "stdout"
-STDERR = "stderr"
 EXIT_CODE = "exit_code"
 
-#: What the engine stores for every script step whether or not it printed
-#: anything. Carried by both exits, so a caller reading them cannot hit an
-#: undefined variable on either path.
-BASELINE: dict[str, PortType] = {
-    STDOUT: PortType.STRING,
-    STDERR: PortType.STRING,
-    EXIT_CODE: PortType.NUMBER,
-}
+#: What the command's own step always carries, whatever it printed. Both exits
+#: carry all of it, so a caller reading them cannot hit an undefined variable.
+BASELINE: dict[str, PortType] = dict(PROCESS_RESULT)
+
+#: Reads JSON on stdin and prints it back, so the engine parses it as a step's
+#: stdout. Byte-exact, which a Python relay in text mode is not: universal
+#: newlines would rewrite a ``\r\n`` inside the payload.
+FIELD_READER = "cat"
 
 
 def try_shell(
@@ -82,7 +91,8 @@ def try_shell(
 
     Both outcomes carry ``stdout``, ``stderr`` and ``exit_code``, so the branch
     that handles the failure can say what went wrong instead of only that
-    something did.
+    something did. ``exit_code`` is the process's own: nothing the command
+    prints can change which outcome is taken.
 
     ``parameter`` declares an input the caller wires, appended to ``args`` as
     the command's last argument — the shape ``script_sequence`` uses, so an
@@ -90,13 +100,16 @@ def try_shell(
     holding a value it has no business knowing.
 
     ``outputs`` names JSON fields the command prints, addressable on the ``ok``
-    branch. **Print every one of them whenever the command exits 0.** Conductor
-    renders with ``StrictUndefined``, so a declared field the command omitted
-    raises at the reference — which reinstates, on the success path only, the
-    crash this scope exists to remove. The ``failed`` exit does not read them:
-    they arrive there as empty values of their declared type, because a key on
-    one branch and absent on the other is a template error waiting for the
-    branch nobody exercised.
+    branch. **Print every one of them whenever the command exits 0.** They are
+    parsed in a step of their own, after the exit status has said 0, and a
+    missing or mistyped field ends the run there, naming the field. The
+    ``failed`` exit never parses them: they arrive there as empty values of
+    their declared type, because a key on one branch and absent on the other is
+    a template error waiting for the branch nobody exercised.
+
+    On Conductor the command runs under ``python3``, which ``ictus preflight``
+    checks for; see ``ScriptNode.trusted_status`` for why. A command that never starts, or
+    runs past ``timeout``, ends the run instead of reaching either outcome.
 
     Contract: optional input named by ``parameter``; outcomes ``ok`` and
     ``failed``.
@@ -104,9 +117,9 @@ def try_shell(
     reserved = sorted({port.name for port in outputs} & set(BASELINE))
     if reserved:
         raise CompositionError(
-            f"try_shell {stage_id!r} declares {reserved} in outputs, which the engine already "
-            "supplies for every script step. A JSON field of that name shadows the baseline "
-            "silently — rename the field the command prints."
+            f"try_shell {stage_id!r} declares {reserved} in outputs, which the scope already "
+            "carries as the process's own result. A JSON field of that name would share a "
+            "name with it on the `ok` exit — rename the field the command prints."
         )
     if parameter is not None and not parameter.strip():
         raise CompositionError(f"try_shell {stage_id!r} has a malformed parameter {parameter!r}")
@@ -142,15 +155,9 @@ def try_shell(
             stdin=stdin,
             timeout=timeout,
             working_dir=working_dir,
-            outputs=(
-                OutputPort(STDOUT, PortType.STRING, "What the command printed"),
-                OutputPort(STDERR, PortType.STRING, "What it printed to stderr"),
-                OutputPort(EXIT_CODE, PortType.NUMBER, "The status it exited with"),
-                *outputs,
-            ),
-            # The whole construct. With the schema emitted, a command that dies
-            # raises before either route below is looked at.
-            enforce_outputs=False,
+            # The whole point of the step: what it routes on is the process's own
+            # result, not whatever its stdout says the result was.
+            trusted_status=True,
         )
     )
     body.set_entry(run)
@@ -164,19 +171,43 @@ def try_shell(
         reason=tpl(f"{command} exited with status ", run.ref(EXIT_CODE)),
         **baseline,
     )
-    worked = scope.exit(
-        node_id=OK,
-        outcome=OK,
-        reason=f"{command} succeeded",
-        **baseline,
-        **{port.name: run.ref(port.name) for port in outputs},
-    )
 
     # Success is the *tested* branch and failure the catch-all, which is the
     # only arrangement that is right for both ends of the range. A child killed
     # by a signal exits `-N` — asyncio reports SIGKILL as -9 — so "failed" spelt
     # as `exit_code >= 1` reads a killed command as a clean one, which is the
     # exact bug this scope exists to remove.
-    body.route(run, worked, when=equals(run.ref(EXIT_CODE), 0))
+    succeeded = equals(run.ref(EXIT_CODE), 0)
+    if not outputs:
+        worked = scope.exit(node_id=OK, outcome=OK, reason=f"{command} succeeded", **baseline)
+        body.route(run, worked, when=succeeded)
+        body.route(run, broke)
+        return scope
+
+    fields = body.add(
+        shell(
+            node_id=f"{node_id}_fields",
+            description=f"Read the fields {command} printed",
+            command=FIELD_READER,
+            inputs=(InputPort(STDOUT, PortType.STRING, "What the command printed"),),
+            stdin=tpl(run.ref(STDOUT)),
+            outputs=tuple(outputs),
+            # Enforced here and nowhere else: this step only runs once the command
+            # exited 0, which is when it promised the fields. A missing one ends
+            # the run on this step, named, instead of at whichever template reads
+            # it later.
+            enforce_outputs=True,
+        )
+    )
+    body.feed(run, STDOUT, fields, STDOUT)
+    worked = scope.exit(
+        node_id=OK,
+        outcome=OK,
+        reason=f"{command} succeeded",
+        **baseline,
+        **{port.name: fields.ref(port.name) for port in outputs},
+    )
+    body.route(run, fields, when=succeeded)
     body.route(run, broke)
+    body.route(fields, worked)
     return scope

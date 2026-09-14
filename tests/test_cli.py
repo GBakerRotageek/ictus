@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from ictus import cli
 from ictus.cli import app
 from ictus.config import MINIMAL as MINIMAL_CONFIG
+from ictus.errors import EmitError
 from ictus.interfaces.conductor import ConductorBackend
 
 runner = CliRunner()
@@ -93,6 +94,26 @@ def test_emit_writes_nothing_when_the_lints_fail(tmp_path: Path) -> None:
     assert not list(out.glob("*.yaml")) if out.exists() else True
 
 
+def test_emit_reports_backend_compile_errors_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, out = tmp_path / "pipelines", tmp_path / "out"
+    _write(src, "demo", MINIMAL.format(pid="demo"))
+    out.mkdir()
+    existing = out / "earlier.yaml"
+    existing.write_text("workflow: {}\n")
+
+    def reject(_self: ConductorBackend, _pipeline: object) -> None:
+        raise EmitError("unsupported map body")
+
+    monkeypatch.setattr(ConductorBackend, "compile", reject)
+    result = runner.invoke(app, ["emit", str(src), "--out", str(out)])
+    assert result.exit_code == 1
+    assert "demo: unsupported map body" in result.output
+    assert list(out.iterdir()) == [existing]
+    assert existing.read_text() == "workflow: {}\n"
+
+
 def test_emit_refuses_two_pipelines_claiming_one_filename(tmp_path: Path) -> None:
     """Last-write-wins silently deleted a pipeline from the output directory."""
     src, out = tmp_path / "pipelines", tmp_path / "out"
@@ -136,14 +157,34 @@ def test_run_refuses_a_folder_that_is_not_a_pipeline(tmp_path: Path) -> None:
     assert "pipeline.py" in result.output
 
 
-def test_run_says_what_the_input_file_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("has_input_file", [False, True])
+def test_run_says_what_the_input_file_is_missing(
+    tmp_path: Path, launched: list[dict[str, object]], *, has_input_file: bool
+) -> None:
     """A required input with nowhere to come from should name the file to put it in."""
     src = tmp_path / "pipelines"
     folder = _write(src, "demo", NEEDS_INPUT)
+    if has_input_file:
+        (folder / "input.md").write_text("")
     result = runner.invoke(app, ["run", str(folder), "--skip-preflight"])
     assert result.exit_code == 1
     assert "requires ['subject']" in result.output
     assert "input.md" in result.output
+    assert "-i name=value" in result.output
+    assert not (folder / "build").exists()
+    assert not launched
+
+
+@pytest.mark.parametrize("contents", ["", "---\nsubject: from-file\n---\n"])
+def test_run_merges_cli_inputs_before_requiring_values(
+    tmp_path: Path, launched: list[dict[str, object]], contents: str
+) -> None:
+    folder = _write(tmp_path / "pipelines", "demo", NEEDS_INPUT)
+    (folder / "input.md").write_text(contents)
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight", "-i", "subject=provided"])
+    assert result.exit_code == 0, result.output
+    assert len(launched) == 1
+    assert launched[0]["inputs"] == {"subject": "provided"}
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
@@ -172,8 +213,9 @@ def test_dry_run_asks_for_a_plan_and_launches_nothing(
     assert "--web-bg" not in calls[0]
 
 
+@pytest.mark.parametrize("has_input_file", [False, True])
 def test_dry_run_does_not_demand_inputs_it_will_never_spend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, has_input_file: bool
 ) -> None:
     """Conductor plans from the workflow file alone, so the values are not read.
 
@@ -182,6 +224,8 @@ def test_dry_run_does_not_demand_inputs_it_will_never_spend(
     """
     calls = _capture(monkeypatch)
     folder = _write(tmp_path / "pipelines", "demo", NEEDS_INPUT)
+    if has_input_file:
+        (folder / "input.md").write_text("")
     result = runner.invoke(app, ["run", str(folder), "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "requires" not in result.output
@@ -429,6 +473,56 @@ def test_background_without_a_dashboard_is_refused(
     result = runner.invoke(app, ["run", str(folder), "-b", "--no-web", "--skip-preflight"])
     assert result.exit_code == 1
     assert "--background" in result.output
+    assert not launched
+
+
+@pytest.mark.parametrize(
+    ("configured", "flags", "dashboard", "background"),
+    [
+        (True, [], True, True),
+        (False, [], False, False),
+        (False, ["--web"], True, True),
+        (True, ["--no-web"], False, False),
+        (False, ["--web", "--foreground"], True, False),
+        (False, ["--web", "--background"], True, True),
+    ],
+)
+def test_run_resolves_dashboard_policy_and_cli_overrides(
+    tmp_path: Path,
+    launched: list[dict[str, object]],
+    flags: list[str],
+    *,
+    configured: bool,
+    dashboard: bool,
+    background: bool,
+) -> None:
+    folder = _write(
+        tmp_path / "pipelines",
+        "demo",
+        MINIMAL.format(pid="demo"),
+        config=f"provider: claude-agent-sdk\ndashboard: {str(configured).lower()}\n",
+    )
+    result = runner.invoke(app, ["run", str(folder), "--skip-preflight", *flags])
+    assert result.exit_code == 0, result.output
+    assert len(launched) == 1
+    assert launched[0]["dashboard"] is dashboard
+    assert launched[0]["background"] is background
+
+
+def test_explicit_background_requires_the_dashboard_disabled_in_config(
+    tmp_path: Path, launched: list[dict[str, object]]
+) -> None:
+    folder = _write(
+        tmp_path / "pipelines",
+        "demo",
+        MINIMAL.format(pid="demo"),
+        config="provider: claude-agent-sdk\ndashboard: false\n",
+    )
+    result = runner.invoke(app, ["run", str(folder), "--background", "--skip-preflight"])
+    assert result.exit_code == 1
+    assert "--background" in result.output
+    assert "dashboard" in result.output
+    assert not (folder / "build").exists()
     assert not launched
 
 

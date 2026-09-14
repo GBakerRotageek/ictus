@@ -121,6 +121,7 @@ uv run ictus emit      tests/fixtures/pipelines
 uv run ictus validate  tests/fixtures/pipelines
 uv run ictus preflight demo_work/pipelines   # can this machine run it?
 uv run ictus trace     <pipeline>            # what each step actually did
+uv run ictus resume    <pipeline>            # continue an interrupted run; says what repeats
 ```
 
 `make` iterates both roots, so prefer it over naming a path: `demo_work/` is

@@ -45,7 +45,7 @@ No provider call, still 1 iteration each.
 | `bindings` | Several named values at once | `values`, `outputs` | one port per declared output |
 | `counter` | Count passes through a point, from one | — | `value: number` |
 | `save_text` | Write a value another step produced to a file | `text`, `to`, `append`, `working_dir` | `path: string` |
-| `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs` | whatever `outputs` declares |
+| `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs`, `trusted_status` | whatever `outputs` declares; with `trusted_status`, the process's `stdout`, `stderr`, `exit_code` |
 | `wait` | Pause | `seconds`, `reason` | — |
 
 ## Terminals
@@ -60,12 +60,27 @@ No provider call, still 1 iteration each.
 | Constructor | Use | Options | Contract |
 | --- | --- | --- | --- |
 | `briefing_gate` | Turn data into a human decision and report which was taken | `subject`, `question`, `data_type`, `options` | in `data` → out `decision`, `summary`, `notes` |
+| `map_stage` | Run one stage per item of a run-time array and collect the results | `group_id`, `stage`, `source`, `item`, `bind`, `expect_items`, `node_id`, `max_concurrent`, `failure_mode`, `key_by` | in `bind` + whatever you wire → out the group's `outputs`, `errors`, `count` |
 | `resolve_unknowns` | Work out what is missing, ask only about that | `subject`, `needs` | in `brief` → out `known: object`, `answers: object` |
 | `script_sequence` | Chain commands, threading each output into the next | `steps`, `parameter`, `working_dir` | in `<parameter>` → out `result` |
 | `validate_mcps` | Prove every declared MCP server is reachable, with a fix-it loop | `servers`, `retries` | out `report` |
 
 `ReviewOption(value, label, ask_for_notes=)`; default pair is `APPROVE_OR_REJECT`.
 `ScriptStep(node_id, command, args, output, receives_previous=)`.
+
+A map cannot iterate another map's collected `outputs` on Conductor: its
+schema wants a `for_each` source of at least three dotted parts, and a group's
+aggregate is addressed in two. `ictus lint` says so before anything is emitted.
+The element shape does survive the reference, so the graph can express the
+chain; running it needs the array republished as a field of a step first.
+
+`map_stage` takes a `pipeline` positionally, places the stage in it, and maps
+over the placement — so everything that checks an ordinary placement checks this
+one too. `bind` is the half of the child's parameters the *item* decides,
+`{parameter: item.ref(field)}`; the half that is the same every iteration is
+wired to `group.body` with `feed` or `connect_input` afterwards. Supplying one
+parameter both ways is refused, and a required parameter neither way supplies is
+a lint — inside the child it would be an error once per item.
 
 ## Scopes
 
@@ -74,6 +89,7 @@ No provider call, still 1 iteration each.
 | `classify` | Let a model pick one of N answers, as an outcome you route | `question`, `choices`, `model`, `provider`, `tools`, `max_turns`, `node_id`, `brief` | one per choice, plus `unclear` | `answer`, `rationale` |
 | `tiered` | Triage the work, then do it at the effort tier that picked | `question`, `tiers`, `produces`, `triage_model`, `triage_provider`, `brief` | `done`, `unclear` | `tier`, `rationale`, whatever `produces` declares |
 | `try_shell` | Run one command whose failure the caller routes on | `command`, `args`, `parameter`, `outputs`, `stdin`, `timeout`, `working_dir`, `node_id` | `ok`, `failed` | `stdout`, `stderr`, `exit_code` |
+| `poll_until` | Run one command until it exits 0, a bounded number of times | `command`, `max_attempts`, `interval_seconds`, `args`, `parameter`, `timeout`, `working_dir`, `node_id` | `ready`, `exhausted` | `stdout`, `stderr`, `exit_code`, `attempts` |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
 | `roundtable` | Several people taking turns, in order, until they agree | `speakers`, `subject`, `charge`, `rounds`, `study`, `interject`, `remember`, `closing` | `agreed`, `unresolved`, `halted` (with `interject`) | `minutes`, `dissent`, `rounds` |
 | `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `deliberate`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
@@ -113,27 +129,25 @@ reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
   downstream. Every exit carries the same keys, so the branch is over by the
   time the caller reads anything. `tiered` gives each tier its own exit for
   exactly this: one shared exit would have to read every tier's ports.
-- **`try_shell` is the only way to route on a command that failed**, and it
-  costs you the stdout contract to get there. A script step's non-zero exit is
-  not a failure to Conductor: `exit_code` comes back beside `stdout` and
-  `stderr`, nothing branches on it, and the next step runs — so a restore that
-  fails is followed by the configuration queries that were meant to land on
-  what it restored. Declaring `outputs` looks like the fix and is the opposite
-  one: the engine then parses stdout as JSON and *raises* when it cannot, and
-  that raise lands before routes are evaluated, so the branch written for the
-  failure can never be taken. `try_shell` emits the ports without the schema
-  (`shell(enforce_outputs=False)`), so nothing is checked, nothing raises, and
-  `exit_code` decides the exit. Both outcomes carry `stdout`, `stderr` and
+- **`try_shell` is the only safe way to route on a command that failed.** A
+  script step's non-zero exit is not a failure to Conductor: `exit_code` comes
+  back beside `stdout` and `stderr`, nothing branches on it, and the next step
+  runs — so a restore that fails is followed by the configuration queries that
+  were meant to land on what it restored. Routing on `exit_code` by hand is not
+  enough either, for two reasons below. `try_shell` takes the exit on the
+  process's own status, and both outcomes carry `stdout`, `stderr` and
   `exit_code`, so the failure branch can say what went wrong.
-- **What `try_shell` does not convert: a command that never started.** A
-  missing binary and a `timeout` both leave the executor as an `ExecutionError`,
-  which is not a value and not routable. Declare the tool with
-  `require_executable` so `ictus preflight` refuses the launch instead.
-- **`outputs` on a `try_shell` must be printed on every zero exit.** Conductor
-  renders with `StrictUndefined`, so a declared field the command omitted raises
-  at the reference — reinstating, on the success path only, the crash the scope
-  removes. The `failed` exit does not read them; they arrive there as empty
-  values of their declared type.
+- **`outputs` on a `try_shell` are parsed only after a zero exit.** Declaring a
+  schema on the command's own step would raise on a failing command before any
+  route is evaluated, since a failing command prints no JSON. So the fields are
+  read by a second step, `<node_id>_fields`, that runs only on success, with
+  the fields as its schema. A field the command omitted on a zero exit ends the
+  run there, named. The `failed` exit never reads them; they arrive there as
+  empty values of their declared type.
+- **What `try_shell` does not convert: a command that never started, or one
+  that ran past `timeout`.** Both end the run instead of reaching `failed`.
+  Declare the tool with `require_executable` so `ictus preflight` refuses the
+  launch instead.
 
 - **A context ceiling is per *stage*, and only one strategy survives a loop.**
   `Pipeline(context_max_tokens=, context_trim=)` emits `workflow.context`, and
@@ -212,10 +226,15 @@ real `0` and a verdict is a real `True` — `== '0'` and `== 'true'` both send
 every run down the catch-all with nothing to see. An `ARRAY` or `OBJECT` port
 cannot be compared at all; route on a scalar the step also declares.
 
+`every` refuses the same mistake from the other side. A conjunction renders its
+members bare, so Jinja judges them by emptiness: a non-empty string, a non-zero
+number and a populated list are all true, and the condition holds on every run
+that produced anything. Only a `BOOLEAN` port means what the call says.
+
 | Helper | Renders |
 | --- | --- |
 | `equals(ref, value)` / `not_equals` | `{{ x == 'value' }}` for a string, `{{ x \| int == 0 }}` for an int, `{{ x == true }}` for a bool — the value's type must match the port's |
-| `every(*refs)` / `not_every` | `{{ a and b and c }}` |
+| `every(*refs)` / `not_every` | `{{ a and b and c }}` — every ref must be a `BOOLEAN` port |
 | `at_least(ref, n)` | `{{ x \| int >= n }}` |
 | `tpl(...)`, `optional(...)`, `ref_to(id, port, type)` | prompt text with typed references |
 
@@ -379,6 +398,27 @@ plausible one.
 - **`retry` is for a failed *call*, not a wrong answer.** Re-running a step that
   answered badly buys the same answer twice at full price; that is what
   `converge` is for.
+- **A script's JSON stdout overwrites its own exit status.** Conductor stores
+  `{stdout, stderr, exit_code}` for a script step and then merges stdout over
+  it whenever stdout parses as a JSON object — so a command that prints
+  `{"exit_code": 0}` and exits 1 routes as a success, and one whose fields
+  include `"exit_code": 7` routes as a failure on a clean exit. `ictus lint`
+  refuses a route on any of the three unless the step sets `trusted_status=True`,
+  which the backend lowers behind a `python3` reporter that prints the real
+  values as the step's only object — and which `ictus preflight` then checks for.
+  `try_shell` and `poll_until` set it. A trusted step reads no fields from
+  stdout; parse them in a later step, as `try_shell` does.
+- **A poll's timeout is not part of its outcome.** `poll_until`'s `timeout`
+  bounds one check and is enforced by the reporter, which kills everything the
+  check started. A check that runs past it, or a command that never started — a
+  missing binary, a permission error — leaves the reporter with nothing to
+  print, and the check's declared schema refuses that before any route is
+  evaluated. That ends the run; it does not arrive as `exhausted`. Use
+  `max_attempts` to bound the poll.
+- **`poll_until` checks first and waits between.** N attempts wait N-1 times,
+  and success is tested before exhaustion, so a check that comes good on the
+  last permitted attempt is `ready`. Both orders are easy to write by hand and
+  wrong in a way no test notices until the run that matters.
 - **Declare the tools a step checks against.** `pipeline.require_executable(
   Executable(name=, purpose=, probe=, setup_hint=))` makes `ictus preflight`
   refuse the launch. A missing reference tool does not crash a step — the step

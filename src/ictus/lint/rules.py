@@ -14,9 +14,12 @@ from ictus.graph.node import GateNode, NodeKind, ScopeNode, SubGraphNode
 from ictus.graph.ref import Origin
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ictus.graph.mapping import MapGroup
     from ictus.graph.node import Node
     from ictus.graph.pipeline import Pipeline, RouteEnd
+    from ictus.graph.ports import PortType
     from ictus.graph.ref import Ref
 
 # Conductor carries an abandoned question set on `abort_route`, not in `routes:`.
@@ -58,7 +61,10 @@ is running it that is the mistake.
 
 __all__ = [
     "describe",
+    "group_condition_problems",
     "group_routing_problems",
+    "map_binding_problems",
+    "map_source_problems",
     "node_problems",
     "placeholder_problems",
     "previous_pass_problems",
@@ -74,71 +80,241 @@ def reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     this is where it gets checked: the node must exist, declare that port, and
     declare it with the type the reference claims. Structural, unlike the
     regular expression this replaced.
+
+    Resolution is by name *and* identity wherever the reference kept a source.
+    Names are only unique within one graph, so a reference carried in from
+    another one resolves here to whatever local node, input or group shares the
+    name — and every layer below agrees, because the emitted template says the
+    same word. Checking the name alone made that the one wrong reference nothing
+    could catch.
     """
-    by_id = {n.node_id: n for n in pipeline.nodes}
-    declared_inputs = {p.name: p for p in pipeline.workflow_inputs}
     problems: list[str] = []
     refs = [
         *node.prompt_refs(),
         *node.settled_refs(),
+        *node.path_refs(),
         *(r for edge in pipeline.outgoing(node) for r in edge.condition_refs()),
     ]
-    maps = {m.group_id: m for m in pipeline.maps}
     for ref in refs:
         if ref.origin is Origin.LOOP_ITEM:
-            # The item's fields were checked by `Item.ref` when the reference
-            # was written; the graph has nothing further to say about them.
+            problems.extend(_item_reference_problems(pipeline, node, ref, where))
             continue
-        if ref.source_id in maps:
-            problems.extend(_map_reference_problems(maps[ref.source_id], node, ref, where))
-            continue
-        if ref.from_input:
-            param = declared_inputs.get(ref.source_id)
-            if param is None:
-                known = ", ".join(sorted(declared_inputs)) or "(none)"
-                problems.append(
-                    f"{where}: {describe(node)} references pipeline input "
-                    f"{ref.source_id!r}, which is not declared; declared: {known}"
-                )
-            elif param.port_type is not ref.port_type:
-                problems.append(
-                    f"{where}: {describe(node)} reads input {ref.source_id!r} as "
-                    f"{ref.port_type.value} but it is declared {param.port_type.value}"
-                )
-            continue
-        target = by_id.get(ref.source_id)
-        if target is None:
-            known = ", ".join(sorted(by_id)) or "(none)"
-            problems.append(
-                f"{where}: {describe(node)} references unknown node "
-                f"{ref.source_id!r}; nodes in this pipeline: {known}"
-            )
-            continue
-        declared = {p.name: p for p in target.outputs}
-        port = declared.get(ref.port)
-        if port is None:
-            known = ", ".join(sorted(declared)) or "(none declared)"
-            problems.append(
-                f"{where}: {describe(node)} references {ref.source_id}.{ref.port}, "
-                f"which {ref.source_id!r} does not declare; declared outputs: {known}"
-            )
-        elif port.port_type is not ref.port_type:
-            problems.append(
-                f"{where}: {describe(node)} reads {ref.source_id}.{ref.port} as "
-                f"{ref.port_type.value} but it is declared {port.port_type.value}"
-            )
+        problems.extend(_resolution_problems(pipeline, describe(node), ref, where))
     return problems
 
 
-def _map_reference_problems(group: MapGroup, node: Node, ref: Ref, where: str) -> list[str]:
+def _resolution_problems(pipeline: Pipeline, subject: str, ref: Ref, where: str) -> list[str]:
+    """Resolve one reference to a node, input or map group of this pipeline.
+
+    ``subject`` is whatever is doing the reading, as a violation names it. It is
+    a string rather than a node because not every reader is one: a map group's
+    source is a reference too, and it went unchecked for exactly that reason.
+    """
+    # Origin before name. An input and a map group live in different address
+    # spaces — `workflow.input.items` and a group called `items` coexist — so
+    # looking the name up as a group first resolved an input to whichever group
+    # shared it, and failed an identity check that was never about that group.
+    if ref.from_input:
+        declared_inputs = {p.name: p for p in pipeline.workflow_inputs}
+        param = declared_inputs.get(ref.source_id)
+        if param is None:
+            known = ", ".join(sorted(declared_inputs)) or "(none)"
+            return [
+                f"{where}: {subject} references pipeline input "
+                f"{ref.source_id!r}, which is not declared; declared: {known}"
+            ]
+        if _is_elsewhere(ref, param):
+            return [
+                f"{where}: {subject} reads input {ref.source_id!r}, but that is "
+                "a different pipeline input from the one this reference was built from. "
+                f"Every workflow addresses its own parameters, so this reads {where}'s "
+                f"{ref.source_id!r} and not the one it was written against. Reference "
+                "the input declared here, and pass the value in across the boundary."
+            ]
+        if param.port_type is not ref.port_type:
+            return [
+                f"{where}: {subject} reads input {ref.source_id!r} as "
+                f"{ref.port_type.value} but it is declared {param.port_type.value}"
+            ]
+        return []
+    maps = {m.group_id: m for m in pipeline.maps}
+    if ref.source_id in maps:
+        group = maps[ref.source_id]
+        if _is_elsewhere(ref, group):
+            return [
+                f"{where}: {subject} reads {ref.source_id}.{ref.port}, but "
+                f"{ref.source_id!r} here is a different map group from the one this "
+                "reference was built from, so it would read this one's aggregate "
+                "instead. Reference the group this pipeline declares."
+            ]
+        return _map_reference_problems(group, subject, ref, where)
+    by_id = {n.node_id: n for n in pipeline.nodes}
+    target = by_id.get(ref.source_id)
+    if target is None:
+        known = ", ".join(sorted(by_id)) or "(none)"
+        return [
+            f"{where}: {subject} references unknown node "
+            f"{ref.source_id!r}; nodes in this pipeline: {known}"
+        ]
+    if _is_elsewhere(ref, target):
+        return [
+            f"{where}: {subject} references {ref.source_id}.{ref.port}, but "
+            f"{ref.source_id!r} here is a different node from the one this reference "
+            f"was built from, so it would read {describe(target)} instead. "
+            "Reference the node this pipeline holds, or wire the value in as an input."
+        ]
+    mapped = pipeline.map_of(target)
+    if mapped is not None:
+        # `feed` refuses this where it is written; a reference cannot be, because
+        # it is made before the node it names is placed in a group.
+        return [
+            f"{where}: {subject} references {ref.source_id}.{ref.port}, but "
+            f"{ref.source_id!r} is the body of map group {mapped.group_id!r}. It runs "
+            "once per item and nothing is stored under its own name — the engine keeps "
+            f"only the aggregate — so this resolves to nothing. Read "
+            f"{mapped.group_id}.outputs instead."
+        ]
+    declared = {p.name: p for p in target.outputs}
+    port = declared.get(ref.port)
+    if port is None:
+        known = ", ".join(sorted(declared)) or "(none declared)"
+        return [
+            f"{where}: {subject} references {ref.source_id}.{ref.port}, "
+            f"which {ref.source_id!r} does not declare; declared outputs: {known}"
+        ]
+    if port.port_type is not ref.port_type:
+        return [
+            f"{where}: {subject} reads {ref.source_id}.{ref.port} as "
+            f"{ref.port_type.value} but it is declared {port.port_type.value}"
+        ]
+    return []
+
+
+def map_source_problems(pipeline: Pipeline, group: MapGroup, where: str) -> list[str]:
+    """Resolve the array a map group iterates, and the shape its items are read at.
+
+    Two failures, and the second one only exists because the first is checked.
+    The source is a reference like any other and resolves the same way — but a
+    map group is not a node, so ``reference_problems`` never saw it, and a
+    foreign ``split.pieces`` compiled against whichever local ``split`` shared
+    the name. Past that, the *item fields* are checked against the reference's
+    ``element``, not the port's; a reference that claims a shape the array does
+    not have passes composition with fields no item carries.
+    """
+    source = group.source
+    if source.origin is Origin.LOOP_ITEM:
+        return []  # refused where the group was written; nothing further resolves
+    subject = f"map group {group.group_id!r}"
+    problems = _resolution_problems(pipeline, subject, source, where)
+    if problems:
+        return problems
+    produced = _produced_element(pipeline, source)
+    if dict(produced or {}) != dict(source.element or {}):
+        return [
+            f"{where}: {subject} reads each item of {source.source_id}.{source.port} as "
+            f"{_shape(source.element)}, but that array's element shape is "
+            f"{_shape(produced)}. The item fields are checked against the reference, so "
+            "they now name fields no item carries. Reference the port itself."
+        ]
+    return []
+
+
+def _produced_element(pipeline: Pipeline, ref: Ref) -> Mapping[str, PortType] | None:
+    """The element shape of the array ``ref`` resolves to, once it has resolved.
+
+    A workflow input declares none — its items are whatever the caller passed.
+    """
+    if ref.from_input:
+        return None
+    group = pipeline.map_named(ref.source_id)
+    if group is not None:
+        return group.get_output(ref.port).element
+    return (
+        next(n for n in pipeline.nodes if n.node_id == ref.source_id).get_output(ref.port).element
+    )
+
+
+def _shape(element: Mapping[str, PortType] | None) -> str:
+    if not element:
+        return "(no declared fields)"
+    return "{" + ", ".join(f"{name}: {kind.value}" for name, kind in sorted(element.items())) + "}"
+
+
+def _item_reference_problems(pipeline: Pipeline, node: Node, ref: Ref, where: str) -> list[str]:
+    """A read of a loop variable, checked against the group that injects one.
+
+    ``Item.ref`` checked the field when the reference was written, which settles
+    everything except *which* item it came from — and the loop variable is
+    almost always called ``item`` or ``piece``, so a graph with two fan-outs has
+    two of them with the same name and identical fields. The wrong one renders
+    the right word against the wrong array, on every iteration.
+    """
+    group = pipeline.map_of(node)
+    if group is None:
+        return [
+            f"{where}: {describe(node)} reads loop item {ref.source_id!r}, but it is not the "
+            "body of a map group, so nothing injects one and the template fails at run time "
+            f"with \"'{ref.source_id}' is undefined\". Only a map body reads an item; a "
+            "stage run per item receives its values as declared parameters."
+        ]
+    if _is_elsewhere(ref, group.item):
+        return [
+            f"{where}: {describe(node)} reads a field of a different loop item that is also "
+            f"called {ref.source_id!r}. Items are compared by identity, so the group would "
+            "inject its own and this reference means the other one. Use the Item this group "
+            "iterates with."
+        ]
+    return []
+
+
+def map_binding_problems(pipeline: Pipeline, group: MapGroup, where: str) -> list[str]:
+    """Prove every parameter of a mapped body actually receives a value.
+
+    Nothing else does. ``node_problems`` skips a map body entirely — it is not a
+    step of the graph — and ``stage_contract_problems`` compares the two
+    *contracts*, which a stage placed as a map body satisfies while receiving
+    nothing, because its values come from two places and neither is a port
+    declaration. A required parameter nothing supplies is an error inside the
+    child, once per item, after the array has been paid for.
+    """
+    body = group.body
+    wired = pipeline.wired_inputs(body)
+    both = sorted(set(group.bind) & wired)
+    problems = [
+        f"{where}: map group {group.group_id!r} runs {body.node_id!r} once per item, and its "
+        f"parameter {name!r} is supplied twice — bound to a field of the item, and wired by "
+        "an edge. Only one of them reaches the child; drop whichever is not meant."
+        for name in both
+    ]
+    supplied = set(group.bind) | wired
+    problems.extend(
+        f"{where}: map group {group.group_id!r} runs {body.node_id!r} once per item, but "
+        f"nothing supplies its required parameter {port.name!r}. Bind it to a field of the "
+        "item, or wire a shared value with feed() or connect_input()."
+        for port in body.inputs
+        if not port.optional and port.name not in supplied
+    )
+    return problems
+
+
+def _is_elsewhere(ref: Ref, found: object) -> bool:
+    """Whether ``ref`` names ``found`` but was built from something else.
+
+    ``ref_to`` leaves no source — a forward reference has nothing to point at —
+    so a missing one is not a mismatch, only an unchecked name.
+    """
+    return ref.source is not None and ref.source is not found
+
+
+def _map_reference_problems(group: MapGroup, subject: str, ref: Ref, where: str) -> list[str]:
     """A reference to a map group's aggregate — outputs, errors or count."""
     try:
         port = group.get_output(ref.port)
     except CompositionError as exc:
-        return [f"{where}: {describe(node)} {exc}"]
+        return [f"{where}: {subject} {exc}"]
     if port.port_type is not ref.port_type:
         return [
-            f"{where}: {describe(node)} reads {group.group_id}.{ref.port} as "
+            f"{where}: {subject} reads {group.group_id}.{ref.port} as "
             f"{ref.port_type.value} but a map group produces {port.port_type.value}"
         ]
     return []
@@ -164,6 +340,29 @@ def group_routing_problems(pipeline: Pipeline, group: RouteEnd, where: str) -> l
             "execution has nowhere to go. Add an unconditional route (or route to END)."
         ]
     return []
+
+
+def group_condition_problems(pipeline: Pipeline, group: RouteEnd, where: str) -> list[str]:
+    """Resolve what a group's route conditions read, as a step's are resolved.
+
+    ``reference_problems`` walks a *node's* outgoing edges, and a parallel or map
+    group is not a node, so its conditions were never resolved at all. A
+    condition built from another graph's ``flag`` beside a local ``flag`` linted
+    clean, and on a live run the group took whichever branch the local one chose.
+    """
+    subject = f"group {group.node_id!r}"
+    problems: list[str] = []
+    for edge in pipeline.outgoing(group):
+        for ref in edge.condition_refs():
+            if ref.origin is Origin.LOOP_ITEM:
+                problems.append(
+                    f"{where}: {subject} routes on loop item {ref.source_id!r}, but a group "
+                    "routes once, after every item has finished, where no item exists — the "
+                    "condition fails at run time. Route on the group's aggregate instead."
+                )
+                continue
+            problems.extend(_resolution_problems(pipeline, subject, ref, where))
+    return problems
 
 
 def placeholder_problems(pipeline: Pipeline, where: str) -> list[str]:
@@ -245,8 +444,7 @@ def node_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
 
     problems.extend(reference_problems(pipeline, node, where))
 
-    fed = {d.connection.target.name for d in pipeline.deps_into(node)}
-    fed |= {port.name for _, target, port in pipeline.input_bindings if target is node}
+    fed = pipeline.wired_inputs(node)
     problems.extend(
         f"{where}: {describe(node)} declares required input {port.name!r} "
         "but nothing is wired to it"

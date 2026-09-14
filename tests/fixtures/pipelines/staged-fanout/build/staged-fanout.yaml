@@ -28,7 +28,7 @@ agents:
     input:
       - workflow.input.brief
     input_mapping:
-      brief: '{{ workflow.input.brief }}'
+      brief: '{{ workflow.input.brief | tojson }}'
     routes:
       - to: workers
         when: "{{ split.output.outcome == 'found' }}"

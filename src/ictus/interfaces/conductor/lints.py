@@ -1,9 +1,10 @@
 """Rules that are true because of how Conductor runs, not how graphs are shaped.
 
-Each was checked against the installed validator and confirmed to pass it, so
-none of them duplicates ``conductor validate``. They live here rather than in
-``ictus.lint`` because every one of them is a claim about Conductor's runtime:
-its template dialect, its strict-undefined rendering, its output wrapper.
+Supplementary rules catch failures the installed validator misses: template
+fields, strict-undefined rendering and output wrappers. Backend restrictions on
+what may run inside a map or a parallel group also live here, so lint can report
+them before emission without teaching the engine-neutral graph Conductor's
+reserved names or its supported member kinds.
 """
 
 from __future__ import annotations
@@ -14,6 +15,9 @@ from typing import TYPE_CHECKING
 
 from ictus.graph.node import AgentNode, GateNode, Node, TerminateNode
 from ictus.graph.ref import Origin
+from ictus.interfaces.conductor.mapping import mapping_problems
+from ictus.interfaces.conductor.parallel import parallel_problems
+from ictus.interfaces.conductor.status import trusted_status_problems
 from ictus.interfaces.conductor.templates import output_path
 from ictus.interfaces.conductor.workflow import DEFAULT_PROVIDER
 from ictus.lint.rules import describe
@@ -54,6 +58,9 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
 
     problems.extend(_instruction_problems(pipeline, where))
     problems.extend(_context_trim_problems(pipeline, where))
+    problems.extend(mapping_problems(pipeline))
+    problems.extend(parallel_problems(pipeline))
+    problems.extend(trusted_status_problems(pipeline))
     for node in pipeline.nodes:
         problems.extend(_deferred_reference_problems(pipeline, node, where))
         problems.extend(_tool_allowlist_problems(node, where))

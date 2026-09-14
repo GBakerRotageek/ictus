@@ -16,12 +16,22 @@ from ictus import (
     END,
     AgentNode,
     CompositionError,
+    ComputeNode,
+    EmitError,
+    GateChoice,
+    GateNode,
     InputPort,
     McpServer,
     McpTransport,
+    Node,
     OutputPort,
     Pipeline,
     PortType,
+    Question,
+    QuestionsNode,
+    ScriptNode,
+    Stage,
+    WaitNode,
     tpl,
 )
 from ictus.graph.pipeline import FailureMode
@@ -441,3 +451,63 @@ def test_a_member_cannot_read_a_sibling() -> None:
     p.parallel("both", [a, b])
     with pytest.raises(CompositionError, match="both run inside parallel group"):
         p.feed(a, "detail", b, "from_a")
+
+
+class TestWhoMayRunInAGroup:
+    """Which kinds may be members is one engine's rule, so one engine reports it.
+
+    The graph layer used to hold Conductor's list, which made "a group holds
+    model calls and computations" read as a fact about graphs rather than about
+    the target. Same treatment as map bodies: the backend lints it and refuses
+    to emit it, and `graph/` stops knowing.
+    """
+
+    @staticmethod
+    def _with(member: Node) -> Pipeline:
+        p = Pipeline(pipeline_id="g")
+        first = p.add(_checker("a"))
+        p.add(member)
+        group = p.parallel("panel", [first, member])
+        p.set_entry(group)
+        p.route(group, END)
+        return p
+
+    @staticmethod
+    def _offenders() -> list[Node]:
+        return [
+            GateNode(
+                node_id="b", prompt="ok?", choices=(GateChoice("y", "Yes"), GateChoice("n", "No"))
+            ),
+            ScriptNode(node_id="b", command="true"),
+            WaitNode(node_id="b", duration=1),
+            QuestionsNode(node_id="b", questions=(Question(id="answer", text="Which?"),)),
+            succeed(node_id="b", reason="done"),
+        ]
+
+    @pytest.mark.parametrize("member", _offenders())
+    def test_only_the_backend_restricts_member_kinds(self, member: Node) -> None:
+        p = self._with(member)
+        assert lint_pipeline(p) == []
+        assert any("cannot run inside" in problem for problem in conductor.lint(p))
+        with pytest.raises(EmitError, match="cannot run inside"):
+            conductor.compile(p)
+
+    def test_a_stage_is_refused_as_a_member_too(self) -> None:
+        """A sub-workflow member is the one the schema accepts and the engine rejects."""
+        stage = Stage(stage_id="child")
+        inner = stage.body.add(_checker("inner"))
+        stage.body.set_entry(inner)
+        stage.body.route(inner, END)
+        stage.body.expose_output("ok", inner, "ok")
+        p = Pipeline(pipeline_id="g")
+        first = p.add(_checker("a"))
+        host = stage.instantiate(p, node_id="b")
+        group = p.parallel("panel", [first, host])
+        p.set_entry(group)
+        p.route(group, END)
+        assert any("cannot run inside" in problem for problem in conductor.lint(p))
+
+    def test_the_supported_kinds_still_pass(self, validates: Callable[[Pipeline], None]) -> None:
+        p = self._with(ComputeNode(node_id="b", value="done"))
+        assert lint_pipeline(p, backend=conductor) == []
+        validates(p)

@@ -90,6 +90,7 @@ def test_the_outcome_vocabularies_are_stated_correctly() -> None:
     assert stdlib.UNRESOLVED == "unresolved"
     assert stdlib.HALTED == "halted"
     assert stdlib.OK == "ok"
+    assert stdlib.READY == "ready"
     assert stdlib.FAILED == "failed"
     assert stdlib.UNCLEAR == "unclear"
     assert stdlib.DONE == "done"
@@ -100,6 +101,7 @@ def test_the_outcome_vocabularies_are_stated_correctly() -> None:
         "unresolved",
         "halted",
         "ok",
+        "ready",
         "failed",
         "unclear",
         "done",
@@ -111,13 +113,17 @@ def test_the_readme_points_at_the_catalogue() -> None:
     assert "STDLIB.md" in README
 
 
-@pytest.mark.parametrize("gone", ["revise_loop", "poll_until"])
+@pytest.mark.parametrize("gone", ["revise_loop"])
 def test_deleted_constructors_are_not_offered_as_usable(gone: str) -> None:
-    """Both were replaced by `converge`; both survived in the README for a while.
+    """Replaced by `converge`, and it survived in the README for a while.
 
-    Naming them in prose is fine and useful — a reader who knew the old ones
-    needs to be told where they went. Listing them in a table of what is
-    available, or in code someone could copy, is the part that misleads.
+    Naming it in prose is fine and useful — a reader who knew the old one needs
+    to be told where it went. Listing it in a table of what is available, or in
+    code someone could copy, is the part that misleads.
+
+    `poll_until` was on this list too and has been rebuilt: same name, same
+    question, and the bound is now a value rather than the point at which the
+    run crashes.
     """
     assert not hasattr(stdlib, gone)
     assert gone not in ROWS, f"STDLIB.md still offers {gone} as a constructor"

@@ -27,6 +27,7 @@ __all__ = [
     "Capabilities",
     "Document",
     "PreflightIssue",
+    "ResumePlan",
     "UnsupportedFeatureError",
     "ValidationResult",
 ]
@@ -111,6 +112,35 @@ class PreflightIssue:
     blocking: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class ResumePlan:
+    """What continuing an interrupted run will and will not do again.
+
+    Said before anything resumes, because an engine resumes at the granularity
+    it checkpoints at, and that is coarser than a run looks. Whatever was in
+    flight starts over; a step that contains other steps starts over from its
+    first; and a command that had already changed something does it again.
+    """
+
+    step: str
+    """Where execution picks up."""
+    completed: tuple[str, ...]
+    """Steps that finished before the interruption, in order, one per execution."""
+    reruns: tuple[str, ...]
+    """Steps that run from their start, qualified by the stage that holds them."""
+    scripts: tuple[str, ...]
+    """The commands among ``reruns``: anything they did before the interruption,
+    they do again."""
+    cold_sessions: tuple[str, ...]
+    """Steps that remember a conversation the engine cannot carry across a resume."""
+    saved_at: str
+    reason: str | None
+    """Why the run stopped, when it stopped on an error; ``None`` when it was
+    killed or its machine went down, which no error records."""
+    source: Path
+    """The saved state this plan was read from, and the one resumed."""
+
+
 class UnsupportedFeatureError(Exception):
     """Raised when a graph needs something the chosen backend cannot express."""
 
@@ -164,6 +194,7 @@ class Backend(Protocol):
         dashboard: bool,
         workspace_instructions: bool = True,
         working_dir: Path | None = None,
+        state_dir: Path | None = None,
     ) -> int:
         """Execute a compiled document in ``working_dir``. Returns the exit code.
 
@@ -171,5 +202,30 @@ class Backend(Protocol):
         own instruction files. What an engine discovers, and whether it can at
         all, is its business; that a step should arrive knowing what the project
         says about itself is not.
+
+        ``state_dir`` is where the engine keeps what it needs to resume and trace
+        this run, instead of wherever it would choose. It must survive the
+        interruption it exists for.
         """
+        ...
+
+    def can_resume(self, path: Path, *, state_dir: Path) -> bool:
+        """Whether ``state_dir`` holds a point this run could continue from."""
+        ...
+
+    def resume_plan(self, pipeline: Pipeline, path: Path, *, state_dir: Path) -> ResumePlan | None:
+        """What resuming the run kept in ``state_dir`` would repeat, or ``None``."""
+        ...
+
+    def resume(
+        self,
+        plan: ResumePlan,
+        *,
+        state_dir: Path,
+        dashboard: bool,
+        background: bool = False,
+        working_dir: Path,
+        log_file: str | None = None,
+    ) -> int:
+        """Continue the run ``plan`` describes, from exactly the state it was read from."""
         ...

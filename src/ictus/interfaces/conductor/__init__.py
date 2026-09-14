@@ -13,19 +13,28 @@ with a name.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
-from ictus.errors import IctusError
+from ictus.errors import EmitError, IctusError
 from ictus.graph.node import NODE_KINDS
-from ictus.interfaces import Capabilities, Document, PreflightIssue, ValidationResult
+from ictus.interfaces import (
+    Capabilities,
+    Document,
+    PreflightIssue,
+    ResumePlan,
+    ValidationResult,
+)
 from ictus.interfaces.conductor.agents import agent_entry
 from ictus.interfaces.conductor.lints import conductor_problems
-from ictus.interfaces.conductor.mapping import for_each_block
+from ictus.interfaces.conductor.mapping import for_each_block, mapping_problems
 from ictus.interfaces.conductor.mcp import preflight_issues
-from ictus.interfaces.conductor.parallel import parallel_block
+from ictus.interfaces.conductor.parallel import parallel_block, parallel_problems
+from ictus.interfaces.conductor.resume import checkpoint_dir, resume_plan
 from ictus.interfaces.conductor.serialize import dump_yaml
+from ictus.interfaces.conductor.status import reporter_requirement
 from ictus.interfaces.conductor.templates import output_block
 from ictus.interfaces.conductor.workflow import NOTHING_INHERITED, Inherited, workflow_block
 from ictus.interfaces.environment import executable_issues
@@ -75,6 +84,14 @@ class ConductorBackend:
         Public because the backend's own tests assert on the structure; the
         ``Backend`` protocol only promises rendered text.
         """
+        # Before anything renders. These are the two constructs whose *members*
+        # this engine restricts, and a member it will not schedule is a more
+        # fundamental defect than whatever the renderer would notice about that
+        # member first — an unbranched gate inside a group reports as a missing
+        # route, and adding one does not help, because a member may not have any.
+        refused = [*parallel_problems(pipeline), *mapping_problems(pipeline)]
+        if refused:
+            raise EmitError("\n".join(refused))
         # A map group's body lives inline under `for_each:`; emitting it here as
         # well would leave a step Conductor schedules once on its own.
         # An unset system prompt is an *empty* one to the engine, not a default
@@ -106,16 +123,40 @@ class ConductorBackend:
         because ``type: workflow`` references a sibling rather than inlining a
         graph. A stage placed twice in one parent is two nodes over one file.
         """
-        out = [
-            Document(f"{pipeline.pipeline_id}.yaml", dump_yaml(self.document(pipeline, inherited)))
-        ]
-        seen = {out[0].filename}
-        below = inherited.under(pipeline)
-        for child in pipeline.children.values():
-            for rendered in self.compile(child, below):
-                if rendered.filename not in seen:
-                    seen.add(rendered.filename)
-                    out.append(rendered)
+        out: list[Document] = []
+        files: dict[str, tuple[Pipeline, Document, str]] = {}
+        seen: set[tuple[Pipeline, Inherited]] = set()
+
+        def visit(graph: Pipeline, settings: Inherited, path: str) -> None:
+            filename = f"{graph.pipeline_id}.yaml"
+            previous = files.get(filename)
+            if previous is not None and previous[0] is not graph:
+                raise EmitError(
+                    f"workflow {filename!r} would contain distinct pipeline bodies at "
+                    f"{previous[2]!r} and {path!r}; give each stage a unique stage_id "
+                    "or reuse the same Stage instance"
+                )
+            below = settings.under(graph)
+            if (graph, below) in seen:
+                return
+            rendered = Document(filename, dump_yaml(self.document(graph, settings)))
+            if previous is not None:
+                if previous[1] != rendered:
+                    raise EmitError(
+                        f"workflow {filename!r} has conflicting inherited settings at "
+                        f"{previous[2]!r} and {path!r}; set the shared stage's settings "
+                        "explicitly or give each configuration its own stage_id"
+                    )
+            else:
+                files[filename] = (graph, rendered, path)
+                out.append(rendered)
+            seen.add((graph, below))
+            # Equal documents can still pass different system prompts to their
+            # children. Deduplicate traversal by effective settings, not filename.
+            for host, child in graph.children.items():
+                visit(child, below, f"{path}/{host}")
+
+        visit(pipeline, inherited, pipeline.pipeline_id)
         return out
 
     def lint(self, pipeline: Pipeline) -> list[str]:
@@ -134,8 +175,11 @@ class ConductorBackend:
         preflight is one question, and asking it in two places would let one of
         them be forgotten.
         """
+        reporter = reporter_requirement(pipeline)
         return [
-            *executable_issues(pipeline, probe=probe),
+            *executable_issues(
+                pipeline, probe=probe, implied=() if reporter is None else (reporter,)
+            ),
             *preflight_issues(pipeline, probe=probe),
         ]
 
@@ -166,6 +210,7 @@ class ConductorBackend:
         workspace_instructions: bool = True,
         working_dir: Path | None = None,
         log_file: str | None = None,
+        state_dir: Path | None = None,
     ) -> int:
         """Run a compiled workflow, serving the dashboard by default.
 
@@ -210,7 +255,45 @@ class ConductorBackend:
             command.append("--web-bg")
         elif dashboard:
             command.append("--web")
-        return subprocess.run(command, check=False, cwd=working_dir).returncode
+        return subprocess.run(
+            command, check=False, cwd=working_dir, env=_engine_env(state_dir)
+        ).returncode
+
+    def can_resume(self, path: Path, *, state_dir: Path) -> bool:
+        """Whether a checkpoint for ``path`` is waiting in ``state_dir``."""
+        return any(checkpoint_dir(state_dir).glob(f"{path.stem}-*.json"))
+
+    def resume_plan(self, pipeline: Pipeline, path: Path, *, state_dir: Path) -> ResumePlan | None:
+        """What continuing the run in ``state_dir`` will repeat; see ``resume.py``."""
+        return resume_plan(pipeline, path, state_dir)
+
+    def resume(
+        self,
+        plan: ResumePlan,
+        *,
+        state_dir: Path,
+        dashboard: bool,
+        background: bool = False,
+        working_dir: Path,
+        log_file: str | None = None,
+    ) -> int:
+        """Continue from the checkpoint the plan was read from, not the newest one.
+
+        ``--from`` rather than the workflow path: Conductor would otherwise pick
+        its own newest checkpoint, and the plan the person agreed to was read
+        from this one. Inputs and the workspace-instructions preamble are in the
+        checkpoint; the working directory is not, so it is passed back here.
+        """
+        command = [self._binary(), "resume", "--from", str(plan.source)]
+        if log_file is not None:
+            command += ["--log-file", log_file]
+        if background:
+            command.append("--web-bg")
+        elif dashboard:
+            command.append("--web")
+        return subprocess.run(
+            command, check=False, cwd=working_dir, env=_engine_env(state_dir)
+        ).returncode
 
     def plan(self, path: Path, *, working_dir: Path | None = None) -> int:
         """Print the engine's execution plan for a compiled workflow, running nothing.
@@ -234,6 +317,19 @@ class ConductorBackend:
                 "what it compiles without it"
             )
         return found
+
+
+def _engine_env(state_dir: Path | None) -> dict[str, str] | None:
+    """The environment that puts the engine's state in ``state_dir``.
+
+    ``TMPDIR`` is the only lever: Conductor writes checkpoints and event logs
+    under ``tempfile.gettempdir()`` and takes no option for either. Commands the
+    run executes inherit it too, so their temporary files land beside the run's
+    state rather than in ``/tmp`` — kept with the run, and removed with it.
+    """
+    if state_dir is None:
+        return None
+    return {**os.environ, "TMPDIR": str(state_dir)}
 
 
 conductor = ConductorBackend()
