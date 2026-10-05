@@ -307,6 +307,7 @@ class Pipeline:
         self._mcp: dict[str, McpServer] = {}
         self._executables: dict[str, Executable] = {}
         self._notifiers: dict[str, Notifier] = {}
+        self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
     # -- construction ----------------------------------------------------
@@ -531,6 +532,33 @@ class Pipeline:
             for server in child.all_mcp_servers():
                 seen.setdefault(server.name, server)
         return tuple(seen.values())
+
+    def before_start_gate[N: Node](self, node: N) -> N:
+        """Run ``node`` first, ahead of the confirmation gate.
+
+        The start gate is placed at the entry point when a pipeline is loaded,
+        which means nothing can ordinarily precede it — and the one thing most
+        worth saying out loud is that a run has parked on it and is waiting for
+        somebody. A pipeline whose job is to report had no way to report that.
+
+        Wire nothing: the node is placed by whoever applies the start policy, so
+        it is correct whether the gate is on or off. Its outputs are readable
+        like any other node's, which is how an announcement that opens a thread
+        can have the rest of the run reply underneath it.
+        """
+        if self._before_start is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already runs {self._before_start.node_id!r} "
+                "before the start gate; only one thing can go first"
+            )
+        self.add(node)
+        self._before_start = node
+        return node
+
+    @property
+    def start_herald(self) -> Node | None:
+        """What runs before the start gate, if anything was asked to."""
+        return self._before_start
 
     def require_notifier(self, target: Notifier) -> Notifier:
         """Declare somewhere this run's progress is reported to.

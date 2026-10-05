@@ -14,7 +14,7 @@ import typer
 
 from ictus.config import CONFIG_FILE, MINIMAL, PipelineConfig, read_config
 from ictus.errors import IctusError
-from ictus.gate import add_start_gate
+from ictus.gate import add_start_gate, attach_start_herald
 from ictus.graph.pipeline import Pipeline
 from ictus.graph.signals import RunSignal
 from ictus.interfaces.conductor import conductor
@@ -113,6 +113,8 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
             settings.apply(pipeline, where=str(folder.config_file))
             if settings.start_gate:
                 add_start_gate(pipeline)
+            else:
+                attach_start_herald(pipeline)
     except IctusError as exc:
         _fail(str(exc))
     return pipelines
