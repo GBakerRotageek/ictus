@@ -7,6 +7,9 @@ __pycache__/
 output/
 logs/
 *.jsonl
+# Recorded engine event streams, committed on purpose: they are what the
+# event-subscription tests assert against, and re-recording one needs a live run.
+!tests/fixtures/*.jsonl
 .conductor/
 checkpoints/
 .env

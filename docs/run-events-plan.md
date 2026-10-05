@@ -2,22 +2,37 @@
 
 Implements [run-events.md](run-events.md). Phases ship in order; each is useful alone.
 
-## Phase 0 — spike
+## Phase 0 — spike — **done**
 
-Nothing below is written until the loop is proven by hand against a live run.
-The source has been read, never run.
+Proven against two live runs of a gates-and-one-`set`-step pipeline, which emits
+no `type: agent` at all and so cost nothing. Fixtures:
+`tests/fixtures/run-events-{approved,rejected}.jsonl`.
 
-- Install `uv`, `uv tool install conductor-cli`, restore a pipeline folder.
-- `ictus run -b`, read `port` and `event_log_path` from the fleet run record.
-- Resolve the token: `~/.conductor/runs/dashboard-<port>.token`, else
-  `CONDUCTOR_GATE_TOKEN`.
-- Connect `/ws` presenting the token as an `Authorization` header or `?token=`
-  query param, with a `Host` the `OriginHostGuard` accepts.
-- Observe `gate_presented`. Send `gate_response` carrying its `agent_name` and
-  `prompt_id`. Confirm the gate resolves and `gate_resolved` arrives.
-- Disconnect on `workflow_completed`. Confirm the process exits ~30s later.
+Confirmed: run discovery from the fleet record, token from the token file,
+`Authorization: Bearer` on the handshake, both gates answered over the socket,
+free text round-tripped, disconnect on `workflow_completed`, process gone 31.5s
+later with the port closed.
 
-Output: a throwaway script and a recorded event log, kept as a test fixture.
+What it corrected in [run-events.md](run-events.md):
+
+- The socket **replays nothing on connect**. A subscriber attaching to a run
+  already parked at a gate waits forever. Connect, then seed `GET /api/state`,
+  then dedupe on `(type, timestamp)`.
+- Observation needs **no token** — `/api/state`, `/api/gate-status`, `/api/info`
+  and `/api/logs` are Origin/Host only. Only answering needs a credential.
+- A human gate's `gate_presented` carries **no `prompt_id`**; that is the
+  questions variant. `agent_name` is the match that matters.
+- The response field is **`selected_value`**, not `value`. `additional_input` is
+  sent as a string and read back keyed by `prompt_for`.
+- The run record is **archived to `terminal/`** on reap, so globbing for live
+  runs needs no staleness filter.
+- `route_taken` exists and was missing from the vocabulary.
+- Socket and JSONL carry byte-identical sequences.
+
+Unrelated defect found: an empty frontmatter pair (`---\n---\n`) fails
+`_FRONTMATTER` in `runspec.py`, which needs a newline before the closing `---`,
+and the run is refused as "has body text". Not fixed here; needs its own failing
+test first.
 
 ## Phase 1 — declaration
 
