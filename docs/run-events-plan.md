@@ -76,7 +76,9 @@ that exits.
 boundary is the engine, this one is the audience.
 
 - `webhook.py` first. HTTP POST via `urllib.request`. No dependency.
-- `slack.py` is a webhook URL plus payload shape. No Slack SDK for outbound.
+- `slack.py` is a webhook URL plus payload shape. Slack outbound — Incoming
+  Webhooks and `chat.postMessage` — is HTTPS POST and never a WebSocket, so no
+  Slack SDK is needed here.
 - One module per destination, one destination per module, as `stdlib/` does.
 - A delivery failure is logged and never raised into the watcher loop.
 
@@ -84,11 +86,37 @@ boundary is the engine, this one is the audience.
 
 Answering from Slack. Needs a Slack app; scope separately.
 
+Sent to Conductor:
+
 - `gate_response` with `agent_name` + `prompt_id` from the originating
   `gate_presented`. A mismatch is dropped by `_validate_gate_target`.
 - `dialog_message` / `dialog_decline` drive `remediate` conversations.
 - `iteration_limit_response` answers the `max_iterations` prompt.
 - Either `/ws` or `POST /api/gate-respond`; both need the token.
+
+Received from Slack — two transports, HTTP is Slack's default:
+
+- **HTTP**, an Events API request URL. Slack: "To have the highest possible
+  reliability for application connectivity, we recommend using HTTP for
+  production applications." Stateless. Needs a public HTTPS endpoint and request
+  signature verification.
+- **Socket Mode**, an outbound-initiated WebSocket. Slack recommends it for local
+  development and for apps that cannot expose an HTTP endpoint. Needs an `xapp-`
+  app-level token and no public endpoint.
+
+Socket Mode constraints:
+
+- Requires a long-lived process; a serverless timeout kills the socket.
+- 10 concurrent connections per app.
+- URLs rotate. Reconnect handling is mandatory.
+- **Events can be lost in a reconnect gap.** Load-bearing for alerting.
+- Not permitted in the Slack Marketplace. Irrelevant for an internal app.
+
+Slack's WebSocket shares nothing with Conductor's but the transport: different
+auth, different URL lifetime, and `slack_sdk` ships its own Socket Mode client
+that does not generalise. No dependency is amortised across the two.
+
+Under Socket Mode the watcher and the Slack listener are one daemon.
 
 ## Tests
 
@@ -107,9 +135,10 @@ Answering from Slack. Needs a Slack app; scope separately.
 - **WebSocket client dependency.** No stdlib WS client. `websockets` is the
   candidate. Alternative is polling `GET /api/state`, which needs no token and
   no dependency and cannot block reaping, at the cost of push and of
-  re-transferring the full history each poll. Recommend `websockets`; the
-  pin rule applies.
-- **Phase 4 transport.** Slack Socket Mode (`slack_sdk`, no public endpoint) or
-  an HTTP endpoint (public hosting, signature verification). Not needed before
-  Phase 4.
+  re-transferring the full history each poll. Phase 4 shares nothing with this
+  either way. Recommend `websockets`; the pin rule applies.
+- **Phase 4 transport.** HTTP is Slack's recommendation for production and needs
+  a public HTTPS endpoint with signature verification. Socket Mode needs neither
+  and can lose events in a reconnect gap. Decide on whether a public endpoint is
+  available, not on the ictus side. Not needed before Phase 4.
 - **Watcher supervision.** Out of scope here. systemd or equivalent.
