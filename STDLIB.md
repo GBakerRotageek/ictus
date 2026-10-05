@@ -44,39 +44,33 @@ No provider call, still 1 iteration each.
 | `constant` | One computed value | `value`, `output_type` | `value`, typed as `output_type` |
 | `bindings` | Several named values at once | `values`, `outputs` | one port per declared output |
 | `counter` | Count passes through a point, from one | — | `value: number` |
-| `announce` | Report to Slack from inside the graph | `text`, `to`, `channel`, `thread`, `answers`, `buttons`, `label`, `timeout` | `thread_ts`, `posted` |
+| `announce` | Report to an integration from inside the graph | `text`, `to`, `thread`, `answers`, `buttons`, `timeout` | `thread`, `posted` |
 | `save_text` | Write a value another step produced to a file | `text`, `to`, `append`, `working_dir` | `path: string` |
 | `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs` | whatever `outputs` declares |
 | `wait` | Pause | `seconds`, `reason` | — |
 
-`announce` reads its endpoint from the `to` environment variable, never from
-the pipeline. Being a node is the point: it is costed, routed, visible in the
-dashboard and in `ictus trace`, and a wrong endpoint is a red step rather than
-a message nobody notices never arrived. What it cannot report is anything no
-step can see — a budget tripping, the engine being killed — which is what
-`ictus watch` is for.
+Most pipelines never call `announce`. `pipeline.integrate(service)` attaches a
+destination to every gate and exit at once and wires the thread between them —
+one line to add a service, one line to remove it, and nothing about tokens or
+threads in the composition. Reach for `announce` when one point deserves one
+particular sentence.
 
-**Threading needs a bot token.** Without `channel`, `to` is a webhook URL and
-every run's messages land in the channel root together. With it, `to` is a bot
-token, the step posts through `chat.postMessage`, and it publishes `thread_ts`
-so later announcements can `thread=` it and reply underneath. A webhook accepts
-`thread_ts` but never returns the `ts` of what it posted, so there is no parent
-to reply under — which is why the two are not interchangeable.
+`to` is an `Integration`, built by a constructor in `ictus.notify` —
+`slack_channel` or `slack_webhook` today. Nothing in `graph/` or `stdlib/` knows
+which service it is: the integration carries an opaque program that sends one
+report, and a second destination is a new module under `notify` and no change
+anywhere else. `test_no_service_is_named_above_the_notify_boundary` is what
+keeps that true.
 
-The first message of a run carries `label` and the engine's `CONDUCTOR_RUN_ID`,
-so a message in a channel and a run on a machine can be matched up. Replies
-carry neither; the thread already says which run they belong to.
+A step is costed, routed, and visible in the dashboard and in `ictus trace`, and
+a wrong endpoint is a red step rather than a message nobody notices never
+arrived. What it cannot report is what no step can see — a budget tripping, the
+engine being killed — which is what `ictus watch` is for.
 
-The input a `thread=` reply needs is declared for you. The *data edge* is not —
-wire it with `feed`, and the lint refuses the graph without it.
-
-`answers=<gate>` puts that gate's choices in the message as buttons, read off
-the gate so a renamed option cannot leave a button that answers nothing. A gate
-named as a *string* must spell its `buttons` out, which is what the start gate
-needs — it does not exist until the pipeline is loaded. Each button carries the
-run, the gate and the choice, so whatever receives the click knows what to
-answer. Buttons are Block Kit and a webhook cannot carry them back, so they
-need a bot token like threading does.
+`answers=<gate>` puts that gate's choices in as buttons, read off the gate so a
+renamed option cannot leave a button that answers nothing. Buttons and threads
+both need a service that can carry an answer back; `slack_webhook` cannot, and
+says so at composition.
 
 ## Terminals
 

@@ -29,7 +29,7 @@ from ictus.interfaces.conductor.serialize import dump_yaml
 from ictus.interfaces.conductor.signals import REPORTABLE
 from ictus.interfaces.conductor.templates import output_block
 from ictus.interfaces.conductor.workflow import NOTHING_INHERITED, Inherited, workflow_block
-from ictus.interfaces.environment import executable_issues, notifier_issues
+from ictus.interfaces.environment import executable_issues, integration_issues
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -138,7 +138,7 @@ class ConductorBackend:
         """
         return [
             *executable_issues(pipeline, probe=probe),
-            *notifier_issues(pipeline),
+            *integration_issues(pipeline),
             *preflight_issues(pipeline, probe=probe),
         ]
 

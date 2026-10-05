@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.requirements import Executable
 
-__all__ = ["executable_issues", "notifier_issues"]
+__all__ = ["executable_issues", "integration_issues"]
 
 #: Long enough for a cold `--version`, short enough not to hang a launch.
 PROBE_TIMEOUT_SECONDS = 10.0
@@ -92,8 +92,8 @@ def _probe(tool: Executable, found: str) -> list[PreflightIssue]:
     ]
 
 
-def notifier_issues(pipeline: Pipeline) -> list[PreflightIssue]:
-    """Every declared notifier this machine cannot reach.
+def integration_issues(pipeline: Pipeline) -> list[PreflightIssue]:
+    """Every declared integration this machine cannot supply a credential for.
 
     Offline only, and deliberately: probing would mean posting something to find
     out, and a notifier's endpoint is somewhere people read. A preflight that
@@ -101,17 +101,17 @@ def notifier_issues(pipeline: Pipeline) -> list[PreflightIssue]:
     turned off, and then the real notification would be ignored with it.
     """
     issues: list[PreflightIssue] = []
-    for target in pipeline.all_notifiers():
+    for service in pipeline.all_integrations():
         issues.extend(
             PreflightIssue(
-                requirement=f"notify:{target.name}",
+                requirement=f"integrate:{service.name}",
                 problem=(
-                    f"${var.name} is not set, so {target.name!r} has nowhere to report "
-                    f"({target.purpose})"
+                    f"${var.name} is not set, so {service.name!r} cannot be reached "
+                    f"({service.purpose})"
                 ),
-                remedy=target.setup_hint or f"export {var.name}=... before the run",
+                remedy=service.setup_hint or f"export {var.name}=... before the run",
             )
-            for var in target.required_env
+            for var in service.required_env
             if not os.environ.get(var.name)
         )
     return issues

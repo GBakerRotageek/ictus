@@ -1,4 +1,4 @@
-"""Delivery: what a report says, where it goes, and what it must never leak."""
+"""Integrations: the air gap, what a report says, and what it must never leak."""
 
 from __future__ import annotations
 
@@ -7,25 +7,25 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
-from ictus import EnvVar, Notifier, NotifierKind, RunSignal
+from ictus import EnvVar, Integration, RunSignal
 from ictus.errors import CompositionError
-from ictus.graph.node import GateNode, NodeKind
+from ictus.graph.node import NodeKind
 from ictus.interfaces import SignalEvent
-from ictus.notify import Delivered, DeliveryError, body_for, deliver, endpoint_for
-from ictus.notify.slack import HEADLINE, message
-from ictus.notify.webhook import post
+from ictus.notify import Delivered, deliver, send, summarise
+from ictus.notify.slack import slack_channel, slack_webhook
 from ictus.stdlib import announce, approval_gate
 from ictus.stdlib.steps.announce import THREAD_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 SECRET = "/services/T000/B000/sup3rs3cr3t"
+SRC = Path(__file__).resolve().parent.parent / "src" / "ictus"
 
 
 def _event(signal: RunSignal = RunSignal.DECISION_NEEDED, **data: object) -> SignalEvent:
@@ -39,15 +39,196 @@ def _event(signal: RunSignal = RunSignal.DECISION_NEEDED, **data: object) -> Sig
     )
 
 
-def _notifier(**kwargs: object) -> Notifier:
+def _hook(**over: object) -> Integration:
     fields: dict[str, object] = {
-        "name": "slack",
-        "purpose": "Tell the team",
-        "signals": (RunSignal.DECISION_NEEDED,),
-        "env": (EnvVar("HOOK_URL", "where to post"),),
+        "url": EnvVar("HOOK_URL", "where to post"),
+        "reports": (RunSignal.DECISION_NEEDED,),
     }
-    fields.update(kwargs)
-    return Notifier(**fields)  # type: ignore[arg-type]
+    fields.update(over)
+    return slack_webhook(**fields)  # type: ignore[arg-type]
+
+
+def _channel(**over: object) -> Integration:
+    fields: dict[str, object] = {
+        "token": EnvVar("TEST_TOKEN", "a bot token"),
+        "channel": EnvVar("TEST_CHANNEL", "a channel id"),
+    }
+    fields.update(over)
+    return slack_channel(**fields)  # type: ignore[arg-type]
+
+
+# --- the air gap -------------------------------------------------------------
+
+VENDOR = ("slack", "thread_ts", "chat.postmessage", "xoxb", "block kit")
+
+
+@pytest.mark.parametrize("package", ["graph", "stdlib", "lint"])
+def test_no_service_is_named_above_the_notify_boundary(package: str) -> None:
+    """The rule `interfaces/conductor` has for engines, one axis over.
+
+    A pipeline declares an integration and attaches it; which service that is
+    must be answerable in one package. Prose saying "this does not know Slack"
+    is allowed — naming the thing being excluded is not coupling to it.
+    """
+    offending: list[str] = []
+    for path in (SRC / package).rglob("*.py"):
+        for name, line in _code_of(path):
+            if any(word in name.lower() for word in VENDOR):
+                offending.append(f"{path.relative_to(SRC)}:{line}: {name}")
+    assert not offending, "a service's spelling above notify/:\n" + "\n".join(offending)
+
+
+def _code_of(path: Path) -> list[tuple[str, int]]:
+    """Every token that is code, with its line. Comments and strings dropped.
+
+    Tokenising rather than reading lines: a docstring saying "this knows no
+    Slack" is documentation of the boundary, not a breach of it, and no
+    line-by-line heuristic tells the two apart reliably.
+    """
+    import io
+    import tokenize
+
+    kept: list[tuple[str, int]] = []
+    with path.open("rb") as handle:
+        for token in tokenize.tokenize(io.BytesIO(handle.read()).readline):
+            if token.type in (tokenize.COMMENT, tokenize.STRING, tokenize.NL, tokenize.NEWLINE):
+                continue
+            if token.string.strip():
+                kept.append((token.string, token.start[0]))
+    return kept
+
+
+def test_the_graph_layer_carries_a_program_it_never_reads() -> None:
+    """How the air gap is possible: the sending program is opaque data."""
+    service = _channel()
+    assert service.program
+    assert service.command == "python3"
+
+
+# --- declaring one -----------------------------------------------------------
+
+
+def test_an_integration_with_no_program_could_never_send_anything() -> None:
+    with pytest.raises(CompositionError, match="no program"):
+        Integration(name="x", purpose="y")
+
+
+def test_an_integration_needs_a_purpose_like_every_other_requirement() -> None:
+    with pytest.raises(CompositionError, match="needs a purpose"):
+        _channel(purpose="")
+
+
+def test_a_repeated_signal_is_refused() -> None:
+    with pytest.raises(CompositionError, match="more than once"):
+        _channel(reports=(RunSignal.RUN_FAILED, RunSignal.RUN_FAILED))
+
+
+def test_a_webhook_cannot_thread_and_says_so() -> None:
+    """It never learns where its message landed, so there is no parent."""
+    assert not _hook().threads
+    assert _channel().threads
+
+
+# --- what a report says ------------------------------------------------------
+
+
+def test_a_decision_says_what_it_is_waiting_for() -> None:
+    text = summarise(
+        _event(agent_name="confirm_start", options=["start", "cancel"], prompt="Start it?\n\nx")
+    )
+    assert "smoke-events" in text
+    assert "needs a decision" in text
+    assert "confirm_start" in text
+    assert "`start`, `cancel`" in text
+    assert "Start it?" in text
+    assert "bd13f80e" in text
+
+
+def test_a_long_prompt_is_cut_to_its_opening() -> None:
+    assert len(summarise(_event(prompt="x" * 500))) < 400
+
+
+def test_an_answer_carries_the_choice_and_the_note() -> None:
+    text = summarise(
+        _event(
+            RunSignal.DECISION_MADE,
+            selected_option="rejected",
+            additional_input={"notes": "not this time"},
+        )
+    )
+    assert "`rejected`" in text
+    assert "not this time" in text
+
+
+def test_the_dashboard_link_is_omitted_rather_than_guessed() -> None:
+    assert "http" not in summarise(_event())
+    assert "http://127.0.0.1:1" in summarise(_event(), dashboard="http://127.0.0.1:1")
+
+
+def test_a_summary_names_no_service() -> None:
+    """Each program wraps it; the words are the same wherever they land."""
+    for signal in RunSignal:
+        assert "slack" not in summarise(_event(signal)).lower()
+
+
+# --- a step that reports -----------------------------------------------------
+
+
+def test_an_announce_node_is_a_script_step_not_a_model_call() -> None:
+    node = announce(node_id="tell", text="hello", to=_channel())
+    assert node.kind is NodeKind.SUBPROCESS
+
+
+def test_no_credential_is_in_what_is_emitted() -> None:
+    """Slack's own endpoint is public and fine; a token is the authorisation."""
+    rendered = " ".join(str(a) for a in announce(node_id="t", text="x", to=_channel()).args)
+    assert "TEST_TOKEN" in rendered
+    assert "TEST_CHANNEL" in rendered
+    assert "xoxb-" not in rendered
+    assert "hooks.slack.com" not in rendered
+
+
+def test_the_message_is_piped_rather_than_put_on_the_command_line() -> None:
+    """A gate prompt is prose; argv would break on the first apostrophe."""
+    node = announce(node_id="t", text='it\'s "quoted"', to=_channel())
+    assert node.stdin == 'it\'s "quoted"'
+
+
+def test_the_thread_is_published_as_a_typed_port() -> None:
+    ports = [p.name for p in announce(node_id="t", text="x", to=_channel()).outputs]
+    assert ports == [THREAD_PORT, "posted"]
+
+
+def test_replying_under_a_message_needs_a_service_that_threads() -> None:
+    opener = announce(node_id="open", text="x", to=_channel())
+    with pytest.raises(CompositionError, match="has no threads"):
+        announce(node_id="reply", text="y", to=_hook(), thread=opener.ref(THREAD_PORT))
+
+
+def test_a_reply_declares_the_input_it_needs_without_being_asked() -> None:
+    opener = announce(node_id="open", text="x", to=_channel())
+    reply = announce(node_id="r", text="y", to=_channel(), thread=opener.ref(THREAD_PORT))
+    assert [p.name for p in reply.inputs] == ["open"]
+
+
+def test_buttons_are_read_off_the_gate_they_answer() -> None:
+    gate = approval_gate(node_id="ship_it", prompt="Deploy?")
+    node = announce(node_id="ask", text="?", to=_channel(), answers=gate)
+    spec = json.loads(str(node.args[3]))
+    assert spec["gate"] == "ship_it"
+    assert spec["buttons"] == [["approved", "Approve"], ["rejected", "Reject"]]
+
+
+def test_buttons_need_a_service_that_can_carry_an_answer_back() -> None:
+    gate = approval_gate(node_id="ship_it", prompt="Deploy?")
+    with pytest.raises(CompositionError, match="cannot carry an answer back"):
+        announce(node_id="ask", text="?", to=_hook(), answers=gate)
+
+
+def test_the_program_is_valid_python() -> None:
+    """It is a string in a YAML file, so nothing else would check it."""
+    compile(_channel().program, "<integration>", "exec")
+    compile(_hook().program, "<integration>", "exec")
 
 
 # --- a server that records what arrives --------------------------------------
@@ -58,17 +239,15 @@ class _Collector(BaseHTTPRequestHandler):
     status: ClassVar[int] = 200
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
+        length = int(self.headers.get("Content-Length", "0") or 0)
         body = json.loads(self.rfile.read(length)) if length else {}
         type(self).received.append((self.path, body))
         self.send_response(type(self).status)
         self.end_headers()
-        # Slack-shaped either way: a webhook ignores the body, and the API path
-        # reads `ts` off it to learn the thread it just opened.
         self.wfile.write(json.dumps({"ok": True, "ts": "1700000000.000100"}).encode())
 
     def log_message(self, *_: object) -> None:
-        """Silence; the test output is the assertion."""
+        """Silence; the assertions are the output."""
 
 
 @pytest.fixture
@@ -81,391 +260,138 @@ def collector() -> Iterator[tuple[str, list[tuple[str, dict[str, object]]]]]:
     server.shutdown()
 
 
-# --- posting -----------------------------------------------------------------
+# --- the program actually running --------------------------------------------
 
 
-def test_a_body_arrives_as_json(collector: tuple[str, list[tuple[str, dict[str, object]]]]) -> None:
-    url, received = collector
-    post(url, {"text": "hello"}, name="slack")
-    path, body = received[0]
-    assert path == SECRET
-    assert body == {"text": "hello"}
+def _run(
+    service: Integration, text: str, *args: str, **env: str
+) -> subprocess.CompletedProcess[str]:
+    import os
+
+    return subprocess.run(
+        [sys.executable, "-c", service.program, *args],
+        input=text,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
 
 
-def test_a_refusal_names_the_notifier_and_the_status_only(
+def test_a_webhook_program_posts_what_it_is_given(
     collector: tuple[str, list[tuple[str, dict[str, object]]]],
 ) -> None:
-    """The URL is the whole credential; a failure must not print it."""
-    url, _ = collector
-    _Collector.status = 404
-    with pytest.raises(DeliveryError) as raised:
-        post(url, {"text": "x"}, name="slack")
-    assert "404" in str(raised.value)
-    assert "slack" in str(raised.value)
-    assert SECRET not in str(raised.value)
-    assert "127.0.0.1" not in str(raised.value)
+    url, received = collector
+    done = _run(_hook(), 'it\'s "quoted"', HOOK_URL=url)
+    assert done.returncode == 0, done.stderr
+    assert received[0][1] == {"text": 'it\'s "quoted"'}
 
 
-def test_an_unreachable_endpoint_does_not_leak_it_either() -> None:
-    with pytest.raises(DeliveryError) as raised:
-        post("http://127.0.0.1:1/nope" + SECRET, {"a": 1}, name="slack", timeout=2.0)
-    assert SECRET not in str(raised.value)
-    assert "slack" in str(raised.value)
-
-
-def test_a_non_http_endpoint_is_refused_before_anything_is_sent() -> None:
-    with pytest.raises(DeliveryError, match="not an http"):
-        post("file:///etc/passwd", {"a": 1}, name="slack")
-
-
-# --- choosing where to post --------------------------------------------------
-
-
-def test_the_endpoint_is_read_from_the_environment_not_the_pipeline() -> None:
-    target = _notifier()
-    assert endpoint_for(target, {"HOOK_URL": "https://example.invalid/x"}) == (
-        "https://example.invalid/x"
+def test_a_channel_program_threads_and_publishes_the_thread(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    url, received = collector
+    done = _run(
+        _channel(),
+        "under here",
+        "1699999999.000001",
+        "",
+        TEST_TOKEN="xoxb-pretend",
+        TEST_CHANNEL="C0TEST",
+        SLACK_API_URL=url,
     )
+    assert done.returncode == 0, done.stderr
+    assert received[0][1]["thread_ts"] == "1699999999.000001"
+    assert json.loads(done.stdout)["thread"] == "1700000000.000100", "named for what it is"
 
 
-def test_an_unset_variable_gives_no_endpoint_rather_than_raising() -> None:
-    """Preflight is where this is refused; a watcher must not die of it."""
-    assert endpoint_for(_notifier(), {}) is None
-
-
-def test_the_first_declared_variable_holding_a_value_wins() -> None:
-    target = _notifier(env=(EnvVar("FIRST", "a"), EnvVar("SECOND", "b")))
-    assert endpoint_for(target, {"SECOND": "https://second.invalid"}) == "https://second.invalid"
-
-
-# --- what the message says ---------------------------------------------------
-
-
-def test_a_gate_says_what_it_is_waiting_for() -> None:
-    body = message(
-        _event(agent_name="confirm_start", options=["start", "cancel"], prompt="Start spike?\n\nx")
+def test_a_button_carries_the_run_the_gate_and_the_choice(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    url, received = collector
+    gate = approval_gate(node_id="ship_it", prompt="Deploy?")
+    node = announce(node_id="ask", text="Deploy?", to=_channel(), answers=gate)
+    done = _run(
+        _channel(),
+        "Deploy?",
+        "",
+        str(node.args[3]),
+        TEST_TOKEN="xoxb-pretend",
+        TEST_CHANNEL="C0TEST",
+        SLACK_API_URL=url,
+        CONDUCTOR_RUN_ID="abc12345",
     )
-    text = str(body["text"])
-    assert "smoke-events" in text
-    assert "needs a decision" in text
-    assert "confirm_start" in text
-    assert "`start`, `cancel`" in text
-    assert "Start spike?" in text
-    assert "bd13f80e" in text
+    assert done.returncode == 0, done.stderr
+    blocks = received[0][1]["blocks"]
+    assert isinstance(blocks, list)
+    assert [json.loads(e["value"]) for e in blocks[1]["elements"]] == [
+        {"run": "abc12345", "gate": "ship_it", "choice": "approved"},
+        {"run": "abc12345", "gate": "ship_it", "choice": "rejected"},
+    ]
 
 
-def test_a_long_prompt_is_cut_to_its_opening() -> None:
-    """A channel is not a document."""
-    body = message(_event(prompt="x" * 500))
-    assert len(str(body["text"])) < 400
+def test_an_unset_credential_fails_the_step_rather_than_posting_nowhere() -> None:
+    done = _run(_hook(), "x", HOOK_URL="")
+    assert done.returncode != 0
+    assert "HOOK_URL" in done.stderr
 
 
-def test_an_answer_carries_the_choice_and_the_note() -> None:
-    body = message(
-        _event(
-            RunSignal.DECISION_MADE,
-            agent_name="smoke_gate",
-            selected_option="rejected",
-            additional_input={"notes": "not this time"},
-        )
-    )
-    text = str(body["text"])
-    assert "`rejected`" in text
-    assert "not this time" in text
+# --- the watcher's half ------------------------------------------------------
 
 
-def test_the_dashboard_link_is_omitted_rather_than_guessed() -> None:
-    """A link to a port since reused is worse than no link."""
-    assert "http" not in str(message(_event())["text"])
-    linked = message(_event(), dashboard="http://127.0.0.1:50984")
-    assert "http://127.0.0.1:50984" in str(linked["text"])
-
-
-def test_every_signal_is_phrased_for_a_person() -> None:
-    """A raw enum value arriving in a channel is the implementation leaking."""
-    for signal in RunSignal:
-        text = str(message(_event(signal))["text"])
-        assert "smoke-events" in text, signal
-        assert HEADLINE[signal] in text, signal
-        assert signal.value not in text, signal
-
-
-def test_a_webhook_gets_the_raw_signal_not_slack_markup() -> None:
-    body = body_for(_notifier(kind=NotifierKind.WEBHOOK), _event(agent_name="g"))
-    assert body["signal"] == "decision_needed"
-    assert body["run_id"] == "bd13f80e"
-    assert body["event_type"] == "gate_presented"
-    assert body["data"] == {"agent_name": "g"}
-    assert "text" not in body
-
-
-def test_slack_gets_a_message_rather_than_the_raw_signal() -> None:
-    body = body_for(_notifier(kind=NotifierKind.SLACK), _event())
-    assert set(body) == {"text"}
-
-
-# --- dispatch ----------------------------------------------------------------
+def test_the_watcher_sends_through_the_same_program(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """One way to send, so a report cannot drift between the two callers."""
+    url, received = collector
+    (result,) = deliver(_event(), [_hook()], env={"HOOK_URL": url})
+    assert result == Delivered("slack", "decision_needed", sent=True)
+    assert "needs a decision" in str(received[0][1]["text"])
 
 
 def test_only_subscribers_to_that_signal_are_told(
     collector: tuple[str, list[tuple[str, dict[str, object]]]],
 ) -> None:
     url, received = collector
-    wants = _notifier(name="wants", signals=(RunSignal.DECISION_NEEDED,))
-    ignores = _notifier(name="ignores", signals=(RunSignal.RUN_FAILED,))
+    wants = _hook(name="wants", reports=(RunSignal.DECISION_NEEDED,))
+    ignores = _hook(name="ignores", reports=(RunSignal.RUN_FAILED,))
     results = deliver(_event(), [wants, ignores], env={"HOOK_URL": url})
-    assert results == [Delivered("wants", "decision_needed", sent=True)]
+    assert [r.integration for r in results] == ["wants"]
     assert len(received) == 1
 
 
-def test_an_unreachable_notifier_is_reported_not_raised() -> None:
-    """A channel being down says nothing about whether the run succeeded."""
-    target = _notifier(name="down")
-    results = deliver(_event(), [target], env={"HOOK_URL": "http://127.0.0.1:1/x"})
-    assert not results[0].sent
-    assert "down" in results[0].detail
+def test_a_failure_is_reported_with_the_program_s_own_reason() -> None:
+    """It knows what the service said and what to do about it."""
+    (result,) = deliver(_event(), [_hook()], env={"HOOK_URL": ""})
+    assert not result.sent
+    assert "HOOK_URL" in result.detail
 
 
-def test_one_broken_notifier_does_not_stop_the_others(
+def test_one_broken_integration_does_not_stop_the_others(
     collector: tuple[str, list[tuple[str, dict[str, object]]]],
 ) -> None:
     url, received = collector
-    broken = _notifier(name="broken", env=(EnvVar("MISSING_URL", "unset"),))
-    working = _notifier(name="working")
-    results = deliver(_event(), [broken, working], env={"HOOK_URL": url})
+    broken = _hook(name="broken", url=EnvVar("MISSING_URL", "unset"))
+    working = _hook(name="working")
+    results = deliver(_event(), [broken, working], env={"HOOK_URL": url, "MISSING_URL": ""})
     assert [r.sent for r in results] == [False, True]
     assert len(received) == 1
 
 
-def test_an_unconfigured_notifier_says_which_variable_is_unset() -> None:
-    target = _notifier(name="slack", env=(EnvVar("SLACK_WEBHOOK_URL", "where"),))
-    (result,) = deliver(_event(), [target], env={})
+def test_a_missing_interpreter_is_reported_not_raised() -> None:
+    absent = Integration(
+        name="absent",
+        purpose="a service whose sender is not installed",
+        reports=(RunSignal.DECISION_NEEDED,),
+        command="definitely-not-a-command",
+        program="pass",
+    )
+    (result,) = deliver(_event(), [absent], env={})
     assert not result.sent
-    assert "SLACK_WEBHOOK_URL" in result.detail
+    assert "not on PATH" in result.detail
 
 
-def test_nothing_delivered_is_an_empty_result_not_an_error() -> None:
-    assert deliver(_event(), [], env={}) == []
-
-
-# --- announcing from inside the graph ----------------------------------------
-
-
-def test_an_announce_node_is_a_script_step_not_a_model_call() -> None:
-    node = announce(node_id="tell", text="hello", to=EnvVar("HOOK", "where"))
-    assert node.kind is NodeKind.SUBPROCESS
-    assert node.command == "python3"
-
-
-def test_no_credential_is_in_what_is_emitted() -> None:
-    """The step names its variables and reads them in the subprocess.
-
-    Slack's own API endpoint is in there and that is fine — it is public, and
-    the same for everyone. What must never appear is a webhook URL or a token,
-    because those *are* the authorisation.
-    """
-    node = announce(
-        node_id="tell",
-        text="hello",
-        to=EnvVar("SLACK_BOT_TOKEN", "token"),
-        channel=EnvVar("SLACK_CHANNEL", "where"),
-    )
-    rendered = " ".join(str(a) for a in node.args)
-    assert "SLACK_BOT_TOKEN" in rendered
-    assert "SLACK_CHANNEL" in rendered
-    assert "hooks.slack.com" not in rendered
-    assert "xoxb-" not in rendered
-
-
-def test_the_message_is_piped_rather_than_put_on_the_command_line() -> None:
-    """A gate prompt is prose; interpolating it into argv breaks on an apostrophe."""
-    node = announce(node_id="tell", text='it\'s a prompt "with" quotes', to=EnvVar("HOOK", "w"))
-    assert node.stdin == 'it\'s a prompt "with" quotes'
-    assert "apostrophe" not in " ".join(str(a) for a in node.args)
-
-
-def test_the_thread_is_published_as_a_typed_port() -> None:
-    """So a reply reads it through the graph, and a missing wire is a lint."""
-    opener = announce(node_id="t", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
-    assert [p.name for p in opener.outputs] == [THREAD_PORT, "posted"]
-
-
-def test_a_reply_needs_a_channel_because_a_webhook_cannot_thread() -> None:
-    """A webhook never returns the ts, so there is no parent to reply under."""
-    opener = announce(node_id="open", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
-    with pytest.raises(CompositionError, match="names no channel"):
-        announce(node_id="reply", text="y", to=EnvVar("H", "w"), thread=opener.ref(THREAD_PORT))
-
-
-def test_a_reply_declares_the_input_it_needs_without_being_asked() -> None:
-    opener = announce(node_id="open", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
-    reply = announce(
-        node_id="reply",
-        text="y",
-        to=EnvVar("H", "w"),
-        channel=EnvVar("C", "w"),
-        thread=opener.ref(THREAD_PORT),
-    )
-    assert [p.name for p in reply.inputs] == ["open"]
-
-
-def test_the_thread_goes_through_argv_not_into_the_script_source() -> None:
-    """Interpolating a rendered value into Python is how a quote in somebody
-    else's data becomes a syntax error at run time."""
-    opener = announce(node_id="open", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
-    reply = announce(
-        node_id="reply",
-        text="y",
-        to=EnvVar("H", "w"),
-        channel=EnvVar("C", "w"),
-        thread=opener.ref(THREAD_PORT),
-    )
-    assert len(reply.args) == 4  # -c, the script, the thread, the buttons
-    compile(str(reply.args[1]), "<announce>", "exec")
-
-
-def test_an_announce_step_refuses_a_nameless_variable() -> None:
-    with pytest.raises(CompositionError, match="needs a variable"):
-        announce(node_id="t", text="x", to=EnvVar("", "w"))
-
-
-def test_the_posting_script_is_valid_python() -> None:
-    """It is built as a string, so nothing else checks it."""
-    node = announce(node_id="t", text="x", to=EnvVar("HOOK", "w"))
-    compile(str(node.args[1]), "<announce>", "exec")
-
-
-def test_an_unset_variable_fails_the_step_rather_than_posting_nowhere(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A red step in the dashboard beats a message nobody notices never arrived."""
-    node = announce(node_id="t", text="x", to=EnvVar("DEFINITELY_UNSET_HOOK", "w"))
-    monkeypatch.delenv("DEFINITELY_UNSET_HOOK", raising=False)
-    done = subprocess.run(
-        [sys.executable, "-c", str(node.args[1])],
-        input="hello",
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=tmp_path,
-    )
-    assert done.returncode != 0
-    assert "DEFINITELY_UNSET_HOOK" in done.stderr
-
-
-def test_the_posting_script_actually_posts(
-    collector: tuple[str, list[tuple[str, dict[str, object]]]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The script is a string in a YAML file; only running it proves it works."""
-    url, received = collector
-    node = announce(node_id="t", text="x", to=EnvVar("TEST_HOOK_URL", "w"))
-    monkeypatch.setenv("TEST_HOOK_URL", url)
-    done = subprocess.run(
-        [sys.executable, "-c", str(node.args[1])],
-        input='it\'s a gate, "really"',
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert done.returncode == 0, done.stderr
-    assert received[0][1] == {"text": 'it\'s a gate, "really"'}
-
-
-# --- buttons -----------------------------------------------------------------
-
-
-def _gate() -> GateNode:
-    return approval_gate(node_id="ship_it", prompt="Deploy?")
-
-
-def _spec(node: object) -> dict[str, object]:
-    loaded = json.loads(str(node.args[3]))  # type: ignore[attr-defined]
-    assert isinstance(loaded, dict)
-    return loaded
-
-
-def test_buttons_are_read_off_the_gate_they_answer() -> None:
-    """So a renamed option cannot leave a button that answers nothing."""
-    node = announce(
-        node_id="ask", text="?", to=EnvVar("T", "t"), channel=EnvVar("C", "c"), answers=_gate()
-    )
-    spec = _spec(node)
-    assert spec["gate"] == "ship_it"
-    assert spec["buttons"] == [["approved", "Approve"], ["rejected", "Reject"]]
-
-
-def test_a_gate_named_as_a_string_must_spell_its_buttons_out() -> None:
-    """The start gate does not exist until the pipeline is loaded."""
-    with pytest.raises(CompositionError, match="cannot be read off it"):
-        announce(
-            node_id="ask", text="?", to=EnvVar("T", "t"), channel=EnvVar("C", "c"), answers="x"
-        )
-
-
-def test_buttons_without_a_gate_are_refused() -> None:
-    with pytest.raises(CompositionError, match="names no gate"):
-        announce(
-            node_id="ask",
-            text="?",
-            to=EnvVar("T", "t"),
-            channel=EnvVar("C", "c"),
-            buttons=(("a", "A"),),
-        )
-
-
-def test_buttons_need_a_bot_token_because_a_webhook_cannot_carry_them_back() -> None:
-    with pytest.raises(CompositionError, match="names no channel"):
-        announce(node_id="ask", text="?", to=EnvVar("T", "t"), answers=_gate())
-
-
-def test_a_repeated_button_value_is_refused() -> None:
-    """Two buttons that send the same answer is a composition mistake."""
-    with pytest.raises(CompositionError, match="repeats a button value"):
-        announce(
-            node_id="ask",
-            text="?",
-            to=EnvVar("T", "t"),
-            channel=EnvVar("C", "c"),
-            answers="g",
-            buttons=(("a", "A"), ("a", "B")),
-        )
-
-
-def test_an_announcement_with_no_buttons_sends_no_block_kit() -> None:
-    node = announce(node_id="t", text="x", to=EnvVar("T", "t"), channel=EnvVar("C", "c"))
-    assert str(node.args[3]) == ""
-
-
-def test_a_button_carries_the_run_the_gate_and_the_choice(
-    collector: tuple[str, list[tuple[str, dict[str, object]]]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Everything the responder needs to answer the right gate on the right run."""
-    url, received = collector
-    node = announce(
-        node_id="ask",
-        text="Deploy?",
-        to=EnvVar("TEST_TOKEN", "t"),
-        channel=EnvVar("TEST_CHANNEL", "c"),
-        answers=_gate(),
-    )
-    monkeypatch.setenv("TEST_TOKEN", "xoxb-pretend")
-    monkeypatch.setenv("TEST_CHANNEL", "C0TEST")
-    monkeypatch.setenv("SLACK_API_URL", url)
-    monkeypatch.setenv("CONDUCTOR_RUN_ID", "abc12345")
-    done = subprocess.run(
-        [sys.executable, "-c", str(node.args[1]), str(node.args[2]), str(node.args[3])],
-        input="Deploy?",
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert done.returncode == 0, done.stderr
-    body = received[0][1]
-    blocks = body["blocks"]
-    assert isinstance(blocks, list)
-    elements = blocks[1]["elements"]
-    assert [json.loads(e["value"]) for e in elements] == [
-        {"run": "abc12345", "gate": "ship_it", "choice": "approved"},
-        {"run": "abc12345", "gate": "ship_it", "choice": "rejected"},
-    ]
-    assert [e["text"]["text"] for e in elements] == ["Approve", "Reject"]
+def test_send_never_puts_a_credential_in_its_reason() -> None:
+    why = send(_hook(), "x", env={"HOOK_URL": "http://127.0.0.1:1" + SECRET})
+    assert why
+    assert SECRET not in why

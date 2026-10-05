@@ -33,7 +33,7 @@ from ictus.graph.ref import Origin, Ref, Template, equals
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from ictus.graph.requirements import Executable, McpServer, Notifier
+    from ictus.graph.requirements import Executable, Integration, McpServer
     from ictus.graph.signals import RunSignal
     from ictus.graph.values import YamlScalar
 
@@ -306,7 +306,7 @@ class Pipeline:
         self._maps: dict[str, MapGroup] = {}
         self._mcp: dict[str, McpServer] = {}
         self._executables: dict[str, Executable] = {}
-        self._notifiers: dict[str, Notifier] = {}
+        self._integrations: dict[str, Integration] = {}
         self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
@@ -560,45 +560,72 @@ class Pipeline:
         """What runs before the start gate, if anything was asked to."""
         return self._before_start
 
-    def require_notifier(self, target: Notifier) -> Notifier:
-        """Declare somewhere this run's progress is reported to.
+    def integrate(self, service: Integration) -> Integration:
+        """Declare a third-party service this pipeline talks to.
 
-        A subscription, not a step: nothing about it reaches the emitted
-        workflow, because the engine executes no side effect at a step boundary
-        and a declaration that compiled to nothing would be a lie in the diff.
-        What it buys is preflight — an endpoint whose variable is unset is
-        refused at the launch rather than discovered when a gate opens and the
-        message nobody receives was the one that mattered.
+        Put these at the top of a pipeline. A reader should see what a run will
+        reach outside the machine before they read what it does, and whoever
+        approves the run is shown the same list at the start gate.
+
+        Declaring is not attaching. Nothing is inserted until the pipeline is
+        loaded, and what gets inserted is decided by the signals the integration
+        names — so adding a destination is one line here and removing it is
+        deleting that line, rather than unpicking nodes and data edges by hand.
         """
-        existing = self._notifiers.get(target.name)
+        existing = self._integrations.get(service.name)
         if existing is not None:
             raise CompositionError(
-                f"pipeline {self.pipeline_id!r} already requires a notifier named "
-                f"{target.name!r}; names are how one is addressed and must be unique"
+                f"pipeline {self.pipeline_id!r} already integrates something called "
+                f"{service.name!r}; names are how one is addressed and must be unique"
             )
-        self._notifiers[target.name] = target
-        return target
+        self._integrations[service.name] = service
+        return service
 
     @property
-    def notifiers(self) -> tuple[Notifier, ...]:
-        """Every notifier this pipeline declares, in declaration order."""
-        return tuple(self._notifiers.values())
+    def integrations(self) -> tuple[Integration, ...]:
+        """Every service this pipeline declares, in declaration order."""
+        return tuple(self._integrations.values())
 
-    def all_notifiers(self) -> tuple[Notifier, ...]:
-        """This pipeline's notifiers and those of every stage it contains.
+    def all_integrations(self) -> tuple[Integration, ...]:
+        """This pipeline's services and those of every stage it contains.
 
-        A stage's signals surface on the same stream as its caller's — one run,
-        one event log — so a nested declaration is the caller's problem too.
+        A stage reports onto its caller's conversation — one run, one thread — so
+        a nested declaration is the caller's problem too.
         """
-        seen: dict[str, Notifier] = dict(self._notifiers)
+        seen: dict[str, Integration] = dict(self._integrations)
         for child in self._children.values():
-            for target in child.all_notifiers():
-                seen.setdefault(target.name, target)
+            for service in child.all_integrations():
+                seen.setdefault(service.name, service)
         return tuple(seen.values())
 
+    def insert_before[N: Node](self, existing: Node, inserted: N) -> N:
+        """Put ``inserted`` in front of ``existing``, taking over its inbound edges.
+
+        Every route that pointed at ``existing`` now points at ``inserted``, and
+        ``inserted`` routes on to ``existing``. The entry point moves too when
+        ``existing`` was it.
+
+        This is what lets an announcement be attached to a graph somebody else
+        wrote. Doing it by hand means knowing every edge that arrives — including
+        the gate branches, which name their target by choice — and getting one
+        wrong is a step that silently never runs.
+        """
+        self._require_member(existing, "insertion point")
+        self.add(inserted)
+        self._edges = [
+            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
+            if edge.target_node is existing
+            else edge
+            for edge in self._edges
+        ]
+        self._edges.append(Edge(source=inserted, target=existing))
+        if self._entry is existing:
+            self._entry = inserted
+        return inserted
+
     def subscribed_signals(self) -> frozenset[RunSignal]:
-        """Every signal any notifier here or in a nested stage asked for."""
-        return frozenset(s for target in self.all_notifiers() for s in target.signals)
+        """Every signal any integration here or in a nested stage asked for."""
+        return frozenset(s for service in self.all_integrations() for s in service.reports)
 
     def declare_input(
         self,

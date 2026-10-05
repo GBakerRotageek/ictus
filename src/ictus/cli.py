@@ -18,6 +18,7 @@ from ictus.errors import IctusError
 from ictus.gate import add_start_gate, attach_start_herald
 from ictus.graph.pipeline import Pipeline
 from ictus.graph.signals import RunSignal
+from ictus.integrate import apply_integrations
 from ictus.interfaces.conductor import conductor
 from ictus.interfaces.conductor.events import watch as watch_run
 from ictus.interfaces.conductor.runs import LiveRun, live_runs
@@ -31,7 +32,7 @@ from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.graph.requirements import Notifier
+    from ictus.graph.requirements import Integration
     from ictus.interfaces import PreflightIssue, SignalEvent
 
 app = typer.Typer(
@@ -113,6 +114,9 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
         _check_provider(settings.provider, where=str(folder.config_file))
         for pipeline in pipelines:
             settings.apply(pipeline, where=str(folder.config_file))
+            # Before the gate, so an announcement can be put in front of it
+            # and so the gate's own prompt counts every step honestly.
+            apply_integrations(pipeline)
             if settings.start_gate:
                 add_start_gate(pipeline)
             else:
@@ -344,15 +348,15 @@ def preflight(
     for pipeline in pipelines:
         declared = pipeline.all_mcp_servers()
         commands = pipeline.all_executables()
-        reporting = pipeline.all_notifiers()
+        reporting = pipeline.all_integrations()
         total = len(declared) + len(commands) + len(reporting)
         typer.echo(f"{pipeline.pipeline_id}: {total} requirement(s) declared")
         for server in declared:
             typer.echo(f"  - mcp:{server.name} — {server.purpose}")
         for tool in commands:
             typer.echo(f"  - exe:{tool.name} — {tool.purpose}")
-        for target in reporting:
-            typer.echo(f"  - notify:{target.name} — {target.purpose}")
+        for service in reporting:
+            typer.echo(f"  - integrate:{service.name} — {service.purpose}")
         issues.extend(BACKEND.preflight(pipeline, probe=probe))
     _report_preflight(issues, probed=probe)
     if any(i.blocking for i in issues):
@@ -790,7 +794,7 @@ def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
     out.put(_Finished(run.run_id))
 
 
-def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Notifier, ...]]:
+def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...]]:
     """A pipeline folder's id and the notifiers it declares.
 
     Read from the source rather than from the emitted workflow, because a
@@ -801,7 +805,7 @@ def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Notifier, ...]]:
     if folder is None:
         return "", ()
     pipeline = _only(PipelineFolder.at(folder))
-    return pipeline.pipeline_id, pipeline.all_notifiers()
+    return pipeline.pipeline_id, pipeline.all_integrations()
 
 
 @app.command()
@@ -918,9 +922,9 @@ def _report_delivery(results: list[Delivered]) -> None:
     """
     for result in results:
         if result.sent:
-            typer.secho(f"      -> {result.notifier}", fg=typer.colors.BRIGHT_BLACK)
+            typer.secho(f"      -> {result.integration}", fg=typer.colors.BRIGHT_BLACK)
         else:
-            typer.secho(f"      -> {result.notifier}: {result.detail}", fg=typer.colors.RED)
+            typer.secho(f"      -> {result.integration}: {result.detail}", fg=typer.colors.RED)
 
 
 APP_TOKEN_ENV = "SLACK_APP_TOKEN"

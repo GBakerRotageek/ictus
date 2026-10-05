@@ -1,114 +1,162 @@
 """Telling somebody what a run is doing.
 
 A second boundary, and deliberately not under ``interfaces/``. That one answers
-"who executes this graph"; this one answers "who hears about it". They are
-different axes — a run on any engine can report to any audience — and giving
-the second its own package is what stops Slack's spelling drifting into a
-backend, or Conductor's into a message.
+"who executes this graph"; this one answers "who hears about it". Different
+axes — a run on any engine can report to any audience — and giving the second
+its own package is what stops a service's spelling drifting into a backend, or
+an engine's into a message.
 
-Nothing here knows an engine. A ``SignalEvent`` arrives already engine-neutral,
-and one module per destination keeps each system's own shape in one file, the
-way ``stdlib/`` keeps one primitive per module.
+**One way to send, used twice.** An ``Integration`` carries a program that sends
+one report. A step runs it from inside the graph; the watcher runs it from
+outside, for the moments no step can see. Neither knows which service is on the
+other end, and a second destination is a new module here — nothing else moves.
 
-**A report never breaks a run.** Delivery happens outside the engine, after the
-fact, and a channel being unreachable says nothing about whether the work
-succeeded. So every failure is collected and returned rather than raised: the
-caller decides how loudly to complain, and the watcher keeps watching.
+**A report never breaks a run.** Delivery happens outside the engine and after
+the fact, and a channel being unreachable says nothing about whether the work
+succeeded. Every failure is collected and returned rather than raised.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ictus.graph.requirements import NotifierKind
-from ictus.notify.slack import message as slack_message
-from ictus.notify.webhook import DeliveryError, post
+from ictus.graph.signals import RunSignal
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from ictus.graph.requirements import Notifier
+    from ictus.graph.requirements import Integration
     from ictus.interfaces import SignalEvent
 
-__all__ = ["Delivered", "DeliveryError", "body_for", "deliver", "endpoint_for"]
+__all__ = ["HEADLINE", "Delivered", "deliver", "send", "summarise"]
+
+TIMEOUT_SECONDS = 20.0
+
+#: What each signal says, in the voice of somebody telling you about it.
+HEADLINE: dict[RunSignal, str] = {
+    RunSignal.RUN_STARTED: "started",
+    RunSignal.RUN_FINISHED: "finished",
+    RunSignal.RUN_FAILED: "failed",
+    RunSignal.RUN_PAUSED: "is paused, waiting to be resumed",
+    RunSignal.DECISION_NEEDED: "needs a decision",
+    RunSignal.DECISION_MADE: "got its answer",
+    RunSignal.STEP_FAILED: "had a step fail",
+    RunSignal.BUDGET_EXCEEDED: "went over budget",
+}
 
 
 @dataclass(frozen=True, slots=True)
 class Delivered:
     """What happened to one report."""
 
-    notifier: str
+    integration: str
     signal: str
     sent: bool
     detail: str = ""
-    """Why it did not go, when it did not. Never contains the endpoint."""
+    """Why not, when not. Never contains a credential."""
 
 
-def body_for(target: Notifier, event: SignalEvent, *, dashboard: str = "") -> dict[str, object]:
-    """The payload ``target`` wants for ``event``."""
-    if target.kind is NotifierKind.SLACK:
-        return slack_message(event, dashboard=dashboard)
-    return {
-        "signal": event.signal.value,
-        "run_id": event.run_id,
-        "workflow": event.workflow,
-        "at": event.at,
-        "event_type": event.event_type,
-        "data": event.data,
-        **({"dashboard": dashboard} if dashboard else {}),
-    }
+def summarise(event: SignalEvent, *, dashboard: str = "") -> str:
+    """One report, as text, for whatever service is going to carry it.
 
+    Deliberately plain. Each integration's program wraps this the way its own
+    service wants, so nothing here has to know which one is listening — and the
+    same words arrive whether a step reported them or the watcher did.
 
-def endpoint_for(target: Notifier, env: Mapping[str, str] | None = None) -> str | None:
-    """Where ``target`` posts, read from the environment at the last moment.
-
-    The first declared variable holding a value wins. Returning ``None`` rather
-    than raising keeps an unconfigured notifier from taking a watcher down —
-    preflight is where an unset one is supposed to be refused, loudly and before
-    anything runs.
+    Written for somebody reading it on a phone: the first line says what happened
+    and which run, and a decision says what it is waiting for. The rest is in the
+    dashboard, which is linked when its address is known.
     """
-    source = os.environ if env is None else env
-    for var in target.required_env:
-        value = source.get(var.name)
-        if value:
-            return value
-    return None
+    lines = [f"*{event.workflow}* {HEADLINE.get(event.signal, event.signal.value)}"]
+
+    step = event.data.get("agent_name")
+    if isinstance(step, str) and step:
+        lines.append(f"> step: `{step}`")
+
+    if event.signal is RunSignal.DECISION_NEEDED:
+        options = event.data.get("options")
+        if isinstance(options, list) and options:
+            lines.append("> waiting on: " + ", ".join(f"`{o}`" for o in options))
+        lines.extend(_opening(event.data.get("prompt")))
+
+    if event.signal is RunSignal.DECISION_MADE:
+        chosen = event.data.get("selected_option")
+        if isinstance(chosen, str) and chosen:
+            lines.append(f"> answered: `{chosen}`")
+        note = event.data.get("additional_input")
+        if isinstance(note, dict):
+            lines.extend(f"> {key}: {value}" for key, value in note.items() if value)
+
+    if event.signal in (RunSignal.RUN_FAILED, RunSignal.STEP_FAILED):
+        lines.extend(_opening(event.data.get("termination_reason") or event.data.get("error")))
+
+    footer = f"run `{event.run_id}`"
+    lines.append(f"{footer} · {dashboard}" if dashboard else footer)
+    return "\n".join(lines)
+
+
+def _opening(value: object, *, limit: int = 160) -> list[str]:
+    """The first line of some prose, flattened. A channel is not a document."""
+    if not isinstance(value, str) or not value.strip():
+        return []
+    opening = value.strip().splitlines()[0]
+    return ["> " + (opening if len(opening) <= limit else opening[: limit - 1] + "…")]
+
+
+def send(
+    service: Integration,
+    text: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    timeout: float = TIMEOUT_SECONDS,
+) -> str:
+    """Run ``service``'s program with ``text`` on stdin. "" on success, else why not.
+
+    The same program a step runs, so a report from the watcher and a report from
+    inside the graph go the same way and cannot drift apart. Credentials are read
+    by the program out of the environment and never pass through here.
+    """
+    try:
+        done = subprocess.run(
+            [service.command, "-c", service.program],
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError:
+        return f"{service.command!r} is not on PATH, so nothing could be sent"
+    except subprocess.TimeoutExpired:
+        return f"{service.name!r} did not answer in {timeout:g}s"
+    if done.returncode == 0:
+        return ""
+    # The program's own stderr: it knows what the service said and what to do
+    # about it, and this does not second-guess it.
+    return (done.stderr or done.stdout or "the report failed with no explanation").strip()
 
 
 def deliver(
     event: SignalEvent,
-    targets: Iterable[Notifier],
+    services: Iterable[Integration],
     *,
     dashboard: str = "",
     env: Mapping[str, str] | None = None,
 ) -> list[Delivered]:
-    """Report ``event`` to every target that asked for its signal.
+    """Report ``event`` to every service that asked for its signal.
 
-    Returns one result per attempt, successes included, so a caller can say what
-    it did as well as what it could not. Raises nothing: see the module note.
+    One result per attempt, successes included, so a caller can say what it did
+    as well as what it could not. Raises nothing: see the module note.
     """
+    text = summarise(event, dashboard=dashboard)
     results: list[Delivered] = []
-    for target in targets:
-        if not target.wants(event.signal):
+    for service in services:
+        if not service.wants(event.signal):
             continue
-        endpoint = endpoint_for(target, env)
-        if endpoint is None:
-            wanted = ", ".join(var.name for var in target.required_env) or "(none declared)"
-            results.append(
-                Delivered(
-                    notifier=target.name,
-                    signal=event.signal.value,
-                    sent=False,
-                    detail=f"no endpoint: {wanted} is unset",
-                )
-            )
-            continue
-        try:
-            post(endpoint, body_for(target, event, dashboard=dashboard), name=target.name)
-        except DeliveryError as exc:
-            results.append(Delivered(target.name, event.signal.value, sent=False, detail=str(exc)))
-        else:
-            results.append(Delivered(target.name, event.signal.value, sent=True))
+        why = send(service, text, env=env)
+        results.append(Delivered(service.name, event.signal.value, sent=not why, detail=why))
     return results

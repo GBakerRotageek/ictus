@@ -23,24 +23,7 @@ if TYPE_CHECKING:
 
     from ictus.graph.signals import RunSignal
 
-__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport", "Notifier", "NotifierKind"]
-
-
-class NotifierKind(StrEnum):
-    """What shape a report takes when it arrives.
-
-    Named here beside ``McpTransport`` for the same reason: it is a property of
-    what the pipeline asked for, not of whatever happens to deliver it. The
-    difference between these two is the body of one HTTP POST — Slack's incoming
-    webhooks are ordinary HTTPS, never a socket — so this picks a payload, not a
-    protocol.
-    """
-
-    WEBHOOK = "webhook"
-    """A JSON POST carrying the signal, its run, and the engine's own payload."""
-
-    SLACK = "slack"
-    """An incoming-webhook message, written to be read by a person in a channel."""
+__all__ = ["EnvVar", "Executable", "Integration", "McpServer", "McpTransport"]
 
 
 class McpTransport(StrEnum):
@@ -153,54 +136,74 @@ class McpServer:
 
 
 @dataclass(frozen=True, slots=True)
-class Notifier:
-    """Somewhere a run's progress is reported to, and which signals it wants.
+class Integration:
+    """A third-party service a pipeline talks to, declared where it is written.
 
-    Declared alongside the other requirements, and for the same reason: a
-    notification path that is not configured fails at the moment it matters —
-    when a gate opens and nobody is told — and a run that discovers that has
-    already parked and is waiting for a person who does not know. Preflight
-    refuses it instead.
+    The air gap. Nothing in the composition model knows Slack, or any other
+    service, exists — the same way nothing here knows what an MCP server is for.
+    This holds the *shape* of an integration: what it is called, why it is there,
+    what the environment must supply, and an opaque program that sends one
+    report. Who fills that in lives behind ``ictus.notify``, and a second service
+    is a new module there rather than a new branch anywhere else.
 
-    ``env`` is how the endpoint is named. A webhook URL is a credential: it is
-    the whole authorisation to post as whatever it points at, so it is declared
-    as a variable to read at run time and never written into the pipeline.
-    ``required_env`` is the same property ``McpServer`` exposes, so preflight
-    treats both the same way without knowing which it is holding.
+    Declared at the top of a pipeline on purpose. A reader should see what a run
+    will talk to before they read what it does, and whoever approves the run is
+    shown the same list at the start gate — a pipeline that reaches outside the
+    machine should say so where it cannot be missed.
+
+    ``env`` names variables, never values. A bot token or a webhook URL is the
+    whole authorisation to act as somebody, so it is read at run time and never
+    written into a pipeline or an emitted workflow.
     """
 
     name: str
     purpose: str
-    signals: tuple[RunSignal, ...]
-    kind: NotifierKind = NotifierKind.WEBHOOK
     env: tuple[EnvVar, ...] = ()
+    reports: tuple[RunSignal, ...] = ()
+    """Which moments this integration is told about, when it is attached.
+
+    Empty means it is attached by hand — a pipeline that announces at points of
+    its own choosing rather than at every gate.
+    """
+
+    command: str = "python3"
+    program: str = ""
+    """How one report is sent. Opaque here, and never read above ``notify``."""
+
+    threads: bool = False
+    """Whether a report can be hung under an earlier one.
+
+    Not every destination has threads, and one that does not gets a flat
+    sequence rather than a broken reference to a parent that never existed.
+    """
+
     setup_hint: str = ""
 
     def __post_init__(self) -> None:
         if not self.name:
-            raise CompositionError("a notifier needs a name")
+            raise CompositionError("an integration needs a name")
         if not self.purpose:
             raise CompositionError(
-                f"notifier {self.name!r} needs a purpose; it is what the person "
+                f"integration {self.name!r} needs a purpose; it is what the person "
                 "being asked to configure it will read"
             )
-        if not self.signals:
+        if not self.program:
             raise CompositionError(
-                f"notifier {self.name!r} subscribes to nothing, so it would never fire. "
-                "Name the signals it should report, or drop the declaration."
+                f"integration {self.name!r} has no program, so it could never send "
+                "anything. Build it with one of the constructors in ictus.notify."
             )
-        duplicated = sorted({s for s in self.signals if self.signals.count(s) > 1})
+        duplicated = sorted({s for s in self.reports if self.reports.count(s) > 1})
         if duplicated:
             raise CompositionError(
-                f"notifier {self.name!r} names {[s.value for s in duplicated]} more than "
-                "once; a signal is reported once or not at all"
+                f"integration {self.name!r} names {[s.value for s in duplicated]} more "
+                "than once; a signal is reported once or not at all"
             )
 
     @property
     def required_env(self) -> tuple[EnvVar, ...]:
-        """Environment variables that must be set for this notifier to work."""
+        """Environment variables that must be set for this to work."""
         return self.env
 
     def wants(self, signal: RunSignal) -> bool:
-        """Whether this notifier asked to hear about ``signal``."""
-        return signal in self.signals
+        """Whether this integration asked to hear about ``signal``."""
+        return signal in self.reports

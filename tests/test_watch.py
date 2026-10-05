@@ -55,7 +55,7 @@ def test_a_whole_run_reads_as_the_signals_that_happened() -> None:
 
 
 def test_the_trace_events_are_dropped_rather_than_reported() -> None:
-    """17 events in, 6 out. A notifier forwarding the rest would be a firehose."""
+    """17 events in, 6 out. A integration forwarding the rest would be a firehose."""
     events = _recorded("run-events-approved.jsonl")
     assert len(events) == 17
     assert len(list(signals_from(events, RUN))) == 6
@@ -304,7 +304,7 @@ def test_a_sent_frame_is_masked(server: tuple[int, list[str]]) -> None:
 
 
 def test_an_event_reaches_a_caller_as_a_signal() -> None:
-    """The dataclass a notifier will be handed."""
+    """The dataclass a integration will be handed."""
     event = SignalEvent(
         signal=RunSignal.DECISION_NEEDED,
         run_id="abc",

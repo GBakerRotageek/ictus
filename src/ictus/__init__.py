@@ -40,10 +40,9 @@ from ictus.graph.ref import (
 from ictus.graph.requirements import (
     EnvVar,
     Executable,
+    Integration,
     McpServer,
     McpTransport,
-    Notifier,
-    NotifierKind,
 )
 from ictus.graph.scope import Scope, ScopeNode, outcome_scope
 from ictus.graph.signals import RunSignal
@@ -63,12 +62,11 @@ __all__ = [
     "GateChoice",
     "GateNode",
     "InputPort",
+    "Integration",
     "LintError",
     "McpServer",
     "McpTransport",
     "Node",
-    "Notifier",
-    "NotifierKind",
     "OutputPort",
     "Pipeline",
     "PortConnection",
