@@ -53,7 +53,13 @@ CONFIG_FILE = "config.yaml"
 REPO_KEY = "repo"
 
 # Anchored at the start: a `---` further down is a thematic break in the body.
-_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+# The empty first branch is the block a pipeline with no inputs writes,
+# `---\n---`, which a mandatory newline before the closing `---` rejects outright
+# — and a failed match makes the delimiters themselves the body, so the run was
+# refused for carrying prose it did not have. An alternation rather than making
+# that newline optional: optional would also let `foo---` close a block, costing
+# the rule that a closing delimiter starts its own line.
+_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(|.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 
 _BLOCK_SCALAR_HINT = (
     "A ':' followed by a space inside an unquoted value is invalid YAML. "

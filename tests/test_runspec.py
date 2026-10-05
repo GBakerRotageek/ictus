@@ -89,6 +89,31 @@ def test_a_thematic_break_further_down_is_body_not_metadata() -> None:
     assert body.startswith("no frontmatter")
 
 
+def test_an_empty_frontmatter_block_is_a_block_not_a_body() -> None:
+    """`---\\n---\\n` is how a pipeline with no inputs says so.
+
+    It used to fail the match outright, so the delimiters themselves became the
+    body and the run was refused for carrying prose it did not have.
+    """
+    front, body = split_frontmatter("---\n---\n", where="x")
+    assert front == {}
+    assert body == ""
+
+
+def test_a_closing_delimiter_must_start_its_own_line() -> None:
+    """The guard the empty case must not cost: `foo---` does not close a block."""
+    front, body = split_frontmatter("---\nfoo---\n", where="x")
+    assert front == {}
+    assert body == "---\nfoo---"
+
+
+def test_a_pipeline_with_no_inputs_accepts_an_empty_frontmatter_file(tmp_path: Path) -> None:
+    p = Pipeline(pipeline_id="demo")
+    folder = _folder(tmp_path, "---\n---\n")
+    spec = read_input_file(folder / "input.md", p, cwd=tmp_path)
+    assert spec.inputs == {}
+
+
 def test_the_body_feeds_the_input_declared_as_prose(tmp_path: Path) -> None:
     folder = _folder(tmp_path, "---\ntarget: HEAD~1\n---\nShip it Friday.\nBe careful.\n")
     spec = read_input_file(folder / "input.md", _pipeline(), cwd=tmp_path)

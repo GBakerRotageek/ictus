@@ -29,10 +29,12 @@ What it corrected in [run-events.md](run-events.md):
 - `route_taken` exists and was missing from the vocabulary.
 - Socket and JSONL carry byte-identical sequences.
 
-Unrelated defect found: an empty frontmatter pair (`---\n---\n`) fails
-`_FRONTMATTER` in `runspec.py`, which needs a newline before the closing `---`,
-and the run is refused as "has body text". Not fixed here; needs its own failing
-test first.
+Unrelated defect found and fixed: an empty frontmatter pair (`---\n---\n`) failed
+`_FRONTMATTER` in `runspec.py`, which required a newline before the closing
+`---`. A failed match makes the delimiters the body, so a pipeline with no inputs
+was refused for carrying prose it did not have. The pattern now takes an empty
+first branch; an optional newline was rejected because it would also let
+`foo---` close a block.
 
 ## Phase 1 — declaration
 
