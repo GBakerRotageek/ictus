@@ -55,10 +55,12 @@ Engine-neutral. `graph/` names no Conductor event.
 
 The mapping lives in `interfaces/conductor/`, not beside the enum.
 
-`graph/requirements.py` — add `Notifier(name, purpose, signals, env, setup_hint)`.
+`graph/requirements.py` — `Integration(name, purpose, env, reports, program,
+threads, setup_hint)`. Built first as `Notifier`; renamed in phase 4 when the
+air gap moved and the service's spelling left the graph.
 
-- `pipeline.require_notifier(...)`, parallel to `require_mcp`.
-- `Pipeline.notifiers` and `all_notifiers` (walks stages), mirroring
+- `pipeline.integrate(...)`, parallel to `require_mcp`.
+- `Pipeline.integrations` and `all_integrations` (walks stages), mirroring
   `all_mcp_servers`.
 - `purpose` required, same rule as `McpServer` and `Executable`.
 
@@ -67,15 +69,16 @@ A pipeline subscribing to a signal the backend cannot report is refused at
 composition, like an unsupported `NodeKind`.
 
 Endpoints are declared as `EnvVar`, not literals, so preflight's existing env
-check covers notifiers with no signature change. Offline only, unlike MCP's
+check covers integrations with no signature change. Offline only, unlike MCP's
 `--probe`: proving an endpoint means posting to it, and a preflight that
 announced itself in a channel every time anyone checked a pipeline would be
 muted — taking the real notification with it.
 
 ## Phase 2 — the watcher — **done**
 
-Settled the dependency: **no `websockets`.** `interfaces/conductor/websocket.py`
-is ~60 lines of RFC 6455 covering the subset actually used — one connection, text
+Settled the dependency: **no `websockets`.** `src/ictus/websocket.py` (moved out
+of `interfaces/conductor/` once Slack's Socket Mode used it too) is ~60 lines of
+RFC 6455 covering the subset actually used — one connection, text
 frames, no extensions. The maintained clients are asyncio-first and ictus is
 synchronous end to end, so the dependency would have dragged an event loop into
 the CLI to carry less code than it replaced. `ictus watch` runs a thread per run.
@@ -95,10 +98,10 @@ already permitted there.
 - Map event → `RunSignal`. Unmapped events are dropped, not forwarded.
 - **Close the socket on `workflow_completed` / `workflow_failed`.** Non-negotiable;
   a held connection stops the run reaping.
-- Reconnect on drop is **not** implemented and is deliberately deferred: a drop
-  mid-run is unobserved so far, and the right behaviour depends on whether the
-  run ended underneath us. `ictus watch` reports the run as detached with the
-  reason rather than silently reattaching to something that is gone.
+- Reconnect on drop: deferred at first, on the grounds that a mid-run drop had
+  not been seen. It had — every watch dropped forty seconds in, from a pong
+  that did not echo the ping. The watch now dials again while the run's process
+  lives, and reports the run failed when the process is gone without a word.
 
 `cli.py` — `ictus watch`. Long-lived, attaches to every discoverable run, detaches
 per run on terminal event. Does not change `ictus run`; ictus stays a compiler
@@ -112,21 +115,24 @@ boundary is the engine, this one is the audience.
 `SignalEvent` moved to `interfaces/__init__.py` on the way, so `notify/`
 imports no engine. Both sides need it and neither owns it.
 
-`NotifierKind` picks the payload — `WEBHOOK` or `SLACK` — and sits beside
-`McpTransport`, since it is a property of what the pipeline asked for rather
-than of whatever delivers it. The difference between the two is one JSON body.
+`NotifierKind` picked the payload — `WEBHOOK` or `SLACK` — beside
+`McpTransport`. Superseded in phase 4: that put a vendor in the composition
+model, so the service is now chosen by which `ictus.notify` constructor builds
+the integration, and nothing above `notify/` names one.
 
 The endpoint is treated as the credential it is: an incoming-webhook URL is
 the entire authorisation to post as whatever it points at, and `urllib` names
-the URL in its own exceptions, so every failure is rewritten to carry the
-notifier's name and the status and nothing else. Tested by asserting a known
-secret path never appears in any message.
+the URL in its own exceptions, so no failure quotes an exception: a reason is
+built from the exception's type, an HTTP status or the service's error code, and
+the secret's value is masked in anything returned. Tested with a scheme-less URL
+and a token carrying a carriage return, both of which urllib echoes whole.
 
 `smoke/fake_channel.py` accepts the same POST an incoming webhook does,
 so the whole path is watchable before anyone creates a Slack app.
 
-- `webhook.py` first. HTTP POST via `urllib.request`. No dependency.
-- `slack.py` is a webhook URL plus payload shape. Slack outbound — Incoming
+- `slack_webhook` and `slack_channel` in `notify/slack/send.py`. HTTP POST via
+  `urllib.request`. No dependency.
+- A webhook is a URL plus payload shape. Slack outbound — Incoming
   Webhooks and `chat.postMessage` — is HTTPS POST and never a WebSocket, so no
   Slack SDK is needed here.
 - One module per destination, one destination per module, as `stdlib/` does.
@@ -190,7 +196,8 @@ Under Socket Mode the watcher and the Slack listener are one daemon.
   connection; treating that as a failure stops the listener within the hour.
 - **One socket, not one per run.** An app may hold 10 connections and Slack
   delivers each event to *one* of them, so a per-run listener would drop clicks
-  meant for its neighbours. The run id travels in the button instead.
+  meant for its neighbours. The button names the step that posted it, and the
+  run is found from its own history (see the review fixes below).
 - **`response_url` posts to the channel, not the thread.** For a button inside a
   thread that puts the answer beside every other run's. The parent is in the
   payload; `chat.postMessage` with it is the only way to reply under the
@@ -199,6 +206,31 @@ Under Socket Mode the watcher and the Slack listener are one daemon.
 - **Who may press is a decision.** `--allow` takes Slack user ids; the default is
   anyone in the channel, which is right for an invited channel and wrong for a
   deploy.
+
+## Review fixes — **done**
+
+What a review of phases 1–4 found, each verified against a live engine:
+
+- **A report failed the run.** The announce step declared an output schema the
+  engine checks before routing, so a rate limit or an outage ended a run whose
+  work had succeeded. A report now always succeeds as a step and says
+  `posted: "false"` when it did not land.
+- **The watch dropped every run after forty seconds.** The pong did not echo the
+  ping's payload, and uvicorn's keepalive closed the socket.
+- **A stale button answered a later round.** A human gate carries no
+  `prompt_id`, and the engine matches an answer by name alone. A press is now
+  accepted only on the message its step posted last, found in the run's
+  history — which also finds the run without a run id on the button, so a
+  foreground run can be answered too.
+- **Reject lost its notes.** A choice with `prompt_for` now opens a form.
+- **Most gates went unannounced** — the start gate, any gate inside a stage —
+  while lint passed. Integrations are applied after the start policy, to every
+  pipeline in the tree, and a stage receives the thread as a parameter.
+- **Values crossing into a stage are JSON.** The engine parses each mapped value,
+  so a Slack timestamp arrived as a float.
+- **The watcher reported a stage finishing as the run finishing**, posted every
+  gate twice, and re-posted history on restart. It now delivers only what no
+  step said, after it attached, into the run's thread.
 
 ## Phase 5 — the trigger
 
@@ -218,22 +250,30 @@ it reports into the thread the event is already in.
   Runs execute on the host and something there maps `run-id -> 127.0.0.1:port`,
   or a `--web-host` flag is upstreamed.
 - **A run announcing its own URL** needs its port, which it can read from its own
-  fleet record using `CONDUCTOR_RUN_ID`, plus a public base from the environment
+  fleet record using `CONDUCTOR_SELF_RUN_ID` (every run exports it;
+  `CONDUCTOR_RUN_ID` is set only for `--web-bg`), plus a public base from the environment
   — `http://127.0.0.1:50984` means nothing to anyone else.
 - **`ictus run --web-port`** is not exposed and would make proxy routing
   predictable.
 
 ## Tests
 
-- Signal mapping is total: every `RunSignal` maps to at least one event, every
-  mapped event name exists in the Phase 0 fixture.
-- `require_notifier` refuses an empty `purpose`; a signal outside
-  `Capabilities.signals` refuses at composition.
-- Watcher against a fake local WebSocket server: closes on terminal event,
-  reconnects on drop, drops unmapped events, rejects a stale `prompt_id`.
-- Preflight reports an unset notifier `EnvVar` as blocking.
-- `test_docs.py` already enforces the catalogue — `STDLIB.md` and `README.md`
-  must list anything new.
+- Signal mapping is total: every `RunSignal` maps to at least one event, and
+  every mapped event name appears in the installed engine's own source.
+- An integration refuses an empty `purpose`; a signal outside
+  `Capabilities.signals` is a lint failure; one only the watcher can deliver is a
+  preflight warning.
+- Where announcements land: the start gate, gates in stages two deep, questions,
+  every route to END, two integrations, explicit `max_iterations`.
+- The sending program fails open on 429, 500, a refused connection and a hang,
+  and never prints its credential.
+- Watcher against a stand-in dashboard: closes on terminal event, ignores a
+  stage's, reconnects on drop, reports a vanished engine, answers pings with
+  their payload.
+- Listener: a press on an earlier round is refused, a press finds its run from
+  history, a dropped Slack connection is dialled again.
+- Preflight reports an unset integration `EnvVar` as blocking.
+- `test_docs.py` enforces the `STDLIB.md` catalogue for `ictus.stdlib`.
 
 ## Decisions
 

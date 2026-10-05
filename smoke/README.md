@@ -1,6 +1,6 @@
 # Smoke test: the run event surface
 
-Proves what [run-events.md](../run-events.md) claims, against a live engine:
+Proves what [run-events.md](../docs/run-events.md) claims, against a live engine:
 a run is discoverable, its event stream is readable, and its gates are
 answerable from outside the process.
 
@@ -102,10 +102,10 @@ working directory, which `.gitignore` already covers.
 
 ## Seeing a report arrive
 
-An integration is declared in `pipeline.py`, never in the emitted YAML — the
-engine runs no side effect at a step boundary, so a declaration that compiled to
-something would be a lie in the diff. `pipeline.integrate(...)` is read from the
-source and the announcements are inserted when the pipeline loads.
+An integration is declared in `pipeline.py`, and attached when the pipeline
+loads: the announcement steps it adds are in the emitted YAML like any other
+step, so what is committed in `build/` is what runs. Which service they report
+to, and what it is subscribed to, are in `pipeline.py` only.
 
 You do not need Slack to watch this work. `fake_channel.py` answers both shapes
 ictus posts in and prints what it was sent:
@@ -130,22 +130,50 @@ pipeline.integrate(
 )
 ```
 
-That one line is the whole attachment: an announcement is inserted before every
-gate and every exit, and the thread between them is wired for you. Deleting the
-line removes it, with no nodes or data edges left behind.
+That one line is the whole attachment: an opener the run's thread hangs off,
+an announcement before every gate — the start gate included, with its own
+choices as buttons — and one before every way the run ends. Deleting the line
+removes it, with no nodes or data edges left behind.
 
-Then run it as above. What lands in the channel:
+Then run it as above. What lands in the channel, one thread per run:
 
-    *smoke-events* needs a decision
-    > step: `smoke_gate`
-    > waiting on: `approved`, `rejected`
-    run `e6d616c3`
+    *smoke-events* — new run
+      ↳ *smoke-events* needs a decision
+        Start **smoke-events**? …        [Start the run] [Stop — do not run]
+      ↳ *smoke-events* needs a decision
+        Approve to continue, or reject and leave a note.     [Approve] [Reject]
+      ↳ ✅ *smoke-events* finished
 
-Point the variables at a real workspace and the same messages arrive there.
+Point the variables at a real workspace and the same messages arrive there. A
+report that cannot be sent never fails the run: its step records
+`posted: "false"` and why, and the run goes on. Stop `fake_channel.py` halfway
+through to see it.
 
 **Unset a variable and `ictus preflight` refuses the run** before anything is
 spent — the point of declaring it. The committed pipeline integrates nothing, so
 the gate needs no configuration.
+
+### Answering from the channel
+
+`ictus listen` answers a gate when one of its buttons is pressed. It needs a
+Slack app with Socket Mode on, an app-level token with `connections:write`, and
+the same bot token the pipeline posts with:
+
+    export SLACK_APP_TOKEN=xapp-...
+    uv run ictus listen --allow U0123ABC
+
+A press is answered on the run that posted the button, and only on the newest
+message a question was asked in — a button left over from an earlier round of a
+loop is refused. Reject asks for its note in a form. The fake channel cannot
+deliver presses; this part needs a real workspace.
+
+### Watching from outside
+
+    uv run ictus watch demo_work/pipelines/smoke-events --follow
+
+reports what no step can: a step failing, a budget crossed, the iteration limit
+reached, the engine killed. It posts those into the run's thread, and nothing a
+step already said.
 
 ## What it demonstrates
 
@@ -165,7 +193,7 @@ the gate needs no configuration.
       curl -s http://127.0.0.1:<port>/api/info    # answers, then stops answering
 
   Hold the socket open instead and it never exits — which is the hazard
-  [run-events.md](../run-events.md) records under Reaping.
+  [run-events.md](../docs/run-events.md) records under Reaping.
 
 ## Re-recording the fixtures
 

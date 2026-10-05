@@ -142,7 +142,7 @@ its options and what it produces.
 |---|---|---|
 | `gates/` | `human_gate`, `questions` | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
 | `agents/` | `agent` | `briefing`, `verdict`, `voice`, `validate_mcp`, `remediate` |
-| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text` |
+| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text`, `announce` |
 | `terminals/` | `terminate` | `succeed`, `fail` |
 | `stages/` | `workflow` | `briefing_gate`, `resolve_unknowns`, `script_sequence`, `validate_mcps`, and the scopes `converge`, `council` and `roundtable` |
 
@@ -355,6 +355,16 @@ should not have to treat "a person looked at it and said no" as an error.
     ictus emit pipelines/      # each folder's own build/
     ictus lint pipelines/      # composition rules only, writes nothing
     ictus validate pipelines/  # hands the emitted YAML to conductor
+
+    ictus watch pipelines/needs-council --follow   # report what no step can see
+    ictus listen --allow U0123ABC                  # answer gates from Slack buttons
+
+A pipeline that calls `pipeline.integrate(...)` reports into a channel from
+inside the run: an announcement before every gate, the start gate included, and
+before every ending. `watch` reports what no step can — a step failing, a budget
+crossed, the engine dying — and `listen` answers a gate when its button is
+pressed. [smoke/README.md](smoke/README.md) walks through all three without a
+Slack workspace.
 
 `soundcheck` ends with `conductor validate`, and that step is not optional: a
 green build that never asked Conductor whether the output loads has checked
