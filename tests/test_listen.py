@@ -22,7 +22,8 @@ def _envelope(**action: object) -> dict[str, object]:
         "payload": {
             "type": "block_actions",
             "user": {"id": "U123"},
-            "response_url": "https://hooks.slack.test/reply",
+            "channel": {"id": "C0TEST"},
+            "message": {"ts": "1700000000.000100"},
             "actions": [{"type": "button", "value": json.dumps(action)} if action else {}],
         },
     }
@@ -35,7 +36,8 @@ def test_a_press_carries_the_run_the_gate_and_the_choice() -> None:
     (click,) = _pressed(_envelope(run="abc12345", gate="ship_it", choice="approved"))
     assert (click.run_id, click.gate, click.choice) == ("abc12345", "ship_it", "approved")
     assert click.who == "U123"
-    assert click.response_url == "https://hooks.slack.test/reply"
+    assert click.channel == "C0TEST"
+    assert click.thread_ts == "1700000000.000100", "a reply must go under the question"
 
 
 def test_a_button_that_is_not_ours_is_ignored() -> None:
@@ -152,3 +154,19 @@ def test_the_query_string_survives(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["port"] == 443
     assert seen["tls"] is True
     assert seen["path"] == "/link/?ticket=abc&app_id=A1"
+
+
+def test_a_button_already_inside_a_thread_replies_in_that_thread() -> None:
+    """Its own ts is the reply's, not the thread's; the parent is thread_ts."""
+    envelope = _envelope(run="r", gate="g", choice="c")
+    payload = envelope["payload"]
+    assert isinstance(payload, dict)
+    payload["message"] = {"ts": "1700000009.000999", "thread_ts": "1700000000.000100"}
+    (click,) = _pressed(envelope)
+    assert click.thread_ts == "1700000000.000100"
+
+
+def test_a_button_on_a_thread_root_opens_that_thread() -> None:
+    """The root has no thread_ts of its own, so its ts is what replies hang off."""
+    (click,) = _pressed(_envelope(run="r", gate="g", choice="c"))
+    assert click.thread_ts == "1700000000.000100"

@@ -924,6 +924,8 @@ def _report_delivery(results: list[Delivered]) -> None:
 
 
 APP_TOKEN_ENV = "SLACK_APP_TOKEN"
+#: Needed to reply under the question rather than beside it.
+BOT_TOKEN_ENV = "SLACK_BOT_TOKEN"
 
 
 @app.command()
@@ -948,6 +950,14 @@ def listen(
     inherit.
     """
     token = os.environ.get(APP_TOKEN_ENV)
+    bot = os.environ.get(BOT_TOKEN_ENV, "")
+    if not bot:
+        typer.secho(
+            f"warning: ${BOT_TOKEN_ENV} is not set, so presses will be answered but "
+            "nothing will be said about it in the thread.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
     if not token:
         _fail(
             f"${APP_TOKEN_ENV} is not set. Enable Socket Mode on the Slack app, generate "
@@ -964,7 +974,7 @@ def listen(
         for click in clicks(token):
             outcome = resolve(click, allowed=permitted)
             typer.echo(f"  {click.run_id} {click.gate}={click.choice} -> {outcome}")
-            say(click.response_url, outcome)
+            say(click, outcome, token=bot)
     except KeyboardInterrupt:
         typer.secho("\nstopped listening; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
     except IctusError as exc:

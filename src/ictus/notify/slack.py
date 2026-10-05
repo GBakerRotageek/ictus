@@ -11,6 +11,9 @@ else is in the dashboard, which the message links to.
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from typing import TYPE_CHECKING
 
 from ictus.graph.signals import RunSignal
@@ -18,7 +21,7 @@ from ictus.graph.signals import RunSignal
 if TYPE_CHECKING:
     from ictus.interfaces import SignalEvent
 
-__all__ = ["HEADLINE", "message"]
+__all__ = ["API", "HEADLINE", "message", "reply"]
 
 #: What each signal says, in the voice of someone telling you about it.
 HEADLINE: dict[RunSignal, str] = {
@@ -87,3 +90,49 @@ def _first_line(text: str, *, limit: int = 160) -> str:
     """The opening of a prompt, flattened. A channel is not a document."""
     opening = " ".join(text.strip().splitlines()[:1])
     return opening if len(opening) <= limit else opening[: limit - 1] + "…"
+
+
+API = "https://slack.com/api/chat.postMessage"
+REPLY_TIMEOUT_SECONDS = 10.0
+
+
+def reply(
+    *,
+    token: str,
+    channel: str,
+    thread_ts: str,
+    text: str,
+    timeout: float = REPLY_TIMEOUT_SECONDS,
+) -> str:
+    """Say ``text`` under ``thread_ts``. Returns "" on success, else why not.
+
+    ``chat.postMessage`` rather than the click's ``response_url``: that one posts
+    where the *message* was, which for a button inside a thread is the channel
+    root — so the answer to a question asked in a thread landed outside it, next
+    to every other run's. Threading needs the parent, and the parent is in the
+    payload.
+
+    Never raises. Saying what happened is the last thing in a sequence whose
+    real work — answering the gate — is already done.
+    """
+    body: dict[str, object] = {"channel": channel, "text": text}
+    if thread_ts:
+        body["thread_ts"] = thread_ts
+    request = urllib.request.Request(
+        API,
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            answer = json.loads(response.read())
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"could not reach Slack: {type(exc).__name__}"
+    if isinstance(answer, dict) and answer.get("ok"):
+        return ""
+    error = str(answer.get("error")) if isinstance(answer, dict) else "unreadable reply"
+    return f"Slack refused the reply: {error}"

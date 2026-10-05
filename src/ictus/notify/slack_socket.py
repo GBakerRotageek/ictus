@@ -35,13 +35,14 @@ from ictus.errors import IctusError
 from ictus.interfaces.conductor.respond import answer_gate
 from ictus.interfaces.conductor.runs import live_runs
 from ictus.interfaces.conductor.websocket import connect
+from ictus.notify.slack import reply
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Click", "SlackError", "clicks", "open_socket", "resolve"]
+__all__ = ["Click", "SlackError", "clicks", "open_socket", "resolve", "say"]
 
 OPEN_URL = "https://slack.com/api/apps.connections.open"
 REPLY_TIMEOUT_SECONDS = 10.0
@@ -61,8 +62,13 @@ class Click:
     who: str
     """The Slack user id. Who pressed it is the only authorisation signal there is."""
 
-    response_url: str = ""
-    """Where to say what happened. Good for 30 minutes, five uses, no token."""
+    channel: str = ""
+    thread_ts: str = ""
+    """The thread the button is in, so the answer goes back under the question.
+
+    A button in a thread root has no ``thread_ts`` of its own — its own ``ts``
+    *is* the thread — so both are read and the first that exists wins.
+    """
 
     envelope_id: str = ""
 
@@ -143,6 +149,7 @@ def _pressed(envelope: dict[str, object]) -> Iterator[Click]:
     actions = payload.get("actions")
     user = payload.get("user")
     who = str(user.get("id", "")) if isinstance(user, dict) else ""
+    channel, thread = _where(payload)
     if not isinstance(actions, list):
         return
     for action in actions:
@@ -159,9 +166,27 @@ def _pressed(envelope: dict[str, object]) -> Iterator[Click]:
             gate=str(value["gate"]),
             choice=str(value["choice"]),
             who=who,
-            response_url=str(payload.get("response_url", "")),
+            channel=channel,
+            thread_ts=thread,
             envelope_id=str(envelope.get("envelope_id", "")),
         )
+
+
+def _where(payload: dict[str, object]) -> tuple[str, str]:
+    """The channel and thread a press came from.
+
+    ``message.thread_ts`` when the button is already inside a thread, and the
+    message's own ``ts`` when it is the thread root — replying to that opens the
+    thread rather than starting a second conversation beside it.
+    """
+    channel = payload.get("channel")
+    where = str(channel.get("id", "")) if isinstance(channel, dict) else ""
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        container = payload.get("container")
+        message = container if isinstance(container, dict) else {}
+    thread = message.get("thread_ts") or message.get("ts") or message.get("message_ts") or ""
+    return where, str(thread)
 
 
 def resolve(click: Click, *, allowed: frozenset[str] = frozenset()) -> str:
@@ -186,21 +211,20 @@ def resolve(click: Click, *, allowed: frozenset[str] = frozenset()) -> str:
     return f"could not answer {click.gate}: {outcome.detail}"
 
 
-def say(response_url: str, text: str) -> None:
-    """Reply where the button was, in its thread. Needs no token.
+def say(click: Click, text: str, *, token: str) -> None:
+    """Answer under the question, not beside it.
 
-    Best effort: a report about a report is not worth failing a daemon over, and
-    the gate has already been answered by the time this runs.
+    The click's ``response_url`` was the obvious route and it is wrong: it posts
+    where the *message* lives, which for a button inside a thread is the channel
+    root — so the answer to a question asked in a thread landed outside it,
+    beside every other run's, which is the thing threading exists to prevent.
+
+    Best effort. The gate is already answered by the time this runs, so a report
+    about a report is not worth failing a daemon over — but it is logged, because
+    a thread that goes quiet after a press looks like nothing happened.
     """
-    if not response_url:
+    if not token or not click.channel:
         return
-    request = urllib.request.Request(
-        response_url,
-        data=json.dumps({"text": text, "response_type": "in_channel"}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        urllib.request.urlopen(request, timeout=REPLY_TIMEOUT_SECONDS).read()
-    except OSError:
-        logger.warning("could not post back to Slack about %s", text)
+    why = reply(token=token, channel=click.channel, thread_ts=click.thread_ts, text=text)
+    if why:
+        logger.warning("could not say what happened to %s: %s", click.gate, why)
