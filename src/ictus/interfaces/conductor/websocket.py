@@ -20,15 +20,17 @@ import base64
 import contextlib
 import secrets
 import socket
+import ssl
 import struct
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from ictus.errors import IctusError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-__all__ = ["HandshakeError", "WebSocket"]
+__all__ = ["HandshakeError", "WebSocket", "connect"]
 
 _FIN_TEXT = 0x81
 _MASKED = 0x80
@@ -54,8 +56,13 @@ class WebSocket:
         *,
         headers: Mapping[str, str] | None = None,
         timeout: float = CONNECT_TIMEOUT_SECONDS,
+        tls: bool = False,
     ) -> None:
         self._sock = socket.create_connection((host, port), timeout=timeout)
+        if tls:
+            # Slack's Socket Mode is wss. The default context verifies the
+            # certificate and the hostname, which is the point of using it.
+            self._sock = ssl.create_default_context().wrap_socket(self._sock, server_hostname=host)
         self._buffer = b""
         key = base64.b64encode(secrets.token_bytes(16)).decode()
         lines = [
@@ -167,3 +174,27 @@ class WebSocket:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def connect(
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    timeout: float = CONNECT_TIMEOUT_SECONDS,
+) -> WebSocket:
+    """Open ``ws://`` or ``wss://``, with the query string kept.
+
+    Slack hands out a URL with credentials in its query, so dropping it would
+    produce a handshake that is refused for no visible reason.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("ws", "wss"):
+        raise HandshakeError(f"{parts.scheme!r} is not a websocket scheme; use ws or wss")
+    tls = parts.scheme == "wss"
+    port = parts.port or (443 if tls else 80)
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    return WebSocket(
+        parts.hostname or "127.0.0.1", port, path, headers=headers, timeout=timeout, tls=tls
+    )

@@ -29,10 +29,11 @@ interpolating a gate prompt would break on the first apostrophe.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
-from ictus.graph.node import ScriptNode
+from ictus.graph.node import GateNode, ScriptNode
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import as_template
 
@@ -58,6 +59,7 @@ _POST = """import json, os, sys, urllib.request as r
 
 text = sys.stdin.read()
 parent = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+asks = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {{}}
 secret = os.environ.get({secret!r})
 if not secret:
     sys.exit({secret!r} + " is not set, so there was nowhere to report")
@@ -80,6 +82,27 @@ if channel:
     body = {{"channel": channel, "text": text}}
     if parent:
         body["thread_ts"] = parent
+    if asks:
+        # A button carries everything the responder needs to answer the right
+        # gate on the right run: the run id is only knowable here, at run time.
+        run_now = os.environ.get("CONDUCTOR_RUN_ID", "")
+        body["blocks"] = [
+            {{"type": "section", "text": {{"type": "mrkdwn", "text": text}}}},
+            {{
+                "type": "actions",
+                "elements": [
+                    {{
+                        "type": "button",
+                        "text": {{"type": "plain_text", "text": label}},
+                        "value": json.dumps(
+                            {{"run": run_now, "gate": asks["gate"], "choice": value}}
+                        ),
+                        "action_id": "ictus_gate_" + value,
+                    }}
+                    for value, label in asks["buttons"]
+                ],
+            }},
+        ]
     endpoint = os.environ.get("SLACK_API_URL") or {api!r}
     req = r.Request(
         endpoint,
@@ -124,6 +147,8 @@ def announce(
     to: EnvVar,
     channel: EnvVar | None = None,
     thread: Ref | None = None,
+    answers: GateNode | str | None = None,
+    buttons: Sequence[tuple[str, str]] | None = None,
     label: str = "",
     description: str = "",
     inputs: Sequence[InputPort] = (),
@@ -160,6 +185,8 @@ def announce(
     if '"' in label:
         raise CompositionError(f"announce node {node_id!r}: label cannot contain a quote")
 
+    asks = _buttons_for(node_id, answers, buttons, channel)
+
     declared = list(inputs)
     if thread is not None and not any(port.name == thread.source_id for port in declared):
         # The reply reads the opener's output, so the opener has to be in scope.
@@ -183,6 +210,7 @@ def announce(
             # rendered template, and interpolating one into Python text is how a
             # quote in somebody's data becomes a syntax error at run time.
             as_template(thread) if thread is not None else "",
+            asks,
         ),
         stdin=text,
         timeout=timeout + 5,
@@ -191,3 +219,46 @@ def announce(
             OutputPort("posted", PortType.STRING, "Always 'true'; the step fails otherwise"),
         ),
     )
+
+
+def _buttons_for(
+    node_id: str,
+    answers: GateNode | str | None,
+    buttons: Sequence[tuple[str, str]] | None,
+    channel: EnvVar | None,
+) -> str:
+    """The button spec, as the JSON the posting script reads from argv.
+
+    Taking the gate itself is the point: its choices are the buttons, so the two
+    cannot drift and a renamed option cannot leave a button that answers nothing.
+    A gate reached by name needs its ``buttons`` spelled out, which is what the
+    start gate requires — it does not exist until the pipeline is loaded.
+    """
+    if answers is None:
+        if buttons:
+            raise CompositionError(
+                f"announce node {node_id!r} offers buttons but names no gate for them "
+                "to answer; pass answers=<gate>"
+            )
+        return ""
+    if channel is None:
+        raise CompositionError(
+            f"announce node {node_id!r} offers buttons but names no channel. Buttons are "
+            "Block Kit, which a webhook cannot carry back — they need a bot token."
+        )
+    gate = answers.node_id if isinstance(answers, GateNode) else answers
+    if buttons is None:
+        if not isinstance(answers, GateNode):
+            raise CompositionError(
+                f"announce node {node_id!r} answers {gate!r} by name, so its buttons "
+                "cannot be read off it; pass buttons=((value, label), ...)"
+            )
+        buttons = [(choice.value, choice.label or choice.value) for choice in answers.choices]
+    if not buttons:
+        raise CompositionError(f"announce node {node_id!r} offers an empty set of buttons")
+    seen = {value for value, _ in buttons}
+    if len(seen) != len(buttons):
+        raise CompositionError(
+            f"announce node {node_id!r} repeats a button value; each one is a distinct answer"
+        )
+    return json.dumps({"gate": gate, "buttons": [list(pair) for pair in buttons]})

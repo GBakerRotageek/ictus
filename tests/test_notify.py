@@ -13,12 +13,12 @@ import pytest
 
 from ictus import EnvVar, Notifier, NotifierKind, RunSignal
 from ictus.errors import CompositionError
-from ictus.graph.node import NodeKind
+from ictus.graph.node import GateNode, NodeKind
 from ictus.interfaces import SignalEvent
 from ictus.notify import Delivered, DeliveryError, body_for, deliver, endpoint_for
 from ictus.notify.slack import HEADLINE, message
 from ictus.notify.webhook import post
-from ictus.stdlib import announce
+from ictus.stdlib import announce, approval_gate
 from ictus.stdlib.steps.announce import THREAD_PORT
 
 if TYPE_CHECKING:
@@ -63,7 +63,9 @@ class _Collector(BaseHTTPRequestHandler):
         type(self).received.append((self.path, body))
         self.send_response(type(self).status)
         self.end_headers()
-        self.wfile.write(b"ok")
+        # Slack-shaped either way: a webhook ignores the body, and the API path
+        # reads `ts` off it to learn the thread it just opened.
+        self.wfile.write(json.dumps({"ok": True, "ts": "1700000000.000100"}).encode())
 
     def log_message(self, *_: object) -> None:
         """Silence; the test output is the assertion."""
@@ -318,7 +320,7 @@ def test_the_thread_goes_through_argv_not_into_the_script_source() -> None:
         channel=EnvVar("C", "w"),
         thread=opener.ref(THREAD_PORT),
     )
-    assert len(reply.args) == 3
+    assert len(reply.args) == 4  # -c, the script, the thread, the buttons
     compile(str(reply.args[1]), "<announce>", "exec")
 
 
@@ -367,3 +369,103 @@ def test_the_posting_script_actually_posts(
     )
     assert done.returncode == 0, done.stderr
     assert received[0][1] == {"text": 'it\'s a gate, "really"'}
+
+
+# --- buttons -----------------------------------------------------------------
+
+
+def _gate() -> GateNode:
+    return approval_gate(node_id="ship_it", prompt="Deploy?")
+
+
+def _spec(node: object) -> dict[str, object]:
+    loaded = json.loads(str(node.args[3]))  # type: ignore[attr-defined]
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def test_buttons_are_read_off_the_gate_they_answer() -> None:
+    """So a renamed option cannot leave a button that answers nothing."""
+    node = announce(
+        node_id="ask", text="?", to=EnvVar("T", "t"), channel=EnvVar("C", "c"), answers=_gate()
+    )
+    spec = _spec(node)
+    assert spec["gate"] == "ship_it"
+    assert spec["buttons"] == [["approved", "Approve"], ["rejected", "Reject"]]
+
+
+def test_a_gate_named_as_a_string_must_spell_its_buttons_out() -> None:
+    """The start gate does not exist until the pipeline is loaded."""
+    with pytest.raises(CompositionError, match="cannot be read off it"):
+        announce(
+            node_id="ask", text="?", to=EnvVar("T", "t"), channel=EnvVar("C", "c"), answers="x"
+        )
+
+
+def test_buttons_without_a_gate_are_refused() -> None:
+    with pytest.raises(CompositionError, match="names no gate"):
+        announce(
+            node_id="ask",
+            text="?",
+            to=EnvVar("T", "t"),
+            channel=EnvVar("C", "c"),
+            buttons=(("a", "A"),),
+        )
+
+
+def test_buttons_need_a_bot_token_because_a_webhook_cannot_carry_them_back() -> None:
+    with pytest.raises(CompositionError, match="names no channel"):
+        announce(node_id="ask", text="?", to=EnvVar("T", "t"), answers=_gate())
+
+
+def test_a_repeated_button_value_is_refused() -> None:
+    """Two buttons that send the same answer is a composition mistake."""
+    with pytest.raises(CompositionError, match="repeats a button value"):
+        announce(
+            node_id="ask",
+            text="?",
+            to=EnvVar("T", "t"),
+            channel=EnvVar("C", "c"),
+            answers="g",
+            buttons=(("a", "A"), ("a", "B")),
+        )
+
+
+def test_an_announcement_with_no_buttons_sends_no_block_kit() -> None:
+    node = announce(node_id="t", text="x", to=EnvVar("T", "t"), channel=EnvVar("C", "c"))
+    assert str(node.args[3]) == ""
+
+
+def test_a_button_carries_the_run_the_gate_and_the_choice(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Everything the responder needs to answer the right gate on the right run."""
+    url, received = collector
+    node = announce(
+        node_id="ask",
+        text="Deploy?",
+        to=EnvVar("TEST_TOKEN", "t"),
+        channel=EnvVar("TEST_CHANNEL", "c"),
+        answers=_gate(),
+    )
+    monkeypatch.setenv("TEST_TOKEN", "xoxb-pretend")
+    monkeypatch.setenv("TEST_CHANNEL", "C0TEST")
+    monkeypatch.setenv("SLACK_API_URL", url)
+    monkeypatch.setenv("CONDUCTOR_RUN_ID", "abc12345")
+    done = subprocess.run(
+        [sys.executable, "-c", str(node.args[1]), str(node.args[2]), str(node.args[3])],
+        input="Deploy?",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    body = received[0][1]
+    blocks = body["blocks"]
+    assert isinstance(blocks, list)
+    elements = blocks[1]["elements"]
+    assert [json.loads(e["value"]) for e in elements] == [
+        {"run": "abc12345", "gate": "ship_it", "choice": "approved"},
+        {"run": "abc12345", "gate": "ship_it", "choice": "rejected"},
+    ]
+    assert [e["text"]["text"] for e in elements] == ["Approve", "Reject"]

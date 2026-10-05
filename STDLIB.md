@@ -44,7 +44,7 @@ No provider call, still 1 iteration each.
 | `constant` | One computed value | `value`, `output_type` | `value`, typed as `output_type` |
 | `bindings` | Several named values at once | `values`, `outputs` | one port per declared output |
 | `counter` | Count passes through a point, from one | — | `value: number` |
-| `announce` | Report to Slack from inside the graph | `text`, `to`, `channel`, `thread`, `label`, `timeout` | `thread_ts`, `posted` |
+| `announce` | Report to Slack from inside the graph | `text`, `to`, `channel`, `thread`, `answers`, `buttons`, `label`, `timeout` | `thread_ts`, `posted` |
 | `save_text` | Write a value another step produced to a file | `text`, `to`, `append`, `working_dir` | `path: string` |
 | `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs` | whatever `outputs` declares |
 | `wait` | Pause | `seconds`, `reason` | — |
@@ -69,6 +69,14 @@ carry neither; the thread already says which run they belong to.
 
 The input a `thread=` reply needs is declared for you. The *data edge* is not —
 wire it with `feed`, and the lint refuses the graph without it.
+
+`answers=<gate>` puts that gate's choices in the message as buttons, read off
+the gate so a renamed option cannot leave a button that answers nothing. A gate
+named as a *string* must spell its `buttons` out, which is what the start gate
+needs — it does not exist until the pipeline is loaded. Each button carries the
+run, the gate and the choice, so whatever receives the click knows what to
+answer. Buttons are Block Kit and a webhook cannot carry them back, so they
+need a bot token like threading does.
 
 ## Terminals
 

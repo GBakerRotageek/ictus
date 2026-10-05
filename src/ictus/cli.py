@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import threading
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.notify import Delivered, deliver
+from ictus.notify.slack_socket import clicks, resolve, say
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
@@ -919,6 +921,54 @@ def _report_delivery(results: list[Delivered]) -> None:
             typer.secho(f"      -> {result.notifier}", fg=typer.colors.BRIGHT_BLACK)
         else:
             typer.secho(f"      -> {result.notifier}: {result.detail}", fg=typer.colors.RED)
+
+
+APP_TOKEN_ENV = "SLACK_APP_TOKEN"
+
+
+@app.command()
+def listen(
+    allow: Annotated[
+        list[str] | None,
+        typer.Option("--allow", help="Slack user id that may answer; repeatable"),
+    ] = None,
+) -> None:
+    """Answer gates from Slack, by listening for button presses.
+
+    Opens a websocket outward to Slack, so nothing here has to be publicly
+    reachable. Reads the app-level token from $SLACK_APP_TOKEN.
+
+    Every press is answered against the run the button names, and what happened
+    is posted back where the button was — including when nothing happened,
+    because a button that silently does nothing is worse than no button.
+
+    Without `--allow`, anyone in the channel may answer. That is right for a
+    channel people were invited to and wrong for a deploy; there is no middle
+    setting, because who may approve something is a decision to make rather than
+    inherit.
+    """
+    token = os.environ.get(APP_TOKEN_ENV)
+    if not token:
+        _fail(
+            f"${APP_TOKEN_ENV} is not set. Enable Socket Mode on the Slack app, generate "
+            "an app-level token with connections:write, and export it."
+        )
+        return
+    permitted = frozenset(allow or ())
+    typer.secho(
+        "listening for button presses"
+        + (f"; only {', '.join(sorted(permitted))} may answer" if permitted else ""),
+        fg=typer.colors.CYAN,
+    )
+    try:
+        for click in clicks(token):
+            outcome = resolve(click, allowed=permitted)
+            typer.echo(f"  {click.run_id} {click.gate}={click.choice} -> {outcome}")
+            say(click.response_url, outcome)
+    except KeyboardInterrupt:
+        typer.secho("\nstopped listening; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
+    except IctusError as exc:
+        _fail(str(exc))
 
 
 # Last in the file, and it must stay last. Under `python -m ictus.cli` this
