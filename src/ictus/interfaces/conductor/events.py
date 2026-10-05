@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from ictus.interfaces import SignalEvent
 from ictus.interfaces.conductor.runs import token_for
 from ictus.interfaces.conductor.signals import signal_for
-from ictus.interfaces.conductor.websocket import WebSocket
+from ictus.websocket import WebSocket
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator

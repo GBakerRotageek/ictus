@@ -1,4 +1,8 @@
-"""Just enough of RFC 6455 to hold one conversation with a dashboard.
+"""Just enough of RFC 6455 to hold one conversation open.
+
+Two peers use it: a run's dashboard, which ``ictus watch`` reads, and Slack's
+Socket Mode, which ``ictus listen`` reads. It lives above both because it knows
+neither — it is framing, and the framing is the same.
 
 A dependency was the obvious alternative and was rejected twice over. ``ictus``
 is synchronous end to end — a Typer CLI driving subprocesses — and the
@@ -11,7 +15,12 @@ standard library and justify each dependency; this one could not be justified.
 What that costs is written down rather than discovered: anything beyond the
 subset below is unimplemented, and ``messages`` raises rather than guessing.
 
-Verified against conductor-cli 0.1.41's dashboard.
+The part of the subset that is easiest to get wrong is the keepalive. A peer
+pings, and the pong must carry the ping's payload back (RFC 6455 §5.5.3). The
+dashboard's server (uvicorn with ``websockets``) pings every 20 s and drops the
+connection 20 s later unless a pong *with that payload* arrives, so an empty
+pong is the same as no pong: the first version of this answered with one, and
+every watcher was disconnected forty seconds after it attached.
 """
 
 from __future__ import annotations
@@ -32,17 +41,17 @@ if TYPE_CHECKING:
 
 __all__ = ["HandshakeError", "WebSocket", "connect"]
 
-_FIN_TEXT = 0x81
+_FIN = 0x80
 _MASKED = 0x80
 
 _CONTINUATION, _TEXT, _BINARY, _CLOSE, _PING, _PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
-#: Bounds reaching the dashboard and finishing the handshake, nothing after.
+#: Bounds reaching the peer and finishing the handshake, nothing after.
 CONNECT_TIMEOUT_SECONDS = 15.0
 
 
 class HandshakeError(IctusError):
-    """The dashboard refused the connection, usually a token the run won't take."""
+    """The peer refused the connection, usually a credential it won't take."""
 
 
 class WebSocket:
@@ -64,6 +73,7 @@ class WebSocket:
             # certificate and the hostname, which is the point of using it.
             self._sock = ssl.create_default_context().wrap_socket(self._sock, server_hostname=host)
         self._buffer = b""
+        self._said_goodbye = False
         key = base64.b64encode(secrets.token_bytes(16)).decode()
         lines = [
             f"GET {path} HTTP/1.1",
@@ -78,14 +88,17 @@ class WebSocket:
         status = self._until(b"\r\n\r\n").split(b"\r\n", 1)[0].decode(errors="replace")
         if " 101" not in status:
             self.close()
+            # The query string is left out on purpose: Slack hands out a URL
+            # whose query is a single-use connection ticket.
             raise HandshakeError(
-                f"{host}:{port}{path} refused the connection: {status}. "
+                f"{host}:{port}{path.split('?', 1)[0]} refused the connection: {status}. "
                 "A 403 is the token; read-only routes take none, the socket does."
             )
         # Blocking from here on, deliberately. A run parked at a gate emits
         # nothing for as long as the person takes to answer it, so any read
         # deadline drops precisely the connection that was worth holding — and
-        # the gate it was waiting to report stays unreported.
+        # the gate it was waiting to report stays unreported. The peer's pings
+        # are what keep a quiet connection alive, and `messages` answers them.
         self._sock.settimeout(None)
 
     # -- framing ------------------------------------------------------------
@@ -108,10 +121,9 @@ class WebSocket:
         taken, self._buffer = self._buffer[:count], self._buffer[count:]
         return taken
 
-    def send(self, text: str) -> None:
-        """Send one text frame. A client frame must be masked; a server's is not."""
-        payload = text.encode()
-        header = bytearray([_FIN_TEXT])
+    def _frame(self, opcode: int, payload: bytes) -> None:
+        """Send one final frame. A client frame must be masked; a server's is not."""
+        header = bytearray([_FIN | opcode])
         size = len(payload)
         if size < 126:
             header.append(_MASKED | size)
@@ -126,46 +138,62 @@ class WebSocket:
         masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
         self._sock.sendall(bytes(header) + masked)
 
+    def send(self, text: str) -> None:
+        """Send one text frame."""
+        self._frame(_TEXT, text.encode())
+
     def messages(self) -> Iterator[str]:
         """Each text message, until the peer closes. Answers pings in passing."""
-        pending = ""
+        pending = b""
         while True:
             first, second = self._exactly(2)
-            final, opcode = bool(first & 0x80), first & 0x0F
+            final, opcode = bool(first & _FIN), first & 0x0F
             size = second & 0x7F
             if size == 126:
                 size = struct.unpack("!H", self._exactly(2))[0]
             elif size == 127:
                 size = struct.unpack("!Q", self._exactly(8))[0]
+            # A server must not mask, but the key, when present, sits between
+            # the length and the payload and is not counted in the length.
+            mask = self._exactly(4) if second & _MASKED else b""
             payload = self._exactly(size) if size else b""
-            if second & _MASKED:  # a server frame must not be masked
-                payload = bytes(b ^ payload[i % 4] for i, b in enumerate(payload[4:]))
+            if mask:
+                payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
 
             if opcode == _CLOSE:
+                # Echo the status back, as the closing handshake asks, so the
+                # peer records a clean close rather than an abandoned one.
+                self._goodbye(payload[:2])
                 return
             if opcode == _PING:
-                self._sock.sendall(bytes([0x80 | _PONG, _MASKED]) + secrets.token_bytes(4))
+                self._frame(_PONG, payload)
                 continue
             if opcode == _PONG:
                 continue
             if opcode == _BINARY:
-                raise NotImplementedError(
-                    "the dashboard sent a binary frame; this client is text-only"
-                )
+                raise NotImplementedError("the peer sent a binary frame; this client is text-only")
             if opcode not in (_TEXT, _CONTINUATION):
                 raise NotImplementedError(f"unsupported websocket opcode {opcode:#x}")
 
-            # The dashboard does not fragment today. Reassembling anyway is
-            # cheaper than a parser that silently truncates if it ever does.
-            pending += payload.decode(errors="replace")
+            # Reassembled as bytes and decoded once: a fragment boundary can
+            # fall inside a multi-byte character, and decoding each piece
+            # separately turns that character into two replacement marks.
+            pending += payload
             if final:
-                yield pending
-                pending = ""
+                yield pending.decode(errors="replace")
+                pending = b""
+
+    def _goodbye(self, status: bytes) -> None:
+        """Send the one close frame a connection gets."""
+        if self._said_goodbye:
+            return
+        self._said_goodbye = True
+        with contextlib.suppress(OSError):
+            self._frame(_CLOSE, status)
 
     def close(self) -> None:
         """Say goodbye and hang up. Safe to call twice."""
-        with contextlib.suppress(OSError):
-            self._sock.sendall(bytes([0x80 | _CLOSE, _MASKED]) + secrets.token_bytes(4))
+        self._goodbye(b"")
         with contextlib.suppress(OSError):
             self._sock.close()
 

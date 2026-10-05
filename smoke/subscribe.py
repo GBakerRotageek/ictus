@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from ictus.interfaces.conductor.events import history
 from ictus.interfaces.conductor.runs import live_runs, token_for
-from ictus.interfaces.conductor.websocket import WebSocket
+from ictus.websocket import WebSocket
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

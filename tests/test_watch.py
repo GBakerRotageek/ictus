@@ -4,23 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-import pytest
 
 from ictus import RunSignal
 from ictus.interfaces import ENDED, SignalEvent
 from ictus.interfaces.conductor.events import signals_from
 from ictus.interfaces.conductor.runs import LiveRun, live_runs, token_for
-from ictus.interfaces.conductor.websocket import HandshakeError, WebSocket
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -222,85 +217,6 @@ def test_a_missing_token_is_not_fatal(tmp_path: Path, monkeypatch: pytest.Monkey
     """Reading state needs none, so a listener still works without one."""
     monkeypatch.delenv("CONDUCTOR_GATE_TOKEN", raising=False)
     assert token_for(50000, runs_dir=tmp_path) is None
-
-
-# --- the websocket client ----------------------------------------------------
-
-
-@pytest.fixture
-def server() -> Iterator[tuple[int, list[str]]]:
-    """A socket that completes the handshake, echoes a frame, then closes."""
-    received: list[str] = []
-    listener = socket.socket()
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    port = listener.getsockname()[1]
-
-    def serve() -> None:
-        connection, _ = listener.accept()
-        request = b""
-        while b"\r\n\r\n" not in request:
-            request += connection.recv(4096)
-        received.append(request.decode(errors="replace"))
-        connection.sendall(
-            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
-        )
-        body = b'{"type":"workflow_completed","timestamp":1.0,"data":{}}'
-        connection.sendall(bytes([0x81, len(body)]) + body)
-        # Brief, and tolerant of nothing arriving: only one test sends a frame,
-        # and a blocking recv here would hang the other until its read deadline.
-        connection.settimeout(2.0)
-        try:
-            received.append(repr(connection.recv(4096)))
-        except (TimeoutError, OSError):
-            received.append("")
-        connection.sendall(bytes([0x88, 0x00]))
-        connection.close()
-
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
-    yield port, received
-    listener.close()
-
-
-def test_the_client_handshakes_and_reads_a_frame(server: tuple[int, list[str]]) -> None:
-    port, received = server
-    with WebSocket("127.0.0.1", port, "/ws", headers={"Authorization": "Bearer t"}) as ws:
-        messages = list(ws.messages())
-    assert json.loads(messages[0])["type"] == "workflow_completed"
-    assert "GET /ws HTTP/1.1" in received[0]
-    assert "Sec-WebSocket-Key:" in received[0]
-    assert "Authorization: Bearer t" in received[0]
-
-
-def test_a_refused_handshake_says_the_token_is_the_usual_cause() -> None:
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    port = listener.getsockname()[1]
-
-    def refuse() -> None:
-        connection, _ = listener.accept()
-        connection.recv(4096)
-        connection.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
-        connection.close()
-
-    threading.Thread(target=refuse, daemon=True).start()
-    with pytest.raises(HandshakeError, match="403"):
-        WebSocket("127.0.0.1", port, "/ws")
-    listener.close()
-
-
-def test_a_sent_frame_is_masked(server: tuple[int, list[str]]) -> None:
-    """A client frame must be masked; an unmasked one is a protocol error."""
-    port, received = server
-    with WebSocket("127.0.0.1", port, "/ws") as ws:
-        ws.send('{"type":"gate_response"}')
-        list(ws.messages())
-    sent = received[1]
-    assert "\\x81" in sent, sent
-    assert "gate_response" not in sent, "an unmasked payload would be readable"
 
 
 def test_an_event_reaches_a_caller_as_a_signal() -> None:

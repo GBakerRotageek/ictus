@@ -29,8 +29,8 @@ from typing import TYPE_CHECKING
 from ictus.errors import IctusError
 from ictus.interfaces.conductor.respond import answer_gate
 from ictus.interfaces.conductor.runs import live_runs
-from ictus.interfaces.conductor.websocket import connect
 from ictus.notify.slack.send import reply
+from ictus.websocket import connect
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

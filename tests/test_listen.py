@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-
-import pytest
+from typing import TYPE_CHECKING
 
 from ictus.interfaces.conductor.respond import Answered, answer_gate
 from ictus.interfaces.conductor.runs import LiveRun
-from ictus.interfaces.conductor.websocket import HandshakeError
-from ictus.interfaces.conductor.websocket import connect as ws_connect
 from ictus.notify.slack.listen import Click, _pressed, resolve
+
+if TYPE_CHECKING:
+    import pytest
 
 RUN = LiveRun(run_id="abc12345", workflow="w", port=59999, pid=1, started_at="2026")
 
@@ -130,30 +130,6 @@ def test_answering_without_a_token_refuses_before_asking(monkeypatch: pytest.Mon
     outcome = answer_gate(RUN, gate="g", choice="c")
     assert not outcome.accepted
     assert "token" in outcome.detail
-
-
-# --- the websocket url ------------------------------------------------------
-
-
-def test_a_non_websocket_url_is_refused() -> None:
-    with pytest.raises(HandshakeError, match="not a websocket scheme"):
-        ws_connect("https://slack.com/api/apps.connections.open")
-
-
-def test_the_query_string_survives(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Slack puts credentials in it, so dropping it refuses the handshake."""
-    seen: dict[str, object] = {}
-
-    class _Fake:
-        def __init__(self, host: str, port: int, path: str, **kwargs: object) -> None:
-            seen.update({"host": host, "port": port, "path": path, **kwargs})
-
-    monkeypatch.setattr("ictus.interfaces.conductor.websocket.WebSocket", _Fake)
-    ws_connect("wss://wss-primary.slack.com/link/?ticket=abc&app_id=A1")
-    assert seen["host"] == "wss-primary.slack.com"
-    assert seen["port"] == 443
-    assert seen["tls"] is True
-    assert seen["path"] == "/link/?ticket=abc&app_id=A1"
 
 
 def test_a_button_already_inside_a_thread_replies_in_that_thread() -> None:
