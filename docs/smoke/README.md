@@ -4,10 +4,15 @@ Proves what [run-events.md](../run-events.md) claims, against a live engine:
 a run is discoverable, its event stream is readable, and its gates are
 answerable from outside the process.
 
-**It costs nothing.** `pipeline/` is two gates and one `set` step — no node emits
-`type: agent`, so no provider is called. Check for yourself:
+**It costs nothing.** `demo_work/pipelines/smoke-events/` is two gates and one
+`set` step — no node emits `type: agent`, so no provider is called. Check for
+yourself:
 
-    grep 'type:' pipeline/build/smoke-events.yaml
+    grep 'type:' demo_work/pipelines/smoke-events/build/smoke-events.yaml
+
+That folder is also the one pipeline committed past the `demo_work/` ignore,
+because three tests and every Makefile target below `soundcheck` read that
+directory and fail on a clone with nothing in it.
 
 `subscribe.py` is standard library only. Nothing to install beyond Conductor.
 
@@ -54,7 +59,7 @@ waits for the subscriber to answer it.
 
 **One — launch.** Detached, serving a dashboard:
 
-    uv run ictus run docs/smoke/pipeline
+    uv run ictus run demo_work/pipelines/smoke-events
 
 It prints `Dashboard: http://127.0.0.1:<port>`. Open it if you want to watch;
 the subscriber works whether or not a browser is attached.

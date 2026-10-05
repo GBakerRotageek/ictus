@@ -27,7 +27,11 @@ needs-review.md
 # Run output: `untapped` writes its brainstorm here on every run.
 untapped.md
 
-# Local pipelines. Kept out of the repo on purpose; note that the test suite
-# and every Makefile target below `soundcheck` read them, so a clone without
-# them cannot run the gate.
-demo_work/
+# Local pipelines stay out of the repo — except the one the gate needs. The
+# suite and every Makefile target below `soundcheck` read this directory, so a
+# clone with nothing in it cannot run them, and three tests fail for a reason
+# that has nothing to do with the change in front of you.
+demo_work/*
+!demo_work/pipelines/
+demo_work/pipelines/*
+!demo_work/pipelines/smoke-events/

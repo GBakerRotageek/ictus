@@ -140,12 +140,19 @@ class TestRepositoryInstructions:
         assert "config/schema.py" in text
         assert "not importable" in text or "not* importable" in text
 
-    def test_the_council_context_does_not_restate_the_project(self) -> None:
-        """Duplicated, the two drift and the run reads whichever is stale."""
-        context = (
-            CATALOGUE.parent / "demo_work" / "pipelines" / "needs-council" / "context.md"
-        ).read_text(encoding="utf-8")
-        assert "readlink -f" not in context, (
-            "the engine lookup belongs in AGENTS.md, which the run discovers"
-        )
-        assert "conductor-cli" not in context
+    def test_no_pipeline_restates_the_project(self) -> None:
+        """Duplicated, the two drift and the run reads whichever is stale.
+
+        Written against one council's `context.md`, which has since left the
+        repository. Naming a single file made the check disappear with it, so it
+        now reads whatever prose a committed pipeline carries — which is also
+        the shape the rule always had.
+        """
+        folders = sorted((CATALOGUE.parent / "demo_work" / "pipelines").glob("*/"))
+        assert folders, "the gate needs at least one committed pipeline; see .gitignore"
+        for prose in sorted((CATALOGUE.parent / "demo_work" / "pipelines").glob("*/*.md")):
+            text = prose.read_text(encoding="utf-8")
+            assert "readlink -f" not in text, (
+                f"{prose}: the engine lookup belongs in AGENTS.md, which the run discovers"
+            )
+            assert "conductor-cli" not in text, prose
