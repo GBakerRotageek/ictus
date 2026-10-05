@@ -197,6 +197,20 @@ def test_an_integration_declaring_no_variable_needs_nothing_from_the_environment
     assert integration_issues(_pipeline(free)) == []
 
 
+def test_a_sender_that_is_not_installed_blocks_the_launch() -> None:
+    """The one way a report can still fail a run: its step cannot start at all."""
+    absent = Integration(
+        name="absent",
+        purpose="A service whose sender is not installed",
+        reports=(RunSignal.RUN_FAILED,),
+        command="definitely-not-a-command",
+        program="pass",
+    )
+    (issue,) = integration_issues(_pipeline(absent))
+    assert issue.blocking
+    assert "not on PATH" in issue.problem
+
+
 # --- what a subscription must not do ---------------------------------------
 
 

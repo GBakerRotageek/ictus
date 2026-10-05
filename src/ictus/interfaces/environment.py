@@ -102,6 +102,19 @@ def integration_issues(pipeline: Pipeline) -> list[PreflightIssue]:
     """
     issues: list[PreflightIssue] = []
     for service in pipeline.all_integrations():
+        if shutil.which(service.command) is None:
+            # A step that cannot start is the one way a report still fails the
+            # run: the engine raises before the program's own guard can run.
+            issues.append(
+                PreflightIssue(
+                    requirement=f"integrate:{service.name}",
+                    problem=(
+                        f"{service.command!r} is not on PATH, so {service.name!r} could never "
+                        "send anything, and the step that tries would fail the run"
+                    ),
+                    remedy=f"install {service.command} or put it on PATH",
+                )
+            )
         issues.extend(
             PreflightIssue(
                 requirement=f"integrate:{service.name}",

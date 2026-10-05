@@ -6,10 +6,18 @@ is a new module under ``ictus.notify`` and no change at all to the graph, the
 stdlib, or any pipeline already written.
 
 Being a node is the advantage over watching from outside. It is costed against
-``max_iterations``, routed like anything else, visible in the dashboard and in
-``ictus trace`` — and a misconfigured endpoint is a red step rather than a
-message nobody notices never arrived. What it cannot report is what no step can
-see: a budget tripping, the engine being killed. That is ``ictus watch``.
+``max_iterations``, routed like anything else, and visible in the dashboard and
+in ``ictus trace``. What it cannot report is what no step can see: a budget
+tripping, the engine being killed. That is ``ictus watch``.
+
+A report never fails the run. The step always succeeds; one that could not
+deliver says ``posted: "false"`` and leaves its reason on stderr, which the
+dashboard and ``ictus trace`` both show. The alternative was tried first and it
+is backwards: a channel being down, or a token rotated mid-run, ended a run
+whose work had succeeded — at the gate, or just before the finish, after
+everything had been paid for. Whether the variables a destination needs are set
+is checked before the run starts, by preflight, which is where a misconfigured
+destination belongs.
 
 Most pipelines should not call this directly. ``pipeline.integrate(...)`` attaches
 a destination to every gate and exit at once and wires the thread between them,
@@ -41,7 +49,8 @@ __all__ = ["POSTED_PORT", "THREAD_PORT", "announce"]
 #: spelling is ``thread_ts``, and translating it is the integration's job.
 THREAD_PORT = "thread"
 
-#: Always "true" — the step fails rather than reporting that it did not send.
+#: "true" when the report landed, "false" when it could not be sent. The step
+#: succeeds either way; the reason for a "false" is on its stderr.
 POSTED_PORT = "posted"
 
 
@@ -93,16 +102,28 @@ def announce(
             to.program,
             # Through argv rather than baked into the program: these are rendered
             # values, and interpolating one into source is how a quote in
-            # somebody's data becomes a syntax error at run time.
-            as_template(thread) if thread is not None else "",
+            # somebody's data becomes a syntax error at run time. The fallback
+            # covers a parent that printed no thread; an undefined reference is
+            # a template error, and that would fail the step this exists to keep
+            # from failing.
+            as_template(thread.or_else("")) if thread is not None else "",
             asks,
+            # The program gives up at `timeout`; the engine kills the step five
+            # seconds later. The gap is what keeps a slow report from being a
+            # failed step.
+            str(timeout),
         ),
         stdin=text,
         timeout=timeout + 5,
         declared_outputs=(
             OutputPort(THREAD_PORT, PortType.STRING, "What a later report hangs under"),
-            OutputPort(POSTED_PORT, PortType.STRING, "Always 'true'; the step fails otherwise"),
+            OutputPort(POSTED_PORT, PortType.STRING, "'false' when the report was not sent"),
         ),
+        # Not a contract the engine enforces. Its check runs before routes are
+        # evaluated and fails the run on stdout it cannot parse; the program
+        # always prints both fields, and a reference that finds neither falls
+        # back rather than raising.
+        enforce_outputs=False,
     )
 
 

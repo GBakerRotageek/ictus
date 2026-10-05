@@ -18,6 +18,7 @@ succeeded. Every failure is collected and returned rather than raised.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -110,6 +111,7 @@ def send(
     service: Integration,
     text: str,
     *,
+    thread: str = "",
     env: Mapping[str, str] | None = None,
     timeout: float = TIMEOUT_SECONDS,
 ) -> str:
@@ -118,26 +120,53 @@ def send(
     The same program a step runs, so a report from the watcher and a report from
     inside the graph go the same way and cannot drift apart. Credentials are read
     by the program out of the environment and never pass through here.
+
+    ``thread`` is what to reply under, when the service threads; ``timeout`` is
+    the program's own deadline, and the process is given five seconds more.
     """
+    merged = {**os.environ, **(env or {})}
     try:
         done = subprocess.run(
-            [service.command, "-c", service.program],
+            [service.command, "-c", service.program, thread, "", f"{timeout:g}"],
             input=text,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=timeout + 5,
             check=False,
-            env={**os.environ, **(env or {})},
+            env=merged,
         )
     except FileNotFoundError:
         return f"{service.command!r} is not on PATH, so nothing could be sent"
     except subprocess.TimeoutExpired:
         return f"{service.name!r} did not answer in {timeout:g}s"
-    if done.returncode == 0:
+    said = _said(done.stdout)
+    if done.returncode == 0 and said.get("posted") == "true":
         return ""
     # The program's own stderr: it knows what the service said and what to do
-    # about it, and this does not second-guess it.
-    return (done.stderr or done.stdout or "the report failed with no explanation").strip()
+    # about it, and this does not second-guess it. Masked again here, because
+    # "never contains a credential" should not depend on every program keeping
+    # that promise by itself.
+    why = (done.stderr or done.stdout or "the report failed with no explanation").strip()
+    return _masked(why, service, merged)
+
+
+def _said(stdout: str) -> dict[str, object]:
+    """What the program printed about itself, or nothing if it printed nonsense."""
+    try:
+        loaded = json.loads(stdout.strip().splitlines()[-1]) if stdout.strip() else {}
+    except ValueError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _masked(text: str, service: Integration, env: Mapping[str, str]) -> str:
+    """``text`` with the value of every variable ``service`` declares replaced."""
+    for var in service.required_env:
+        value = env.get(var.name, "")
+        for form in {value, value.strip()}:
+            if form:
+                text = text.replace(form, "***")
+    return text
 
 
 def deliver(

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -15,7 +17,9 @@ import pytest
 from ictus import EnvVar, Integration, RunSignal
 from ictus.errors import CompositionError
 from ictus.graph.node import NodeKind
+from ictus.graph.pipeline import END, Pipeline
 from ictus.interfaces import SignalEvent
+from ictus.interfaces.conductor import ConductorBackend
 from ictus.notify import Delivered, deliver, send, summarise
 from ictus.notify.slack import slack_channel, slack_webhook
 from ictus.stdlib import announce, approval_gate
@@ -236,15 +240,21 @@ def test_the_program_is_valid_python() -> None:
 
 class _Collector(BaseHTTPRequestHandler):
     received: ClassVar[list[tuple[str, dict[str, object]]]] = []
+    headers_seen: ClassVar[list[dict[str, str]]] = []
     status: ClassVar[int] = 200
+    reply: ClassVar[dict[str, object]] = {"ok": True, "ts": "1700000000.000100"}
+    hang: ClassVar[float] = 0.0
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)
         body = json.loads(self.rfile.read(length)) if length else {}
         type(self).received.append((self.path, body))
+        type(self).headers_seen.append(dict(self.headers.items()))
+        if type(self).hang:
+            time.sleep(type(self).hang)
         self.send_response(type(self).status)
         self.end_headers()
-        self.wfile.write(json.dumps({"ok": True, "ts": "1700000000.000100"}).encode())
+        self.wfile.write(json.dumps(type(self).reply).encode())
 
     def log_message(self, *_: object) -> None:
         """Silence; the assertions are the output."""
@@ -253,8 +263,12 @@ class _Collector(BaseHTTPRequestHandler):
 @pytest.fixture
 def collector() -> Iterator[tuple[str, list[tuple[str, dict[str, object]]]]]:
     _Collector.received = []
+    _Collector.headers_seen = []
     _Collector.status = 200
-    server = HTTPServer(("127.0.0.1", 0), _Collector)
+    _Collector.reply = {"ok": True, "ts": "1700000000.000100"}
+    _Collector.hang = 0.0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Collector)
+    server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_port}{SECRET}", _Collector.received
     server.shutdown()
@@ -330,10 +344,131 @@ def test_a_button_carries_the_run_the_gate_and_the_choice(
     ]
 
 
-def test_an_unset_credential_fails_the_step_rather_than_posting_nowhere() -> None:
+def _verdict(done: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    """What the program printed about itself. It must always print something."""
+    assert done.returncode == 0, f"a report must never fail its step: {done.stderr}"
+    loaded = json.loads(done.stdout)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def test_an_unset_credential_is_reported_without_failing_the_step() -> None:
+    """Preflight refuses this at launch; at run time it must not end the run."""
     done = _run(_hook(), "x", HOOK_URL="")
-    assert done.returncode != 0
+    assert _verdict(done) == {"thread": "", "posted": "false"}
     assert "HOOK_URL" in done.stderr
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_a_refused_post_leaves_the_run_going(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]], status: int
+) -> None:
+    """A rate limit or an outage says nothing about whether the work succeeded."""
+    url, _ = collector
+    _Collector.status = status
+    done = _run(_hook(), "x", HOOK_URL=url)
+    assert _verdict(done)["posted"] == "false"
+    assert f"HTTP {status}" in done.stderr
+    assert SECRET not in done.stderr + done.stdout
+
+
+def test_slack_refusing_the_message_is_explained_and_survived(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    url, _ = collector
+    _Collector.reply = {"ok": False, "error": "channel_not_found"}
+    done = _run(
+        _channel(), "x", TEST_TOKEN="xoxb-pretend", TEST_CHANNEL="C0NOPE", SLACK_API_URL=url
+    )
+    assert _verdict(done) == {"thread": "", "posted": "false"}
+    assert "channel_not_found" in done.stderr
+    assert "channel id" in done.stderr, "the remedy travels with the refusal"
+
+
+def test_an_unreachable_service_leaves_the_run_going() -> None:
+    done = _run(_hook(), "x", HOOK_URL="http://127.0.0.1:1" + SECRET)
+    assert _verdict(done)["posted"] == "false"
+    assert "could not reach" in done.stderr
+    assert SECRET not in done.stderr
+
+
+def test_a_service_that_never_answers_is_abandoned_before_the_engine_kills_the_step(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """The engine fails a step that overruns its timeout; the program must not."""
+    url, _ = collector
+    _Collector.hang = 30.0
+    started = time.monotonic()
+    done = _run(_hook(), "x", "", "", "1", HOOK_URL=url)
+    assert time.monotonic() - started < 10
+    assert _verdict(done)["posted"] == "false"
+    assert "no answer within 1s" in done.stderr
+
+
+def test_a_webhook_without_a_scheme_is_refused_without_repeating_it() -> None:
+    """urllib quotes the whole URL in its error for this, and the URL is the secret."""
+    done = _run(_hook(), "x", HOOK_URL="hooks.slack.com" + SECRET)
+    assert _verdict(done)["posted"] == "false"
+    assert "should begin https://" in done.stderr
+    assert SECRET not in done.stderr + done.stdout
+
+
+def test_a_token_with_a_windows_line_ending_still_posts(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """A CRLF .env leaves a \\r on the value, and urllib quotes a bad header whole."""
+    url, _ = collector
+    done = _run(
+        _channel(), "x", TEST_TOKEN="xoxb-pretend\r", TEST_CHANNEL="C0TEST", SLACK_API_URL=url
+    )
+    assert _verdict(done)["posted"] == "true"
+    assert _Collector.headers_seen[0]["Authorization"] == "Bearer xoxb-pretend"
+
+
+def test_a_long_message_and_label_fit_inside_slack_s_limits(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """Past either ceiling Slack refuses the whole message, buttons included."""
+    url, received = collector
+    gate = approval_gate(node_id="ship_it", prompt="Deploy?", approve_label="A" * 200)
+    node = announce(node_id="ask", text="?", to=_channel(), answers=gate)
+    done = _run(
+        _channel(),
+        "x" * 5000,
+        "",
+        str(node.args[3]),
+        TEST_TOKEN="xoxb-pretend",
+        TEST_CHANNEL="C0TEST",
+        SLACK_API_URL=url,
+    )
+    assert _verdict(done)["posted"] == "true"
+    blocks = received[0][1]["blocks"]
+    assert isinstance(blocks, list)
+    assert len(blocks[0]["text"]["text"]) <= 3000
+    assert all(len(e["text"]["text"]) <= 75 for e in blocks[1]["elements"])
+
+
+def test_the_program_survives_the_engine_rendering_it_as_a_template() -> None:
+    """Every argument of a script step is rendered before the step runs.
+
+    Nothing the engine would treat as the start of a template expression, block
+    or comment may appear in it, or the program that runs is not the one tested.
+    """
+    for service in (_channel(), _hook()):
+        assert not re.search(r"\{\{|\{%|\{#", service.program)
+
+
+def test_an_announcement_is_not_a_contract_the_engine_enforces() -> None:
+    """The engine's output check fails the run before any route is evaluated."""
+    p = Pipeline(pipeline_id="demo")
+    tell = p.add(announce(node_id="tell", text="hello", to=_channel()))
+    p.set_entry(tell)
+    p.route(tell, END)
+    agents = ConductorBackend().document(p)["agents"]
+    assert isinstance(agents, list)
+    (agent,) = agents
+    assert isinstance(agent, dict)
+    assert "output" not in agent
 
 
 # --- the watcher's half ------------------------------------------------------
@@ -391,7 +526,8 @@ def test_a_missing_interpreter_is_reported_not_raised() -> None:
     assert "not on PATH" in result.detail
 
 
-def test_send_never_puts_a_credential_in_its_reason() -> None:
-    why = send(_hook(), "x", env={"HOOK_URL": "http://127.0.0.1:1" + SECRET})
+@pytest.mark.parametrize("url", ["http://127.0.0.1:1" + SECRET, "hooks.slack.com" + SECRET])
+def test_send_never_puts_a_credential_in_its_reason(url: str) -> None:
+    why = send(_hook(), "x", env={"HOOK_URL": url})
     assert why
     assert SECRET not in why
