@@ -14,7 +14,7 @@ workflow:
     max_iterations: 5
 agents:
   - name: smoke_gate
-    description: Answered over the websocket by docs/smoke/subscribe.py
+    description: Answered over the websocket by tests/smoke/subscribe.py
     type: human_gate
     prompt: Approve to continue, or reject and leave a note.
     options:
