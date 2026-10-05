@@ -108,19 +108,25 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
             fg=typer.colors.YELLOW,
             err=True,
         )
+        try:
+            for pipeline in pipelines:
+                apply_integrations(pipeline)
+        except IctusError as exc:
+            _fail(str(exc))
         return pipelines
     try:
         settings = read_config(folder.config_file)
         _check_provider(settings.provider, where=str(folder.config_file))
         for pipeline in pipelines:
             settings.apply(pipeline, where=str(folder.config_file))
-            # Before the gate, so an announcement can be put in front of it
-            # and so the gate's own prompt counts every step honestly.
-            apply_integrations(pipeline)
             if settings.start_gate:
                 add_start_gate(pipeline)
             else:
                 attach_start_herald(pipeline)
+            # After the start policy: the start gate is the first gate every run
+            # stops at, so it is announced like the others, and its prompt counts
+            # the work being approved rather than the reporting about it.
+            apply_integrations(pipeline)
     except IctusError as exc:
         _fail(str(exc))
     return pipelines
@@ -797,10 +803,9 @@ def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
 def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...]]:
     """A pipeline folder's id and the integrations it declares.
 
-    Read from the source rather than from the emitted workflow, because a
-    subscription deliberately never reaches the YAML: the engine runs no side
-    effect at a step boundary, so a declaration that compiled to something would
-    be a lie in the diff. `pipeline.py` is the only place it exists.
+    Read from the source rather than from the emitted workflow: the steps an
+    integration inserts are in the YAML, but which service they report to, and
+    what it is subscribed to, exist only in `pipeline.py`.
     """
     if folder is None:
         return "", ()

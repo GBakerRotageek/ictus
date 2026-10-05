@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-__all__ = ["RunSignal"]
+__all__ = ["ANNOUNCED_BY_STEPS", "RunSignal"]
 
 
 class RunSignal(StrEnum):
@@ -41,3 +41,17 @@ class RunSignal(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     """Whether it stops the run depends on ``budget_mode``, so this says the
     ceiling was crossed and nothing about what happened next."""
+
+
+#: What a step can stand in front of, so an attached integration reports it from
+#: inside the run: the start, every gate and question, every way the graph ends.
+#: ``RUN_FAILED`` only partly — an explicit failed exit has a step in front of
+#: it, an engine failure does not. Anything else reaches only ``ictus watch``.
+ANNOUNCED_BY_STEPS = frozenset(
+    {
+        RunSignal.RUN_STARTED,
+        RunSignal.DECISION_NEEDED,
+        RunSignal.RUN_FINISHED,
+        RunSignal.RUN_FAILED,
+    }
+)

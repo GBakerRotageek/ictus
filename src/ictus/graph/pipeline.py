@@ -623,6 +623,70 @@ class Pipeline:
             self._entry = inserted
         return inserted
 
+    def insert_before_end[N: Node](self, inserted: N) -> N:
+        """Put ``inserted`` on every way this graph reaches the end of the run.
+
+        The ``END`` counterpart of ``insert_before``: each edge that finished the
+        run now runs ``inserted`` instead, and ``inserted`` finishes it. A gate's
+        branch keeps its case, so "no" still means no.
+        """
+        finishing = [edge for edge in self._edges if edge.is_end]
+        if not finishing:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} has no route to END to put "
+                f"{inserted.node_id!r} in front of"
+            )
+        self.add(inserted)
+        self._edges = [
+            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
+            if edge.is_end
+            else edge
+            for edge in self._edges
+        ]
+        self._edges.append(Edge(source=inserted, target=END))
+        return inserted
+
+    def prepend[N: Node](self, node: N) -> N:
+        """Run ``node`` before whatever this graph currently starts with.
+
+        Unlike ``insert_before``, the old entry keeps every edge that arrives at
+        it later: a loop that returns to the first step returns there, not to
+        ``node``, which runs once.
+        """
+        first = self.entry()
+        self.add(node)
+        self.route(node, first)
+        self.set_entry(node)
+        return node
+
+    def widen_subworkflow(self, host: SubGraphNode, port: InputPort) -> None:
+        """Give a stage already placed here one more parameter.
+
+        For what is attached after a stage was placed — an integration threading
+        its conversation into the stage's own gates — rather than for authoring;
+        a stage's contract is otherwise fixed when it is instantiated.
+
+        The node is changed in place, which a frozen node is not supposed to
+        allow. Replacing it was the alternative and is worse: every edge, data
+        dependency and typed reference holds the node itself, and a replacement
+        would leave all of them pointing at one that is no longer in the graph.
+        Only an optional port is accepted, so every other placement of the same
+        stage, and every caller that does not supply it, stays valid.
+        """
+        self._require_member(host, "stage")
+        if host.node_id not in self._children:
+            raise CompositionError(
+                f"{host.node_id!r} is not a stage placed in pipeline {self.pipeline_id!r}"
+            )
+        if not port.optional:
+            raise CompositionError(
+                f"stage {host.node_id!r} can only be given an optional parameter after it "
+                f"was placed; {port.name!r} is required, and every caller would break"
+            )
+        if any(existing.name == port.name for existing in host.inputs):
+            raise CompositionError(f"stage {host.node_id!r} already has a parameter {port.name!r}")
+        object.__setattr__(host, "inputs", (*host.inputs, port))
+
     def subscribed_signals(self) -> frozenset[RunSignal]:
         """Every signal any integration here or in a nested stage asked for."""
         return frozenset(s for service in self.all_integrations() for s in service.reports)

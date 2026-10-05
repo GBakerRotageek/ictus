@@ -209,15 +209,3 @@ def test_a_sender_that_is_not_installed_blocks_the_launch() -> None:
     (issue,) = integration_issues(_pipeline(absent))
     assert issue.blocking
     assert "not on PATH" in issue.problem
-
-
-# --- what a subscription must not do ---------------------------------------
-
-
-def test_an_integration_changes_nothing_about_the_emitted_workflow() -> None:
-    """The engine runs no side effect at a step boundary; a declaration that
-    reached the YAML would be a lie in the diff."""
-    backend = ConductorBackend()
-    without = [d.content for d in backend.compile(_pipeline())]
-    with_one = [d.content for d in backend.compile(_pipeline(_integration()))]
-    assert without == with_one

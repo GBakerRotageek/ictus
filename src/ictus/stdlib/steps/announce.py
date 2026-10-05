@@ -60,8 +60,7 @@ def announce(
     text: str | Template,
     to: Integration,
     thread: Ref | None = None,
-    answers: GateNode | str | None = None,
-    buttons: Sequence[tuple[str, str]] | None = None,
+    answers: GateNode | None = None,
     description: str = "",
     inputs: Sequence[InputPort] = (),
     timeout: int = 20,
@@ -72,10 +71,11 @@ def announce(
     under it. The input that needs is declared for you; the *data edge* is yours
     to wire with ``feed``, and the lint refuses the graph without it.
 
-    ``answers=<gate>`` puts that gate's choices in the message as buttons, read
-    off the gate so a renamed option cannot leave a button that answers nothing.
-    A gate named as a string must spell its ``buttons`` out — which is what the
-    start gate needs, since it does not exist until the pipeline is loaded.
+    ``answers=<gate>`` puts that gate's choices in the message as buttons. They
+    are read off the gate and cannot be spelled out by hand: a renamed option
+    would leave a button that answers nothing, and a value the gate does not
+    offer is worse than that — the engine accepts the answer and then fails the
+    run on it.
     """
     if timeout < 1:
         raise CompositionError(f"announce node {node_id!r} needs a timeout of at least 1s")
@@ -86,7 +86,7 @@ def announce(
             "parent to reply under is ever published"
         )
 
-    asks = _asked(node_id, answers, buttons, to)
+    asks = _asked(node_id, answers, to)
 
     declared = list(inputs)
     if thread is not None and not any(port.name == thread.source_id for port in declared):
@@ -127,41 +127,18 @@ def announce(
     )
 
 
-def _asked(
-    node_id: str,
-    answers: GateNode | str | None,
-    buttons: Sequence[tuple[str, str]] | None,
-    to: Integration,
-) -> str:
+def _asked(node_id: str, answers: GateNode | None, to: Integration) -> str:
     """The buttons, as the JSON the sending program reads from argv.
 
     Taking the gate itself is the point: its choices *are* the buttons, so the
     two cannot drift and a renamed option cannot leave a dead one.
     """
     if answers is None:
-        if buttons:
-            raise CompositionError(
-                f"announce node {node_id!r} offers buttons but names no gate for them "
-                "to answer; pass answers=<gate>"
-            )
         return ""
     if not to.threads:
         raise CompositionError(
             f"announce node {node_id!r} offers buttons, which {to.name!r} cannot carry "
             "an answer back from"
         )
-    gate = answers.node_id if isinstance(answers, GateNode) else answers
-    if buttons is None:
-        if not isinstance(answers, GateNode):
-            raise CompositionError(
-                f"announce node {node_id!r} answers {gate!r} by name, so its buttons "
-                "cannot be read off it; pass buttons=((value, label), ...)"
-            )
-        buttons = [(choice.value, choice.label or choice.value) for choice in answers.choices]
-    if not buttons:
-        raise CompositionError(f"announce node {node_id!r} offers an empty set of buttons")
-    if len({value for value, _ in buttons}) != len(buttons):
-        raise CompositionError(
-            f"announce node {node_id!r} repeats a button value; each one is a distinct answer"
-        )
-    return json.dumps({"gate": gate, "buttons": [list(pair) for pair in buttons]})
+    buttons = [(choice.value, choice.label or choice.value) for choice in answers.choices]
+    return json.dumps({"gate": answers.node_id, "buttons": [list(pair) for pair in buttons]})

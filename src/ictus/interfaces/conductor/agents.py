@@ -53,7 +53,6 @@ __all__ = ["agent_entry"]
 END_MARKER = "$end"
 
 # Values Conductor reads back with json.loads, so they must be rendered as JSON.
-_STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
 
 # The one place a neutral node kind becomes a Conductor type string.
 CONDUCTOR_TYPE: dict[NodeKind, str] = {
@@ -310,25 +309,23 @@ def input_mapping(pipeline: Pipeline, node: SubGraphNode) -> YamlDict:
     mapping: YamlDict = {}
     for param, target, port in pipeline.input_bindings:
         if target is node:
-            # Rendered to text and parsed back like every other boundary: without
-            # `| tojson` a structured parameter reaches the child as a Python
-            # repr, which json.loads cannot read, so it survives as a string
-            # that looks like data.
-            expression = "workflow.input." + param.name
-            if param.port_type in _STRUCTURED:
-                expression += " | tojson"
-            mapping[port.name] = "{{ " + expression + " }}"
+            # Rendered to text and parsed back like every other boundary, so every
+            # type goes through `| tojson`. A structured parameter otherwise
+            # arrives as a Python repr json.loads cannot read; a boolean as
+            # "True", which it cannot read either; and a string that happens to
+            # look like a number — a Slack timestamp, an id with leading zeros —
+            # is parsed into one, and "1700000000.000100" reaches the child as
+            # 1700000000.0001.
+            mapping[port.name] = "{{ workflow.input." + param.name + " | tojson }}"
     for dep in pipeline.deps_into(node):
         expression = output_path(pipeline, dep.source, dep.connection.source.name)
-        if dep.connection.source.port_type in _STRUCTURED:
-            expression += " | tojson"
-        rendered = "{{ " + expression + " }}"
+        rendered = "{{ " + expression + " | tojson }}"
         if _may_be_absent(pipeline, node, dep):
             # The mapping is rendered against the same explicit context as the
             # step's own templates, so a source that may not have run is an
             # undefined variable here too — and the engine turns that into an
             # ExecutionError rather than an empty string.
-            empty = _EMPTY_FOR[dep.connection.source.port_type]
+            empty = _JSON_EMPTY[dep.connection.source.port_type]
             rendered = (
                 "{% if "
                 + guard_test(pipeline, dep.source.ref(dep.connection.source.name))
@@ -342,11 +339,12 @@ def input_mapping(pipeline: Pipeline, node: SubGraphNode) -> YamlDict:
     return mapping
 
 
-# What an absent value becomes on the way into a child. A missing key is not the
-# same as an empty one, but the child declared the parameter, so something of the
-# right type has to arrive.
-_EMPTY_FOR = {
-    PortType.STRING: "",
+# What an absent value becomes on the way into a child, as JSON like every other
+# value crossing that boundary. A missing key is not the same as an empty one,
+# but the child declared the parameter, so something of the right type has to
+# arrive.
+_JSON_EMPTY = {
+    PortType.STRING: '""',
     PortType.OBJECT: "{}",
     PortType.ARRAY: "[]",
     PortType.NUMBER: "0",

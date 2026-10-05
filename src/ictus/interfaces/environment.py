@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
+from ictus.graph.signals import ANNOUNCED_BY_STEPS
 from ictus.interfaces import PreflightIssue
 
 if TYPE_CHECKING:
@@ -127,4 +128,21 @@ def integration_issues(pipeline: Pipeline) -> list[PreflightIssue]:
             for var in service.required_env
             if not os.environ.get(var.name)
         )
+        unseen = sorted(s.value for s in service.reports if s not in ANNOUNCED_BY_STEPS)
+        if unseen:
+            # Not blocking: the watcher is a real way to deliver these. Said out
+            # loud because without it they are configured, pass preflight, and
+            # never arrive.
+            issues.append(
+                PreflightIssue(
+                    requirement=f"integrate:{service.name}",
+                    problem=(
+                        f"{service.name!r} asks to hear about {', '.join(unseen)}, which no "
+                        "step can see; they are reported only while `ictus watch` is "
+                        "attached to the run"
+                    ),
+                    remedy="run `ictus watch <folder> --follow` alongside the run",
+                    blocking=False,
+                )
+            )
     return issues
