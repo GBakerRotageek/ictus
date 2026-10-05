@@ -1,5 +1,9 @@
 __pycache__/
 .venv/
+# Conductor kept in its own environment, as the real install does: only the
+# console script is linked into .venv/bin, so `import conductor` from the
+# project interpreter still fails and AGENTS.md stays true.
+.venv-conductor/
 *.pyc
 .mypy_cache/
 .ruff_cache/
@@ -7,6 +11,9 @@ __pycache__/
 output/
 logs/
 *.jsonl
+# Recorded engine event streams, committed on purpose: they are what the
+# event-subscription tests assert against, and re-recording one needs a live run.
+!tests/fixtures/*.jsonl
 .conductor/
 checkpoints/
 .env
@@ -20,7 +27,11 @@ needs-review.md
 # Run output: `untapped` writes its brainstorm here on every run.
 untapped.md
 
-# Local pipelines. Kept out of the repo on purpose; note that the test suite
-# and every Makefile target below `soundcheck` read them, so a clone without
-# them cannot run the gate.
-demo_work/
+# Local pipelines stay out of the repo — except the one the gate needs. The
+# suite and every Makefile target below `soundcheck` read this directory, so a
+# clone with nothing in it cannot run them, and three tests fail for a reason
+# that has nothing to do with the change in front of you.
+demo_work/*
+!demo_work/pipelines/
+demo_work/pipelines/*
+!demo_work/pipelines/smoke-events/

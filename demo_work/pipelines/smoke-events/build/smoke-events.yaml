@@ -1,0 +1,60 @@
+workflow:
+  name: smoke-events
+  description: Exercise the event surface without calling a provider
+  version: '1'
+  entry_point: confirm_start
+  runtime:
+    provider:
+      name: claude-agent-sdk
+    checkpoint:
+      every_agent: true
+  context:
+    mode: explicit
+  limits:
+    max_iterations: 5
+agents:
+  - name: smoke_gate
+    description: Answered over the websocket by docs/smoke/subscribe.py
+    type: human_gate
+    prompt: Approve to continue, or reject and leave a note.
+    options:
+      - label: Approve
+        value: approved
+        route: noted
+      - label: Reject
+        value: rejected
+        route: done
+        prompt_for: notes
+        multiline: true
+  - name: noted
+    description: A step that calls no model
+    type: set
+    value: approved
+    routes:
+      - to: done
+  - name: done
+    type: terminate
+    status: success
+    reason: smoke finished
+  - name: confirm_start
+    description: Confirm before anything runs
+    type: human_gate
+    prompt: |
+      Start **smoke-events**?
+
+      Exercise the event surface without calling a provider
+
+      3 step(s), beginning with `smoke_gate`.
+    options:
+      - label: Start the run
+        value: start
+        route: smoke_gate
+      - label: Stop — do not run
+        value: cancel
+        route: not_started
+  - name: not_started
+    type: terminate
+    status: success
+    reason: Stopped at the start gate; nothing was run.
+    output_template:
+      started: 'false'
