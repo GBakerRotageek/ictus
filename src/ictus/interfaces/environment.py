@@ -15,6 +15,7 @@ been run against the wrong interpreter.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from typing import TYPE_CHECKING
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.requirements import Executable
 
-__all__ = ["executable_issues"]
+__all__ = ["executable_issues", "notifier_issues"]
 
 #: Long enough for a cold `--version`, short enough not to hang a launch.
 PROBE_TIMEOUT_SECONDS = 10.0
@@ -89,3 +90,28 @@ def _probe(tool: Executable, found: str) -> list[PreflightIssue]:
             remedy=tool.setup_hint or f"reinstall {tool.name}",
         )
     ]
+
+
+def notifier_issues(pipeline: Pipeline) -> list[PreflightIssue]:
+    """Every declared notifier this machine cannot reach.
+
+    Offline only, and deliberately: probing would mean posting something to find
+    out, and a notifier's endpoint is somewhere people read. A preflight that
+    announced itself in a channel every time anyone checked a pipeline would be
+    turned off, and then the real notification would be ignored with it.
+    """
+    issues: list[PreflightIssue] = []
+    for target in pipeline.all_notifiers():
+        issues.extend(
+            PreflightIssue(
+                requirement=f"notify:{target.name}",
+                problem=(
+                    f"${var.name} is not set, so {target.name!r} has nowhere to report "
+                    f"({target.purpose})"
+                ),
+                remedy=target.setup_hint or f"export {var.name}=... before the run",
+            )
+            for var in target.required_env
+            if not os.environ.get(var.name)
+        )
+    return issues

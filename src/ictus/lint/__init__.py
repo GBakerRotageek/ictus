@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from ictus.errors import CompositionError, LintError
 from ictus.graph.node import SubGraphNode
 from ictus.lint.rules import (
+    capability_problems,
     describe,
     group_routing_problems,
     node_problems,
@@ -83,6 +84,7 @@ def lint_pipeline(
         problems.extend(lint_pipeline(child, backend=backend, _seen=seen))
 
     if backend is not None:
+        problems.extend(capability_problems(pipeline, backend.capabilities(), where))
         problems.extend(backend.lint(pipeline))
     return problems
 

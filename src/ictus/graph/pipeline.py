@@ -33,7 +33,8 @@ from ictus.graph.ref import Origin, Ref, Template, equals
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from ictus.graph.requirements import Executable, McpServer
+    from ictus.graph.requirements import Executable, McpServer, Notifier
+    from ictus.graph.signals import RunSignal
     from ictus.graph.values import YamlScalar
 
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
@@ -305,6 +306,7 @@ class Pipeline:
         self._maps: dict[str, MapGroup] = {}
         self._mcp: dict[str, McpServer] = {}
         self._executables: dict[str, Executable] = {}
+        self._notifiers: dict[str, Notifier] = {}
         self._entry: RouteEnd | None = None
 
     # -- construction ----------------------------------------------------
@@ -529,6 +531,46 @@ class Pipeline:
             for server in child.all_mcp_servers():
                 seen.setdefault(server.name, server)
         return tuple(seen.values())
+
+    def require_notifier(self, target: Notifier) -> Notifier:
+        """Declare somewhere this run's progress is reported to.
+
+        A subscription, not a step: nothing about it reaches the emitted
+        workflow, because the engine executes no side effect at a step boundary
+        and a declaration that compiled to nothing would be a lie in the diff.
+        What it buys is preflight — an endpoint whose variable is unset is
+        refused at the launch rather than discovered when a gate opens and the
+        message nobody receives was the one that mattered.
+        """
+        existing = self._notifiers.get(target.name)
+        if existing is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already requires a notifier named "
+                f"{target.name!r}; names are how one is addressed and must be unique"
+            )
+        self._notifiers[target.name] = target
+        return target
+
+    @property
+    def notifiers(self) -> tuple[Notifier, ...]:
+        """Every notifier this pipeline declares, in declaration order."""
+        return tuple(self._notifiers.values())
+
+    def all_notifiers(self) -> tuple[Notifier, ...]:
+        """This pipeline's notifiers and those of every stage it contains.
+
+        A stage's signals surface on the same stream as its caller's — one run,
+        one event log — so a nested declaration is the caller's problem too.
+        """
+        seen: dict[str, Notifier] = dict(self._notifiers)
+        for child in self._children.values():
+            for target in child.all_notifiers():
+                seen.setdefault(target.name, target)
+        return tuple(seen.values())
+
+    def subscribed_signals(self) -> frozenset[RunSignal]:
+        """Every signal any notifier here or in a nested stage asked for."""
+        return frozenset(s for target in self.all_notifiers() for s in target.signals)
 
     def declare_input(
         self,

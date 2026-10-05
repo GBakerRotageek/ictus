@@ -21,7 +21,9 @@ from ictus.errors import CompositionError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport"]
+    from ictus.graph.signals import RunSignal
+
+__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport", "Notifier"]
 
 
 class McpTransport(StrEnum):
@@ -131,3 +133,56 @@ class McpServer:
     def required_env(self) -> tuple[EnvVar, ...]:
         """Environment variables that must be set for this server to work."""
         return self.env
+
+
+@dataclass(frozen=True, slots=True)
+class Notifier:
+    """Somewhere a run's progress is reported to, and which signals it wants.
+
+    Declared alongside the other requirements, and for the same reason: a
+    notification path that is not configured fails at the moment it matters —
+    when a gate opens and nobody is told — and a run that discovers that has
+    already parked and is waiting for a person who does not know. Preflight
+    refuses it instead.
+
+    ``env`` is how the endpoint is named. A webhook URL is a credential: it is
+    the whole authorisation to post as whatever it points at, so it is declared
+    as a variable to read at run time and never written into the pipeline.
+    ``required_env`` is the same property ``McpServer`` exposes, so preflight
+    treats both the same way without knowing which it is holding.
+    """
+
+    name: str
+    purpose: str
+    signals: tuple[RunSignal, ...]
+    env: tuple[EnvVar, ...] = ()
+    setup_hint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise CompositionError("a notifier needs a name")
+        if not self.purpose:
+            raise CompositionError(
+                f"notifier {self.name!r} needs a purpose; it is what the person "
+                "being asked to configure it will read"
+            )
+        if not self.signals:
+            raise CompositionError(
+                f"notifier {self.name!r} subscribes to nothing, so it would never fire. "
+                "Name the signals it should report, or drop the declaration."
+            )
+        duplicated = sorted({s for s in self.signals if self.signals.count(s) > 1})
+        if duplicated:
+            raise CompositionError(
+                f"notifier {self.name!r} names {[s.value for s in duplicated]} more than "
+                "once; a signal is reported once or not at all"
+            )
+
+    @property
+    def required_env(self) -> tuple[EnvVar, ...]:
+        """Environment variables that must be set for this notifier to work."""
+        return self.env
+
+    def wants(self, signal: RunSignal) -> bool:
+        """Whether this notifier asked to hear about ``signal``."""
+        return signal in self.signals

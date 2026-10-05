@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     from ictus.graph.node import NodeKind
     from ictus.graph.pipeline import Pipeline
+    from ictus.graph.signals import RunSignal
 
 __all__ = [
     "Backend",
@@ -85,6 +86,18 @@ class Capabilities:
     conditional_routes: bool = True
     cycles: bool = True
     sub_graphs: bool = True
+
+    signals: frozenset[RunSignal] = frozenset()
+    """Which moments of a run this engine can actually report.
+
+    A pipeline subscribing to one that is absent is refused while it is being
+    written, for the same reason an unsupported ``NodeKind`` is: the alternative
+    is a notifier that is configured, passes preflight, and silently never fires
+    — which looks exactly like a quiet run.
+
+    Empty means the engine reports nothing, so any subscription is refused.
+    """
+
     notes: str = ""
 
 

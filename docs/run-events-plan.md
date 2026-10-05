@@ -36,7 +36,7 @@ was refused for carrying prose it did not have. The pattern now takes an empty
 first branch; an optional newline was rejected because it would also let
 `foo---` close a block.
 
-## Phase 1 — declaration
+## Phase 1 — declaration — **done**
 
 Engine-neutral. `graph/` names no Conductor event.
 
@@ -100,6 +100,14 @@ boundary is the engine, this one is the audience.
 - A delivery failure is logged and never raised into the watcher loop.
 
 ## Phase 4 — inbound
+
+> **Stop here and assess before starting.** Phases 1–3 need nothing from Slack
+> and can be built and checked on their own. This one needs a configured Slack
+> app, it is the first thing that can act on a live run from outside, and the
+> questions it answers — what a message says, what a stale button does, whether
+> Socket Mode reconnects cleanly — are worth deciding deliberately rather than
+> on the way past. Phase 0 is the precedent: proving the surface first bought
+> six corrections.
 
 Answering from Slack. Needs a Slack app; scope separately.
 
