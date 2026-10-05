@@ -49,7 +49,7 @@ Engine-neutral. `graph/` names no Conductor event.
 | `RUN_FAILED` | `workflow_failed` |
 | `DECISION_NEEDED` | `gate_presented`, `questions_presented` |
 | `DECISION_MADE` | `gate_resolved`, `questions_completed` |
-| `STEP_BLOCKED` | `agent_paused` |
+| `RUN_PAUSED` | `agent_paused` |
 | `STEP_FAILED` | `agent_failed`, `agent_validation_failed`, `script_failed`, `set_failed`, `wait_failed`, `mcp_failed`, `subworkflow_failed` |
 | `BUDGET_EXCEEDED` | `budget_exceeded` |
 
@@ -66,11 +66,25 @@ The mapping lives in `interfaces/conductor/`, not beside the enum.
 A pipeline subscribing to a signal the backend cannot report is refused at
 composition, like an unsupported `NodeKind`.
 
-Endpoints are declared as `EnvVar`, not literals. Preflight's existing env check
-then covers notifiers with no signature change; `--probe` additionally POSTs a
-test payload.
+Endpoints are declared as `EnvVar`, not literals, so preflight's existing env
+check covers notifiers with no signature change. Offline only, unlike MCP's
+`--probe`: proving an endpoint means posting to it, and a preflight that
+announced itself in a channel every time anyone checked a pipeline would be
+muted — taking the real notification with it.
 
-## Phase 2 — the watcher
+## Phase 2 — the watcher — **done**
+
+Settled the dependency: **no `websockets`.** `interfaces/conductor/websocket.py`
+is ~60 lines of RFC 6455 covering the subset actually used — one connection, text
+frames, no extensions. The maintained clients are asyncio-first and ictus is
+synchronous end to end, so the dependency would have dragged an event loop into
+the CLI to carry less code than it replaced. `ictus watch` runs a thread per run.
+
+Found while testing: a read deadline on the socket is a **bug**, not a
+safeguard. A run parked at a gate emits nothing for as long as the person takes,
+so any timeout drops precisely the connection worth holding and the gate it was
+about to report goes unreported. The socket blocks after the handshake; only
+reaching the dashboard is bounded.
 
 `interfaces/conductor/events.py`, beside `trace.py`. Conductor's vocabulary is
 already permitted there.
@@ -81,7 +95,10 @@ already permitted there.
 - Map event → `RunSignal`. Unmapped events are dropped, not forwarded.
 - **Close the socket on `workflow_completed` / `workflow_failed`.** Non-negotiable;
   a held connection stops the run reaping.
-- Reconnect with backoff on drop. A new connection cancels a pending grace timer.
+- Reconnect on drop is **not** implemented and is deliberately deferred: a drop
+  mid-run is unobserved so far, and the right behaviour depends on whether the
+  run ended underneath us. `ictus watch` reports the run as detached with the
+  reason rather than silently reattaching to something that is gone.
 
 `cli.py` — `ictus watch`. Long-lived, attaches to every discoverable run, detaches
 per run on terminal event. Does not change `ictus run`; ictus stays a compiler
@@ -157,11 +174,8 @@ Under Socket Mode the watcher and the Slack listener are one daemon.
 
 ## Decisions
 
-- **WebSocket client dependency.** No stdlib WS client. `websockets` is the
-  candidate. Alternative is polling `GET /api/state`, which needs no token and
-  no dependency and cannot block reaping, at the cost of push and of
-  re-transferring the full history each poll. Phase 4 shares nothing with this
-  either way. Recommend `websockets`; the pin rule applies.
+- ~~WebSocket client dependency.~~ Settled in phase 2: no dependency, a
+  standard-library client. See that phase.
 - **Phase 4 transport.** HTTP is Slack's recommendation for production and needs
   a public HTTPS endpoint with signature verification. Socket Mode needs neither
   and can lose events in a reconnect gap. Decide on whether a public endpoint is

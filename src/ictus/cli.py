@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Queue
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
@@ -14,7 +16,11 @@ from ictus.config import CONFIG_FILE, MINIMAL, PipelineConfig, read_config
 from ictus.errors import IctusError
 from ictus.gate import add_start_gate
 from ictus.graph.pipeline import Pipeline
+from ictus.graph.signals import RunSignal
 from ictus.interfaces.conductor import conductor
+from ictus.interfaces.conductor.events import SignalEvent
+from ictus.interfaces.conductor.events import watch as watch_run
+from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.runspec import PipelineFolder, read_input_file
@@ -751,6 +757,110 @@ def trace(
             "That is right for a step whose whole input is in its prompt, and wrong "
             "for one asked to assess something it was only shown a summary of."
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _Finished:
+    """A watched run stopped, for whatever reason."""
+
+    run_id: str
+    error: str = ""
+
+
+def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
+    """Relay one run's signals onto the queue, then say it is done.
+
+    Every failure is reported rather than raised: this runs on its own thread,
+    and one unreachable run must not take the watcher down with it.
+    """
+    try:
+        for event in watch_run(run):
+            out.put(event)
+    except (OSError, IctusError) as exc:
+        out.put(_Finished(run.run_id, str(exc)))
+        return
+    out.put(_Finished(run.run_id))
+
+
+@app.command()
+def watch(
+    follow: Annotated[
+        bool, typer.Option("--follow", "-f", help="Keep attaching to runs as they start")
+    ] = False,
+    poll_seconds: Annotated[
+        float, typer.Option("--poll", help="How often to look for new runs, with --follow")
+    ] = 2.0,
+) -> None:
+    """Report what live runs are doing, as signals.
+
+    Attaches to every run currently serving a dashboard and prints each moment
+    worth reporting. Without `--follow` it exits once the runs it found have
+    ended; with it, it keeps looking for new ones until interrupted.
+
+    It detaches the moment a run ends, and that is not tidiness: a detached run
+    shuts itself down only once every client has disconnected, so a watcher that
+    held on would leave one resident process per run, each keeping that run's
+    whole event history in memory.
+    """
+    events: Queue[SignalEvent | _Finished] = Queue()
+    attached: set[str] = set()
+    threads: list[threading.Thread] = []
+
+    def attach() -> int:
+        started = 0
+        for run in live_runs():
+            if run.run_id in attached:
+                continue
+            attached.add(run.run_id)
+            thread = threading.Thread(target=_follow, args=(run, events), daemon=True)
+            thread.start()
+            threads.append(thread)
+            started += 1
+            typer.secho(
+                f"watching {run.workflow} ({run.run_id}) on {run.dashboard}",
+                fg=typer.colors.CYAN,
+            )
+        return started
+
+    if attach() == 0 and not follow:
+        typer.secho("no run is serving a dashboard", fg=typer.colors.YELLOW)
+        typer.echo("Start one with `ictus run <folder>`, or pass --follow to wait for one.")
+        return
+
+    live = len(attached)
+    try:
+        while live or follow:
+            try:
+                item = events.get(timeout=poll_seconds)
+            except Empty:
+                live += attach()
+                continue
+            if isinstance(item, _Finished):
+                live -= 1
+                if item.error:
+                    typer.secho(f"  {item.run_id}: {item.error}", fg=typer.colors.RED)
+                else:
+                    typer.secho(f"  {item.run_id}: detached", fg=typer.colors.BRIGHT_BLACK)
+                continue
+            _report_signal(item)
+    except KeyboardInterrupt:
+        typer.secho("\nstopped watching; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
+
+
+def _report_signal(event: SignalEvent) -> None:
+    """One line per signal, with the detail that decides what to do about it."""
+    colour = {
+        RunSignal.DECISION_NEEDED: typer.colors.YELLOW,
+        RunSignal.RUN_FAILED: typer.colors.RED,
+        RunSignal.STEP_FAILED: typer.colors.RED,
+        RunSignal.BUDGET_EXCEEDED: typer.colors.RED,
+    }.get(event.signal, typer.colors.GREEN)
+    detail = event.data.get("agent_name") or event.data.get("status") or ""
+    typer.secho(f"  {event.workflow}  {event.signal.value}  {detail}", fg=colour)
+    if event.signal is RunSignal.DECISION_NEEDED:
+        options = event.data.get("options")
+        if isinstance(options, list):
+            typer.echo(f"      waiting on: {', '.join(str(o) for o in options)}")
 
 
 # Last in the file, and it must stay last. Under `python -m ictus.cli` this
