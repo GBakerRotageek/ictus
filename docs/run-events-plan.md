@@ -132,9 +132,15 @@ so the whole path is watchable before anyone creates a Slack app.
 - One module per destination, one destination per module, as `stdlib/` does.
 - A delivery failure is logged and never raised into the watcher loop.
 
-## Phase 4 — inbound
+## Phase 4 — inbound — **done**
 
-> **Stop here and assess before starting.** Phases 1–3 need nothing from Slack
+> Assessed and built. Socket Mode, because it needs no inbound rule, no
+> certificate and no signature check on a box behind a firewall. What that
+> costs is real and is written down below: a press arriving while nothing is
+> listening is **lost**, with no replay, which is why the dashboard stays the
+> thing of record and a button is a convenience.
+>
+> _Original note:_ **Stop here and assess before starting.** Phases 1–3 need nothing from Slack
 > and can be built and checked on their own. This one needs a configured Slack
 > app, it is the first thing that can act on a live run from outside, and the
 > questions it answers — what a message says, what a stale button does, whether
@@ -175,6 +181,47 @@ auth, different URL lifetime, and `slack_sdk` ships its own Socket Mode client
 that does not generalise. No dependency is amortised across the two.
 
 Under Socket Mode the watcher and the Slack listener are one daemon.
+
+### What building it settled
+
+- **Acknowledge before acting.** Slack retries an envelope it believes did not
+  arrive, and a retry is indistinguishable from a second press.
+- **A disconnect is routine.** The URL is single-use and Slack replaces the
+  connection; treating that as a failure stops the listener within the hour.
+- **One socket, not one per run.** An app may hold 10 connections and Slack
+  delivers each event to *one* of them, so a per-run listener would drop clicks
+  meant for its neighbours. The run id travels in the button instead.
+- **`response_url` posts to the channel, not the thread.** For a button inside a
+  thread that puts the answer beside every other run's. The parent is in the
+  payload; `chat.postMessage` with it is the only way to reply under the
+  question. A button on a thread root has no `thread_ts` — its own `ts` is the
+  thread.
+- **Who may press is a decision.** `--allow` takes Slack user ids; the default is
+  anyone in the channel, which is right for an invited channel and wrong for a
+  deploy.
+
+## Phase 5 — the trigger
+
+Not started. The end state: an event arrives, a run is spawned to handle it, and
+it reports into the thread the event is already in.
+
+- **Ingress.** The listener subscribes to Slack `message` events as well as
+  presses, and shells out to `ictus run <folder> -i alert=... -i thread=...`.
+  Nothing in the current design blocks it: a press and a message come down the
+  same socket.
+- **Replying to somebody else's thread** needs no new mechanism. `announce`
+  takes a `Ref` for its thread, and a `WorkflowInput.ref()` is one — so the
+  triggering `thread_ts` arrives as a declared input.
+- **Hosting it elsewhere** is the open problem, and it is not ictus's. Conductor
+  hardcodes `host="127.0.0.1"` at both `WebDashboard` call sites in `cli/run.py`
+  and exposes no `--web-host`, so a dashboard cannot be bound anywhere reachable.
+  Runs execute on the host and something there maps `run-id -> 127.0.0.1:port`,
+  or a `--web-host` flag is upstreamed.
+- **A run announcing its own URL** needs its port, which it can read from its own
+  fleet record using `CONDUCTOR_RUN_ID`, plus a public base from the environment
+  — `http://127.0.0.1:50984` means nothing to anyone else.
+- **`ictus run --web-port`** is not exposed and would make proxy routing
+  predictable.
 
 ## Tests
 
