@@ -13,23 +13,39 @@ answerable from outside the process.
 
 ## What you need
 
-`conductor` on PATH, and `ictus` runnable. The documented setup is
+`conductor` and `ictus`, both on PATH.
 
-    uv tool install conductor-cli
+> **Not `pip install conductor-cli`.** That name on PyPI is an unrelated research
+> computing orchestrator whose command is `cond`. It installs cleanly, gives you
+> no `conductor`, and wastes an afternoon. Conductor is not published to PyPI;
+> it is installed from its repository.
+
+The documented setup, which installs `uv` for you if it is missing:
+
+    curl -sSfL https://aka.ms/conductor/install.sh | sh
     uv sync
 
-If you would rather not install anything globally, both work from throwaway
-virtualenvs:
+### Without uv, and without touching anything outside this directory
 
-    python3 -m venv /tmp/venv-conductor
-    /tmp/venv-conductor/bin/pip install conductor-cli
-    python3 -m venv /tmp/venv-ictus
-    /tmp/venv-ictus/bin/pip install 'ruamel.yaml==0.18.10' 'typer==0.20.0' 'click==8.5.0'
+Two virtualenvs, kept apart on purpose — `import conductor` must keep failing
+from the project's own interpreter, or the guidance in `AGENTS.md` about which
+interpreter you asked stops being true:
 
-then prefix the `ictus` calls below with
+    python3 -m venv .venv
+    .venv/bin/pip install -e .
 
-    PATH=/tmp/venv-conductor/bin:$PATH PYTHONPATH=src /tmp/venv-ictus/bin/python \
-      -c 'from ictus.cli import app; app()'
+    python3 -m venv .venv-conductor
+    .venv-conductor/bin/pip install 'git+https://github.com/microsoft/conductor.git'
+    ln -s "$PWD/.venv-conductor/bin/conductor" .venv/bin/conductor
+
+    source .venv/bin/activate
+
+Both `ictus` and `conductor` are now on PATH, and `import conductor` from
+`.venv` still raises `ModuleNotFoundError` — only the console script is linked,
+and its shebang points back at the other environment. Both directories are
+gitignored; delete them to undo.
+
+With the venv activated, drop the `uv run` prefix from the commands below.
 
 ## Run it
 

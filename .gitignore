@@ -1,5 +1,9 @@
 __pycache__/
 .venv/
+# Conductor kept in its own environment, as the real install does: only the
+# console script is linked into .venv/bin, so `import conductor` from the
+# project interpreter still fails and AGENTS.md stays true.
+.venv-conductor/
 *.pyc
 .mypy_cache/
 .ruff_cache/
