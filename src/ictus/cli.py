@@ -25,7 +25,7 @@ from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.notify import Delivered, deliver
-from ictus.notify.slack_socket import clicks, resolve, say
+from ictus.notify.slack.listen import clicks, resolve, say
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 

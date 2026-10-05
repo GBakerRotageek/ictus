@@ -10,7 +10,7 @@ from ictus.interfaces.conductor.respond import Answered, answer_gate
 from ictus.interfaces.conductor.runs import LiveRun
 from ictus.interfaces.conductor.websocket import HandshakeError
 from ictus.interfaces.conductor.websocket import connect as ws_connect
-from ictus.notify.slack_socket import Click, _pressed, resolve
+from ictus.notify.slack.listen import Click, _pressed, resolve
 
 RUN = LiveRun(run_id="abc12345", workflow="w", port=59999, pid=1, started_at="2026")
 
@@ -75,7 +75,7 @@ def _click(**over: object) -> Click:
 
 def test_a_press_for_a_run_that_has_finished_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """The commonest failure: the thread outlives the run by a long way."""
-    monkeypatch.setattr("ictus.notify.slack_socket.live_runs", list)
+    monkeypatch.setattr("ictus.notify.slack.listen.live_runs", list)
     answer = resolve(_click())
     assert "no longer running" in answer
     assert "abc12345" in answer
@@ -89,16 +89,16 @@ def test_a_press_from_somebody_not_allowed_does_nothing(monkeypatch: pytest.Monk
         called = True
         return [RUN]
 
-    monkeypatch.setattr("ictus.notify.slack_socket.live_runs", _never)
+    monkeypatch.setattr("ictus.notify.slack.listen.live_runs", _never)
     answer = resolve(_click(), allowed=frozenset({"UOTHER"}))
     assert "not allowed" in answer
     assert not called, "the run must not even be looked up for somebody who may not answer"
 
 
 def test_an_allowed_press_is_carried_through(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ictus.notify.slack_socket.live_runs", lambda: [RUN])
+    monkeypatch.setattr("ictus.notify.slack.listen.live_runs", lambda: [RUN])
     monkeypatch.setattr(
-        "ictus.notify.slack_socket.answer_gate",
+        "ictus.notify.slack.listen.answer_gate",
         lambda *a, **k: Answered(True),  # noqa: ARG005
     )
     assert "answered *approved*" in resolve(_click(), allowed=frozenset({"U123"}))
@@ -106,9 +106,9 @@ def test_an_allowed_press_is_carried_through(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_a_refused_answer_is_reported_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A button that silently does nothing is worse than no button."""
-    monkeypatch.setattr("ictus.notify.slack_socket.live_runs", lambda: [RUN])
+    monkeypatch.setattr("ictus.notify.slack.listen.live_runs", lambda: [RUN])
     monkeypatch.setattr(
-        "ictus.notify.slack_socket.answer_gate",
+        "ictus.notify.slack.listen.answer_gate",
         lambda *a, **k: Answered(False, "'ship_it' has already been answered"),  # noqa: ARG005
     )
     assert "already been answered" in resolve(_click())

@@ -1,26 +1,21 @@
-"""Listening to Slack, so a button in a channel can answer a gate on a run.
+"""Receiving a button press, and answering the gate it names.
 
-Socket Mode: the app opens a websocket *outward* to Slack and events arrive down
-it, so nothing has to be publicly reachable — no inbound rule, no certificate,
-no request-signature check. Slack recommends HTTP for production and is right
-about it at scale; this is the shape that works on a box behind a firewall, and
-everything above ``listen`` is transport-agnostic so the other can replace it.
+Socket Mode: the app dials *out* to Slack, so nothing has to be publicly
+reachable — no inbound rule, no certificate, no signature check. Slack prefers
+HTTP at scale; everything above ``resolve`` is transport-agnostic, so that can
+replace this.
 
-Two properties of Socket Mode that are not preferences:
+Two properties of it are not preferences:
 
-* **Every envelope must be acknowledged**, by sending its ``envelope_id`` back
-  down the socket. Slack retries an unacknowledged event, so a slow answer
-  becomes a second click nobody made. The ack goes first, before the gate is
-  answered, because the two are about different things: one says the message
-  arrived, the other says what was done about it.
-* **The connection is replaced, not kept.** Slack sends ``disconnect`` when it
-  wants the client to reconnect, and the URL it hands out is single-use. A
-  client that treats a disconnect as a failure stops working within the hour.
+* Every envelope is acknowledged, and *before* the gate is answered. Slack
+  retries what it believes did not arrive, and a retry is indistinguishable
+  from a second press.
+* A ``disconnect`` is routine. The URL is single-use and Slack replaces the
+  connection; treating that as a failure stops the listener within the hour.
 
-Events that arrive while no socket is open are **lost** — there is no replay.
-That is the trade against an HTTP endpoint, and it is why a button is a
-convenience rather than the only way to answer a gate: the dashboard is always
-there, and it is the thing of record.
+Presses arriving while no socket is open are **lost** — there is no replay.
+That is the trade against an HTTP endpoint, and why the dashboard stays the
+thing of record.
 """
 
 from __future__ import annotations
@@ -35,7 +30,7 @@ from ictus.errors import IctusError
 from ictus.interfaces.conductor.respond import answer_gate
 from ictus.interfaces.conductor.runs import live_runs
 from ictus.interfaces.conductor.websocket import connect
-from ictus.notify.slack import reply
+from ictus.notify.slack.send import reply
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -102,11 +97,7 @@ def open_socket(app_token: str) -> str:
 
 
 def clicks(app_token: str) -> Iterator[Click]:
-    """Every button press, reconnecting as Slack asks.
-
-    Loops forever by design: this is a daemon, and the socket being replaced is
-    routine rather than exceptional.
-    """
+    """Every button press, reconnecting as Slack asks. Loops forever by design."""
     while True:
         socket = connect(open_socket(app_token))
         try:
@@ -121,9 +112,7 @@ def clicks(app_token: str) -> Iterator[Click]:
                     continue
                 envelope_id = envelope.get("envelope_id")
                 if isinstance(envelope_id, str):
-                    # Acknowledged before anything is done about it: Slack
-                    # retries what it thinks did not arrive, and a retry looks
-                    # exactly like a second press.
+                    # Before anything is done about it: see the module note.
                     socket.send(json.dumps({"envelope_id": envelope_id}))
                 yield from _pressed(envelope)
         finally:
@@ -131,7 +120,7 @@ def clicks(app_token: str) -> Iterator[Click]:
 
 
 def _parsed(raw: str) -> dict[str, object] | None:
-    """One envelope, or ``None`` if it is not one we can read."""
+    """One envelope, or ``None`` if it cannot be read."""
     try:
         loaded = json.loads(raw)
     except json.JSONDecodeError:
@@ -172,9 +161,7 @@ def _pressed(envelope: dict[str, object]) -> Iterator[Click]:
 def _where(payload: dict[str, object]) -> tuple[str, str]:
     """The channel and thread a press came from.
 
-    ``message.thread_ts`` when the button is already inside a thread, and the
-    message's own ``ts`` when it is the thread root — replying to that opens the
-    thread rather than starting a second conversation beside it.
+    A button on a thread root has no ``thread_ts``; its own ``ts`` is the thread.
     """
     channel = payload.get("channel")
     where = str(channel.get("id", "")) if isinstance(channel, dict) else ""
@@ -189,10 +176,9 @@ def _where(payload: dict[str, object]) -> tuple[str, str]:
 def resolve(click: Click, *, allowed: frozenset[str] = frozenset()) -> str:
     """Answer the gate the click names, and say what happened in one line.
 
-    ``allowed`` is Slack user ids. Empty means anyone in the channel may answer,
-    which is the right default for a channel people were invited to and the wrong
-    one for a deploy. There is no middle setting on purpose: "who may approve
-    this" is a decision somebody has to make rather than inherit.
+    ``allowed`` is Slack user ids; empty means anyone in the channel. No middle
+    setting on purpose — who may approve something is a decision to make rather
+    than inherit.
     """
     if allowed and click.who not in allowed:
         return f"<@{click.who}> is not allowed to answer {click.gate}, so nothing was done"
@@ -211,14 +197,9 @@ def resolve(click: Click, *, allowed: frozenset[str] = frozenset()) -> str:
 def say(click: Click, text: str, *, token: str) -> None:
     """Answer under the question, not beside it.
 
-    The click's ``response_url`` was the obvious route and it is wrong: it posts
-    where the *message* lives, which for a button inside a thread is the channel
-    root — so the answer to a question asked in a thread landed outside it,
-    beside every other run's, which is the thing threading exists to prevent.
-
-    Best effort. The gate is already answered by the time this runs, so a report
-    about a report is not worth failing a daemon over — but it is logged, because
-    a thread that goes quiet after a press looks like nothing happened.
+    Best effort: the gate is already answered by now, so this is not worth
+    failing a daemon over — but it is logged, because a thread that goes quiet
+    after a press looks like nothing happened.
     """
     if not token or not click.channel:
         return

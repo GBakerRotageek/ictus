@@ -1,25 +1,19 @@
-"""Slack, and the only module that knows it exists.
-
-Everything Slack-shaped lives here: its API endpoint, its message body, Block
-Kit, ``thread_ts``, its error names. Nothing above ``notify`` names any of it —
-a pipeline declares an integration and attaches it, and could be pointed at a
-second service by changing the constructor it calls and nothing else.
+"""Building a Slack report, and posting one.
 
 The program below is what an announcement step runs. It is a string because the
-step is a subprocess: the graph layer carries it without reading it, the way it
-carries an MCP server's command, and that is what keeps Slack out of ``graph``
-and ``stdlib``.
+step is a subprocess: the graph carries it without reading it, the way it
+carries an MCP server's command, which is what keeps Slack out of ``graph`` and
+``stdlib``.
 
 Three decisions in it are not preferences:
 
-* **The credential is read from the environment**, never written into a pipeline
-  or an emitted workflow. A bot token is the whole authorisation to post as the
-  app.
-* **The message goes down stdin**, not onto argv. A gate prompt is prose written
-  by a person and the first apostrophe would end a shell-interpolated one.
-* **Threading needs ``chat.postMessage``.** An incoming webhook accepts
-  ``thread_ts`` but never returns the ``ts`` of what it posted, so there is no
-  parent to reply under. Both shapes are here; only one can hold a conversation.
+* The credential is read from the environment, never written into a pipeline or
+  an emitted workflow.
+* The message goes down stdin, not argv. A gate prompt is prose, and the first
+  apostrophe would end a shell-interpolated one.
+* Threading needs ``chat.postMessage``. A webhook accepts ``thread_ts`` but
+  never returns the ``ts`` of what it posted, so there is no parent to reply
+  under. Both shapes are here; only one can hold a conversation.
 """
 
 from __future__ import annotations
@@ -60,10 +54,9 @@ def slack_channel(
         "then export the bot token and the channel id"
     ),
 ) -> Integration:
-    """A channel this pipeline reports into, through ``chat.postMessage``.
+    """A channel reported into through ``chat.postMessage``.
 
-    Threads, so every run gets a conversation of its own and several at once stay
-    legible. Needs a bot token: see the module note on why a webhook cannot.
+    Threads, so several runs at once stay legible. Needs a bot token.
     """
     return Integration(
         name=name,
@@ -85,10 +78,10 @@ def slack_webhook(
     reports: Sequence[RunSignal] = (),
     setup_hint: str = "Create an incoming webhook on a Slack app and export its URL",
 ) -> Integration:
-    """A channel this pipeline posts into through an incoming webhook.
+    """A channel posted into through an incoming webhook.
 
     Simpler to set up and strictly less capable: no threads and no buttons, so
-    several runs at once interleave and nothing can be answered from Slack.
+    runs interleave and nothing can be answered from Slack.
     """
     return Integration(
         name=name,
@@ -103,11 +96,7 @@ def slack_webhook(
 
 
 def _program(*, secret: str, channel: str) -> str:
-    """The sending program, with this integration's variable names baked in.
-
-    One place that knows the endpoint and the name of its override, so the two
-    cannot drift from the constants above.
-    """
+    """The sending program, with this integration's variable names baked in."""
     return _PROGRAM.format(
         secret=secret, channel=channel, timeout=TIMEOUT_SECONDS, api=API, api_env=API_ENV
     )
@@ -132,8 +121,7 @@ if channel:
     if parent:
         body["thread_ts"] = parent
     if asks:
-        # Everything the listener needs to answer the right gate on the right
-        # run. The run id is only knowable here, while the step is running.
+        # The run id is only knowable here, while the step is running.
         run_now = os.environ.get("CONDUCTOR_RUN_ID", "")
         body["blocks"] = [
             {{"type": "section", "text": {{"type": "mrkdwn", "text": text}}}},
@@ -175,8 +163,7 @@ if channel:
             "token_revoked": "the token has been rotated; export the new one",
         }}.get(why, "")
         sys.exit("slack refused the message: " + why + ((" - " + fix) if fix else ""))
-    # Slack calls it ts; the graph calls it a thread. Translating here is what
-    # keeps the vendor's spelling out of every pipeline that uses it.
+    # Slack calls it ts; the graph calls it a thread.
     print(json.dumps({{"thread": answer.get("ts", ""), "posted": "true"}}))
 else:
     req = r.Request(
@@ -185,8 +172,7 @@ else:
         headers={{"Content-Type": "application/json"}},
     )
     r.urlopen(req, timeout={timeout}).read()
-    # A webhook never says where the message landed, so there is no thread to
-    # publish and nothing can be hung under this one.
+    # A webhook never says where the message landed.
     print(json.dumps({{"thread": "", "posted": "true"}}))
 """
 
@@ -201,14 +187,9 @@ def reply(
 ) -> str:
     """Say ``text`` under ``thread_ts``. Returns "" on success, else why not.
 
-    ``chat.postMessage`` rather than a click's ``response_url``: that one posts
-    where the *message* lives, which for a button inside a thread is the channel
-    root — so the answer to a question asked in a thread landed outside it,
-    beside every other run's. Threading needs the parent, and the parent is in
-    the payload.
-
-    Never raises. Saying what happened is the last thing in a sequence whose real
-    work — answering the gate — is already done.
+    Not a click's ``response_url``: that posts where the *message* lives, which
+    for a button in a thread is the channel root — so the answer landed beside
+    every other run's. Never raises; the gate is already answered by now.
     """
     body: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts:
