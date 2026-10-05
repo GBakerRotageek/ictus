@@ -18,18 +18,19 @@ from ictus.gate import add_start_gate
 from ictus.graph.pipeline import Pipeline
 from ictus.graph.signals import RunSignal
 from ictus.interfaces.conductor import conductor
-from ictus.interfaces.conductor.events import SignalEvent
 from ictus.interfaces.conductor.events import watch as watch_run
 from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
+from ictus.notify import Delivered, deliver
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.interfaces import PreflightIssue
+    from ictus.graph.requirements import Notifier
+    from ictus.interfaces import PreflightIssue, SignalEvent
 
 app = typer.Typer(
     help="Typed composition for Conductor workflows.",
@@ -339,12 +340,15 @@ def preflight(
     for pipeline in pipelines:
         declared = pipeline.all_mcp_servers()
         commands = pipeline.all_executables()
-        total = len(declared) + len(commands)
+        reporting = pipeline.all_notifiers()
+        total = len(declared) + len(commands) + len(reporting)
         typer.echo(f"{pipeline.pipeline_id}: {total} requirement(s) declared")
         for server in declared:
             typer.echo(f"  - mcp:{server.name} — {server.purpose}")
         for tool in commands:
             typer.echo(f"  - exe:{tool.name} — {tool.purpose}")
+        for target in reporting:
+            typer.echo(f"  - notify:{target.name} — {target.purpose}")
         issues.extend(BACKEND.preflight(pipeline, probe=probe))
     _report_preflight(issues, probed=probe)
     if any(i.blocking for i in issues):
@@ -782,8 +786,26 @@ def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
     out.put(_Finished(run.run_id))
 
 
+def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Notifier, ...]]:
+    """A pipeline folder's id and the notifiers it declares.
+
+    Read from the source rather than from the emitted workflow, because a
+    subscription deliberately never reaches the YAML: the engine runs no side
+    effect at a step boundary, so a declaration that compiled to something would
+    be a lie in the diff. `pipeline.py` is the only place it exists.
+    """
+    if folder is None:
+        return "", ()
+    pipeline = _only(PipelineFolder.at(folder))
+    return pipeline.pipeline_id, pipeline.all_notifiers()
+
+
 @app.command()
 def watch(
+    folder: Annotated[
+        Path | None,
+        typer.Argument(help="A pipeline folder, to also report to the notifiers it declares"),
+    ] = None,
     follow: Annotated[
         bool, typer.Option("--follow", "-f", help="Keep attaching to runs as they start")
     ] = False,
@@ -797,14 +819,31 @@ def watch(
     worth reporting. Without `--follow` it exits once the runs it found have
     ended; with it, it keeps looking for new ones until interrupted.
 
+    Given a pipeline folder, it also delivers to that pipeline's notifiers, for
+    runs of that workflow. A declared endpoint whose variable is unset is
+    reported once per signal rather than silently skipped — a notifier nobody
+    can tell is not firing is the failure the declaration exists to prevent.
+
     It detaches the moment a run ends, and that is not tidiness: a detached run
     shuts itself down only once every client has disconnected, so a watcher that
     held on would leave one resident process per run, each keeping that run's
     whole event history in memory.
     """
+    try:
+        workflow, targets = _notifiers_of(folder)
+    except IctusError as exc:
+        _fail(str(exc))
+        return
+    if targets:
+        typer.secho(
+            f"reporting {workflow} to: {', '.join(t.name for t in targets)}",
+            fg=typer.colors.CYAN,
+        )
+
     events: Queue[SignalEvent | _Finished] = Queue()
     attached: set[str] = set()
     threads: list[threading.Thread] = []
+    seats: dict[str, str] = {}
 
     def attach() -> int:
         started = 0
@@ -812,6 +851,7 @@ def watch(
             if run.run_id in attached:
                 continue
             attached.add(run.run_id)
+            seats[run.run_id] = run.dashboard
             thread = threading.Thread(target=_follow, args=(run, events), daemon=True)
             thread.start()
             threads.append(thread)
@@ -843,6 +883,8 @@ def watch(
                     typer.secho(f"  {item.run_id}: detached", fg=typer.colors.BRIGHT_BLACK)
                 continue
             _report_signal(item)
+            if targets and item.workflow == workflow:
+                _report_delivery(deliver(item, targets, dashboard=seats.get(item.run_id, "")))
     except KeyboardInterrupt:
         typer.secho("\nstopped watching; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
 
@@ -861,6 +903,20 @@ def _report_signal(event: SignalEvent) -> None:
         options = event.data.get("options")
         if isinstance(options, list):
             typer.echo(f"      waiting on: {', '.join(str(o) for o in options)}")
+
+
+def _report_delivery(results: list[Delivered]) -> None:
+    """Say what was reported, and say when it was not.
+
+    A failure here is never fatal — the run is unaffected by whether anyone was
+    told about it — but it is always printed, because a notifier that quietly
+    stops working is indistinguishable from a quiet week.
+    """
+    for result in results:
+        if result.sent:
+            typer.secho(f"      -> {result.notifier}", fg=typer.colors.BRIGHT_BLACK)
+        else:
+            typer.secho(f"      -> {result.notifier}: {result.detail}", fg=typer.colors.RED)
 
 
 # Last in the file, and it must stay last. Under `python -m ictus.cli` this

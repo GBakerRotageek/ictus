@@ -37,7 +37,14 @@ from ictus.graph.ref import (
     ref_to,
     tpl,
 )
-from ictus.graph.requirements import EnvVar, Executable, McpServer, McpTransport, Notifier
+from ictus.graph.requirements import (
+    EnvVar,
+    Executable,
+    McpServer,
+    McpTransport,
+    Notifier,
+    NotifierKind,
+)
 from ictus.graph.scope import Scope, ScopeNode, outcome_scope
 from ictus.graph.signals import RunSignal
 from ictus.graph.stage import Stage
@@ -61,6 +68,7 @@ __all__ = [
     "McpTransport",
     "Node",
     "Notifier",
+    "NotifierKind",
     "OutputPort",
     "Pipeline",
     "PortConnection",

@@ -12,8 +12,10 @@ is a defect with a name, rather than a slow drift nobody can see.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from ictus.graph.signals import RunSignal
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -21,16 +23,45 @@ if TYPE_CHECKING:
 
     from ictus.graph.node import NodeKind
     from ictus.graph.pipeline import Pipeline
-    from ictus.graph.signals import RunSignal
 
 __all__ = [
+    "ENDED",
     "Backend",
     "Capabilities",
     "Document",
     "PreflightIssue",
+    "SignalEvent",
     "UnsupportedFeatureError",
     "ValidationResult",
 ]
+
+
+#: After one of these the run is over, and whatever is attached must let go.
+ENDED = frozenset({RunSignal.RUN_FINISHED, RunSignal.RUN_FAILED})
+
+
+@dataclass(frozen=True, slots=True)
+class SignalEvent:
+    """One reportable moment, with the run it happened in.
+
+    Lives on the boundary rather than inside a backend because both sides need
+    it and neither owns it: an engine produces these, and whatever reports them
+    onward consumes them without knowing which engine ran.
+    """
+
+    signal: RunSignal
+    run_id: str
+    workflow: str
+    at: float
+    event_type: str
+    """The engine's own name for it, kept so a report can say what it saw."""
+
+    data: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def ends_the_run(self) -> bool:
+        """Whether nothing further will arrive for this run."""
+        return self.signal in ENDED
 
 
 @dataclass(frozen=True, slots=True)

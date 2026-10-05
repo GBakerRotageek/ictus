@@ -24,10 +24,9 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ictus.graph.signals import RunSignal
+from ictus.interfaces import SignalEvent
 from ictus.interfaces.conductor.runs import token_for
 from ictus.interfaces.conductor.signals import signal_for
 from ictus.interfaces.conductor.websocket import WebSocket
@@ -37,31 +36,9 @@ if TYPE_CHECKING:
 
     from ictus.interfaces.conductor.runs import LiveRun
 
-__all__ = ["ENDED", "SignalEvent", "history", "signals_from", "watch"]
-
-#: After one of these the run is over and the socket must be let go.
-ENDED = frozenset({RunSignal.RUN_FINISHED, RunSignal.RUN_FAILED})
+__all__ = ["STATE_TIMEOUT_SECONDS", "history", "signals_from", "watch"]
 
 STATE_TIMEOUT_SECONDS = 15.0
-
-
-@dataclass(frozen=True, slots=True)
-class SignalEvent:
-    """One reportable moment, with the run it happened in."""
-
-    signal: RunSignal
-    run_id: str
-    workflow: str
-    at: float
-    event_type: str
-    """Conductor's own name for it, kept so a report can say what it saw."""
-
-    data: dict[str, object] = field(default_factory=dict)
-
-    @property
-    def ends_the_run(self) -> bool:
-        """Whether nothing further will arrive for this run."""
-        return self.signal in ENDED
 
 
 def signals_from(events: Iterable[dict[str, object]], run: LiveRun) -> Iterator[SignalEvent]:

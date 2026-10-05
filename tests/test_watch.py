@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ictus import RunSignal
-from ictus.interfaces.conductor.events import ENDED, SignalEvent, signals_from
+from ictus.interfaces import ENDED, SignalEvent
+from ictus.interfaces.conductor.events import signals_from
 from ictus.interfaces.conductor.runs import LiveRun, live_runs, token_for
 from ictus.interfaces.conductor.websocket import HandshakeError, WebSocket
 

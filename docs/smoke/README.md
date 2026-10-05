@@ -100,6 +100,57 @@ Approve both and the `set` step runs. To exercise free text instead:
 back up it. The events are written to `smoke-events-<run_id>.jsonl` in the
 working directory, which `.gitignore` already covers.
 
+## Seeing a report arrive
+
+A notifier is declared in `pipeline.py`, never in the emitted YAML — the engine
+runs no side effect at a step boundary, so a declaration that compiled to
+something would be a lie in the diff. `ictus watch <folder>` reads it from the
+source and delivers.
+
+You do not need Slack to watch this work. `fake_channel.py` accepts the same
+JSON POST an incoming webhook does and prints what it was sent:
+
+    python3 docs/smoke/fake_channel.py
+    export SMOKE_WEBHOOK_URL=http://127.0.0.1:8723/not-a-real-hook
+
+Add this to the bottom of `demo_work/pipelines/smoke-events/pipeline.py`:
+
+```python
+from ictus import EnvVar, Notifier, NotifierKind, RunSignal
+
+pipeline.require_notifier(
+    Notifier(
+        name="channel",
+        purpose="Tell whoever is on call that this run is parked on a gate",
+        kind=NotifierKind.SLACK,
+        signals=(RunSignal.DECISION_NEEDED, RunSignal.DECISION_MADE, RunSignal.RUN_FINISHED),
+        env=(EnvVar("SMOKE_WEBHOOK_URL", "a Slack incoming-webhook URL"),),
+        setup_hint="create an incoming webhook, then export SMOKE_WEBHOOK_URL",
+    )
+)
+```
+
+Then, in three terminals — the fake channel, the run, and the watcher:
+
+    ictus run demo_work/pipelines/smoke-events
+    ictus watch demo_work/pipelines/smoke-events
+    python3 docs/smoke/subscribe.py 'confirm_start=start' 'smoke_gate=rejected:not tonight'
+
+What lands in the channel:
+
+    :raising_hand:  *smoke-events* needs a decision
+    > step: `smoke_gate`
+    > waiting on: `approved`, `rejected`
+    > Approve to continue, or reject and leave a note.
+    run `e6d616c3` · http://127.0.0.1:52829
+
+Point `SMOKE_WEBHOOK_URL` at a real `hooks.slack.com` URL and the same messages
+arrive in the channel instead. Nothing else changes.
+
+**Unset the variable and `ictus preflight` refuses the run** before anything is
+spent — which is the point of declaring it. The committed pipeline carries no
+notifier so the gate needs no configuration; add one when you want to watch it.
+
 ## What it demonstrates
 
 - **Discovery.** The run is found from `~/.conductor/runs/<run_id>.json` — port,

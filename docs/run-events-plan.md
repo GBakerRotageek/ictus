@@ -104,10 +104,26 @@ already permitted there.
 per run on terminal event. Does not change `ictus run`; ictus stays a compiler
 that exits.
 
-## Phase 3 — delivery
+## Phase 3 — delivery — **done**
 
 `src/ictus/notify/` — a new top-level package. Not under `interfaces/`: that
 boundary is the engine, this one is the audience.
+
+`SignalEvent` moved to `interfaces/__init__.py` on the way, so `notify/`
+imports no engine. Both sides need it and neither owns it.
+
+`NotifierKind` picks the payload — `WEBHOOK` or `SLACK` — and sits beside
+`McpTransport`, since it is a property of what the pipeline asked for rather
+than of whatever delivers it. The difference between the two is one JSON body.
+
+The endpoint is treated as the credential it is: an incoming-webhook URL is
+the entire authorisation to post as whatever it points at, and `urllib` names
+the URL in its own exceptions, so every failure is rewritten to carry the
+notifier's name and the status and nothing else. Tested by asserting a known
+secret path never appears in any message.
+
+`docs/smoke/fake_channel.py` accepts the same POST an incoming webhook does,
+so the whole path is watchable before anyone creates a Slack app.
 
 - `webhook.py` first. HTTP POST via `urllib.request`. No dependency.
 - `slack.py` is a webhook URL plus payload shape. Slack outbound — Incoming

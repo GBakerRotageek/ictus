@@ -23,7 +23,24 @@ if TYPE_CHECKING:
 
     from ictus.graph.signals import RunSignal
 
-__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport", "Notifier"]
+__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport", "Notifier", "NotifierKind"]
+
+
+class NotifierKind(StrEnum):
+    """What shape a report takes when it arrives.
+
+    Named here beside ``McpTransport`` for the same reason: it is a property of
+    what the pipeline asked for, not of whatever happens to deliver it. The
+    difference between these two is the body of one HTTP POST — Slack's incoming
+    webhooks are ordinary HTTPS, never a socket — so this picks a payload, not a
+    protocol.
+    """
+
+    WEBHOOK = "webhook"
+    """A JSON POST carrying the signal, its run, and the engine's own payload."""
+
+    SLACK = "slack"
+    """An incoming-webhook message, written to be read by a person in a channel."""
 
 
 class McpTransport(StrEnum):
@@ -155,6 +172,7 @@ class Notifier:
     name: str
     purpose: str
     signals: tuple[RunSignal, ...]
+    kind: NotifierKind = NotifierKind.WEBHOOK
     env: tuple[EnvVar, ...] = ()
     setup_hint: str = ""
 
