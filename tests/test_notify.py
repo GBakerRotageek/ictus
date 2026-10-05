@@ -19,6 +19,7 @@ from ictus.notify import Delivered, DeliveryError, body_for, deliver, endpoint_f
 from ictus.notify.slack import HEADLINE, message
 from ictus.notify.webhook import post
 from ictus.stdlib import announce
+from ictus.stdlib.steps.announce import THREAD_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -254,13 +255,24 @@ def test_an_announce_node_is_a_script_step_not_a_model_call() -> None:
     assert node.command == "python3"
 
 
-def test_the_url_is_never_in_what_is_emitted() -> None:
-    """The step names the variable and reads it in the subprocess."""
-    node = announce(node_id="tell", text="hello", to=EnvVar("HOOK", "where"))
+def test_no_credential_is_in_what_is_emitted() -> None:
+    """The step names its variables and reads them in the subprocess.
+
+    Slack's own API endpoint is in there and that is fine — it is public, and
+    the same for everyone. What must never appear is a webhook URL or a token,
+    because those *are* the authorisation.
+    """
+    node = announce(
+        node_id="tell",
+        text="hello",
+        to=EnvVar("SLACK_BOT_TOKEN", "token"),
+        channel=EnvVar("SLACK_CHANNEL", "where"),
+    )
     rendered = " ".join(str(a) for a in node.args)
-    assert "HOOK" in rendered
+    assert "SLACK_BOT_TOKEN" in rendered
+    assert "SLACK_CHANNEL" in rendered
     assert "hooks.slack.com" not in rendered
-    assert "https://" not in rendered
+    assert "xoxb-" not in rendered
 
 
 def test_the_message_is_piped_rather_than_put_on_the_command_line() -> None:
@@ -270,10 +282,44 @@ def test_the_message_is_piped_rather_than_put_on_the_command_line() -> None:
     assert "apostrophe" not in " ".join(str(a) for a in node.args)
 
 
-def test_stdout_is_not_a_contract() -> None:
-    """Enforcing it would make the engine parse 'reported' as JSON and raise
-    after the message had already gone."""
-    assert not announce(node_id="t", text="x", to=EnvVar("H", "w")).enforce_outputs
+def test_the_thread_is_published_as_a_typed_port() -> None:
+    """So a reply reads it through the graph, and a missing wire is a lint."""
+    opener = announce(node_id="t", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
+    assert [p.name for p in opener.outputs] == [THREAD_PORT, "posted"]
+
+
+def test_a_reply_needs_a_channel_because_a_webhook_cannot_thread() -> None:
+    """A webhook never returns the ts, so there is no parent to reply under."""
+    opener = announce(node_id="open", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
+    with pytest.raises(CompositionError, match="names no channel"):
+        announce(node_id="reply", text="y", to=EnvVar("H", "w"), thread=opener.ref(THREAD_PORT))
+
+
+def test_a_reply_declares_the_input_it_needs_without_being_asked() -> None:
+    opener = announce(node_id="open", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
+    reply = announce(
+        node_id="reply",
+        text="y",
+        to=EnvVar("H", "w"),
+        channel=EnvVar("C", "w"),
+        thread=opener.ref(THREAD_PORT),
+    )
+    assert [p.name for p in reply.inputs] == ["open"]
+
+
+def test_the_thread_goes_through_argv_not_into_the_script_source() -> None:
+    """Interpolating a rendered value into Python is how a quote in somebody
+    else's data becomes a syntax error at run time."""
+    opener = announce(node_id="open", text="x", to=EnvVar("H", "w"), channel=EnvVar("C", "w"))
+    reply = announce(
+        node_id="reply",
+        text="y",
+        to=EnvVar("H", "w"),
+        channel=EnvVar("C", "w"),
+        thread=opener.ref(THREAD_PORT),
+    )
+    assert len(reply.args) == 3
+    compile(str(reply.args[1]), "<announce>", "exec")
 
 
 def test_an_announce_step_refuses_a_nameless_variable() -> None:

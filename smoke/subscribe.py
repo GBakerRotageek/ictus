@@ -12,6 +12,10 @@ that lands this file should shrink again rather than grow.
 
     python3 smoke/subscribe.py                       # take the first option
     python3 smoke/subscribe.py smoke_gate=rejected:no thanks
+    python3 smoke/subscribe.py --run a1b2c3d4 ship_it=approved
+
+Without ``--run`` it takes the most recently started run, which is wrong the
+moment two are live — both invocations would answer the same one.
 
 Each argument is ``<agent>=<value>``, with an optional ``:<free text>`` for a
 choice that declares ``prompt_for``.
@@ -85,12 +89,22 @@ def parse(argv: list[str]) -> Answers:
 
 
 def main(argv: list[str]) -> int:
+    wanted = ""
+    if argv and argv[0] == "--run":
+        wanted, argv = argv[1], argv[2:]
     answers = parse(argv)
     runs = live_runs()
     if not runs:
         print("no run is serving a dashboard; start one with `ictus run <folder>`")
         return 1
-    run = runs[-1]
+    if wanted:
+        matched = [r for r in runs if r.run_id.startswith(wanted)]
+        if not matched:
+            print(f"no live run starts with {wanted!r}; live: {[r.run_id for r in runs]}")
+            return 1
+        run = matched[0]
+    else:
+        run = runs[-1]
     out = pathlib.Path(f"smoke-events-{run.run_id}.jsonl")
     seen: set[tuple[str, float]] = set()
 

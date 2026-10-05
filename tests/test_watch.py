@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +25,14 @@ if TYPE_CHECKING:
 FIXTURES = Path(__file__).parent / "fixtures"
 
 RUN = LiveRun(run_id="abc123", workflow="smoke-events", port=1234, pid=9, started_at="2026")
+
+
+def _a_dead_pid() -> int:
+    """A pid nothing is using. Spawn one, wait for it, and take its number —
+    which beats picking a constant that might belong to something on the day."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
 
 
 def _recorded(name: str) -> list[dict[str, object]]:
@@ -128,11 +139,16 @@ def test_a_malformed_event_does_not_stop_the_stream() -> None:
 
 
 def _record(directory: Path, run_id: str, **fields: object) -> None:
+    """A record for a live run.
+
+    The pid is this process's, because `live_runs` checks it: a record whose
+    process is gone is not a live run, however recent the file is.
+    """
     body: dict[str, object] = {
         "run_id": run_id,
         "workflow_name": "smoke-events",
         "port": 50000,
-        "pid": 42,
+        "pid": os.getpid(),
         "started_at": "2026-10-05T09:34:59+00:00",
     }
     body.update(fields)
@@ -165,6 +181,21 @@ def test_runs_come_back_oldest_first(tmp_path: Path) -> None:
     _record(tmp_path, "later", started_at="2026-10-05T12:00:00+00:00")
     _record(tmp_path, "earlier", started_at="2026-10-05T09:00:00+00:00")
     assert [r.run_id for r in live_runs(runs_dir=tmp_path)] == ["earlier", "later"]
+
+
+def test_a_record_whose_process_died_is_not_a_live_run(tmp_path: Path) -> None:
+    """The engine archives a record on a graceful exit only. A killed run, a
+    crash or a closed laptop leaves one behind, and five accumulated here in an
+    afternoon — a watcher would have kept dialling ports that stopped answering.
+    """
+    _record(tmp_path, "zombie", pid=_a_dead_pid())
+    assert live_runs(runs_dir=tmp_path) == []
+
+
+def test_a_record_with_no_pid_is_believed(tmp_path: Path) -> None:
+    """Nothing recorded is nothing to disprove; an older engine wrote no pid."""
+    _record(tmp_path, "old", pid=0)
+    assert [r.run_id for r in live_runs(runs_dir=tmp_path)] == ["old"]
 
 
 def test_a_reaped_run_is_gone_because_the_engine_moved_it(tmp_path: Path) -> None:

@@ -1,9 +1,11 @@
 """Finding a run that is happening, and getting permission to talk to it.
 
 Conductor writes one record per run under ``~/.conductor/runs/`` and *moves* it
-into ``terminal/`` when the run reaps, so anything still in the directory is
-live. That is why nothing here filters on age or liveness: the engine has
-already done it, and a staleness heuristic would only disagree with it.
+into ``terminal/`` when the run reaps — but only on a graceful exit. A killed
+run, a crash or a closed laptop leaves its record behind, so the pid is checked
+rather than the directory trusted. Nothing filters on *age*: a run parked at a
+gate overnight is still a run, and a heuristic that aged it out would discard
+exactly the one somebody still has to answer.
 
 The path is not configurable — ``conductor.rundir.runs_dir`` builds it from
 ``Path.home()`` with no environment override — so neither is this.
@@ -16,7 +18,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["RUNS_DIR", "TOKEN_ENV", "LiveRun", "live_runs", "token_for"]
+__all__ = ["RUNS_DIR", "TOKEN_ENV", "LiveRun", "alive", "live_runs", "token_for"]
 
 RUNS_DIR = Path.home() / ".conductor" / "runs"
 
@@ -52,12 +54,32 @@ class LiveRun:
         return f"ws://127.0.0.1:{self.port}/ws"
 
 
+def alive(pid: int) -> bool:
+    """Whether a process is still there. Signal 0 checks without delivering one."""
+    if pid <= 0:
+        return True  # nothing recorded, so nothing to disprove
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # someone else's process, but a process
+    return True
+
+
 def live_runs(*, runs_dir: Path | None = None) -> list[LiveRun]:
     """Every run currently serving a dashboard, oldest first.
 
     A record with no port is a foreground run: it is executing, but there is no
     socket to attach to and no way to answer its gates from outside, so there is
     nothing a watcher could do with it.
+
+    The pid is checked rather than trusted. The engine *moves* a record into
+    ``terminal/`` when a run finishes, which is why nothing here filters on age —
+    but that only happens on a graceful exit. A killed run, a crash, or a closed
+    laptop leaves the record behind, and five of them accumulated here in an
+    afternoon's testing. Without this a watcher would keep dialling ports that
+    stopped answering, and ``ictus watch`` would report runs nobody is running.
     """
     found: list[LiveRun] = []
     for path in sorted((runs_dir or RUNS_DIR).glob("*.json")):
@@ -70,6 +92,8 @@ def live_runs(*, runs_dir: Path | None = None) -> list[LiveRun]:
             continue
         log = record.get("event_log_path")
         pid = record.get("pid")
+        if not alive(pid if isinstance(pid, int) else 0):
+            continue
         found.append(
             LiveRun(
                 run_id=run_id,

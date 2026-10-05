@@ -44,17 +44,31 @@ No provider call, still 1 iteration each.
 | `constant` | One computed value | `value`, `output_type` | `value`, typed as `output_type` |
 | `bindings` | Several named values at once | `values`, `outputs` | one port per declared output |
 | `counter` | Count passes through a point, from one | — | `value: number` |
-| `announce` | Report to a webhook from inside the graph | `text`, `to`, `timeout` | — |
+| `announce` | Report to Slack from inside the graph | `text`, `to`, `channel`, `thread`, `label`, `timeout` | `thread_ts`, `posted` |
 | `save_text` | Write a value another step produced to a file | `text`, `to`, `append`, `working_dir` | `path: string` |
 | `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs` | whatever `outputs` declares |
 | `wait` | Pause | `seconds`, `reason` | — |
 
-`announce` posts `text` to the URL held in the `to` environment variable — a
-`Notifier` declaration gets the same variable checked by preflight. Being a
-node is the point: it is costed, routed, visible in the dashboard and in
-`ictus trace`, and a wrong endpoint is a red step rather than a message nobody
-notices never arrived. What it cannot report is anything no step can see — a
-budget tripping, the engine being killed — which is what `ictus watch` is for.
+`announce` reads its endpoint from the `to` environment variable, never from
+the pipeline. Being a node is the point: it is costed, routed, visible in the
+dashboard and in `ictus trace`, and a wrong endpoint is a red step rather than
+a message nobody notices never arrived. What it cannot report is anything no
+step can see — a budget tripping, the engine being killed — which is what
+`ictus watch` is for.
+
+**Threading needs a bot token.** Without `channel`, `to` is a webhook URL and
+every run's messages land in the channel root together. With it, `to` is a bot
+token, the step posts through `chat.postMessage`, and it publishes `thread_ts`
+so later announcements can `thread=` it and reply underneath. A webhook accepts
+`thread_ts` but never returns the `ts` of what it posted, so there is no parent
+to reply under — which is why the two are not interchangeable.
+
+The first message of a run carries `label` and the engine's `CONDUCTOR_RUN_ID`,
+so a message in a channel and a run on a machine can be matched up. Replies
+carry neither; the thread already says which run they belong to.
+
+The input a `thread=` reply needs is declared for you. The *data edge* is not —
+wire it with `feed`, and the lint refuses the graph without it.
 
 ## Terminals
 
