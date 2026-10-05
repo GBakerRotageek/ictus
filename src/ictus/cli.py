@@ -6,6 +6,7 @@ import importlib.util
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
+from ictus.answer import resolve, submit
 from ictus.config import CONFIG_FILE, MINIMAL, PipelineConfig, read_config
 from ictus.errors import IctusError
 from ictus.gate import add_start_gate, attach_start_herald
@@ -25,7 +27,16 @@ from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.notify import Delivered, deliver
-from ictus.notify.slack.listen import clicks, resolve, say
+from ictus.notify.slack.listen import (
+    Click,
+    Note,
+    SlackError,
+    open_form,
+    presses,
+    retire,
+    say,
+    verdict,
+)
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
@@ -39,6 +50,9 @@ app = typer.Typer(
     help="Typed composition for Conductor workflows.",
     no_args_is_help=True,
     add_completion=False,
+    # Typer prints every local of every frame on an uncaught exception, which
+    # in `listen` and `watch` means the Slack tokens, whole.
+    pretty_exceptions_show_locals=False,
 )
 
 
@@ -933,8 +947,13 @@ def _report_delivery(results: list[Delivered]) -> None:
 
 
 APP_TOKEN_ENV = "SLACK_APP_TOKEN"
-#: Needed to reply under the question rather than beside it.
+#: Needed to reply under the question, to ask for a choice's text, and to take
+#: the buttons off a question once it is answered.
 BOT_TOKEN_ENV = "SLACK_BOT_TOKEN"
+
+#: Presses handled at once. The socket thread only acknowledges and hands on,
+#: so one slow run cannot hold up the acknowledgement of the next press.
+LISTEN_WORKERS = 4
 
 
 @app.command()
@@ -947,30 +966,38 @@ def listen(
     """Answer gates from Slack, by listening for button presses.
 
     Opens a websocket outward to Slack, so nothing here has to be publicly
-    reachable. Reads the app-level token from $SLACK_APP_TOKEN.
+    reachable. Reads the app-level token from $SLACK_APP_TOKEN and the bot token
+    from $SLACK_BOT_TOKEN.
 
-    Every press is answered against the run the button names, and what happened
-    is posted back where the button was — including when nothing happened,
-    because a button that silently does nothing is worse than no button.
+    A press is answered on the run that posted the button, and only if that
+    message is the newest time the question was asked — a button from an
+    earlier round of a loop is refused rather than applied to the current one.
+    A choice that asks for text opens a form for it. What happened is posted
+    back where the button was, including when nothing happened, because a button
+    that silently does nothing is worse than no button; an answered question
+    loses its buttons.
 
-    Without `--allow`, anyone in the channel may answer. That is right for a
-    channel people were invited to and wrong for a deploy; there is no middle
-    setting, because who may approve something is a decision to make rather than
-    inherit.
+    The connection is redialled whenever it drops. Only Slack refusing the
+    token stops it.
+
+    Without `--allow`, anyone who can see the button may answer. That is right
+    for a channel people were invited to and wrong for a deploy; there is no
+    middle setting, because who may approve something is a decision to make
+    rather than inherit.
     """
     token = os.environ.get(APP_TOKEN_ENV)
     bot = os.environ.get(BOT_TOKEN_ENV, "")
-    if not bot:
-        typer.secho(
-            f"warning: ${BOT_TOKEN_ENV} is not set, so presses will be answered but "
-            "nothing will be said about it in the thread.",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
     if not token:
         _fail(
             f"${APP_TOKEN_ENV} is not set. Enable Socket Mode on the Slack app, generate "
             "an app-level token with connections:write, and export it."
+        )
+        return
+    if not bot:
+        _fail(
+            f"${BOT_TOKEN_ENV} is not set. Without it a choice that needs text cannot ask "
+            "for it, nothing can be said in the thread, and an answered question keeps "
+            "its buttons. Export the same bot token the pipeline posts with."
         )
         return
     permitted = frozenset(allow or ())
@@ -979,15 +1006,55 @@ def listen(
         + (f"; only {', '.join(sorted(permitted))} may answer" if permitted else ""),
         fg=typer.colors.CYAN,
     )
+    with ThreadPoolExecutor(max_workers=LISTEN_WORKERS) as pool:
+        try:
+            for event in presses(token):
+                pool.submit(_handle_press, event, permitted, bot)
+        except KeyboardInterrupt:
+            typer.secho("\nstopped listening; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
+        except SlackError as exc:
+            _fail(str(exc))
+
+
+def _handle_press(event: Click | Note, permitted: frozenset[str], bot: str) -> None:
+    """Answer one press or one submitted form, and say what became of it.
+
+    Every failure is printed rather than raised: this runs on a worker thread,
+    where an exception would vanish with nobody told — the press already
+    acknowledged, and the thread under the question silent.
+    """
+    click = event.click if isinstance(event, Note) else event
     try:
-        for click in clicks(token):
-            outcome = resolve(click, allowed=permitted)
-            typer.echo(f"  {click.run_id} {click.gate}={click.choice} -> {outcome}")
-            say(click, outcome, token=bot)
-    except KeyboardInterrupt:
-        typer.secho("\nstopped listening; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
-    except IctusError as exc:
-        _fail(str(exc))
+        if isinstance(event, Note):
+            outcome = submit(event, allowed=permitted)
+        else:
+            outcome = resolve(event, allowed=permitted)
+            if outcome.needs_note:
+                why = open_form(bot, event)
+                if why:
+                    say(
+                        event,
+                        verdict(
+                            event, answered=False, reason=f"could not ask for {event.ask}: {why}"
+                        ),
+                        token=bot,
+                    )
+                return
+        line = verdict(
+            click, answered=outcome.answered, reason=outcome.reason, run_id=outcome.run_id
+        )
+        typer.echo(f"  {outcome.run_id or '-'} {click.gate}={click.choice} -> {line}")
+        say(click, line, token=bot)
+        if outcome.answered:
+            why = retire(bot, click, line)
+            if why:
+                typer.secho(f"  could not take the buttons off: {why}", fg=typer.colors.YELLOW)
+    except Exception as exc:
+        typer.secho(
+            f"  {click.gate}={click.choice}: {type(exc).__name__} while answering: {exc}",
+            fg=typer.colors.RED,
+            err=True,
+        )
 
 
 # Last in the file, and it must stay last. Under `python -m ictus.cli` this

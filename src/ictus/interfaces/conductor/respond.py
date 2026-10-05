@@ -10,21 +10,24 @@ while the REST call answers — 200 accepted, 409 if the gate moved on, 403 if t
 token is wrong. Something acting on a person's click has to be able to say which
 of those happened.
 
-The engine refuses a response that does not match the gate currently waiting
-(``_validate_gate_target``), so a button pressed twice, or pressed after somebody
-answered in the dashboard, is rejected rather than applied to whatever came next.
-That check is the engine's and this does not duplicate it; it reports it.
+The engine refuses a response that does not name the gate currently waiting
+(``_validate_gate_target``), so a button pressed twice, or after somebody
+answered in the dashboard, is rejected. It matches a gate by name only, though —
+a human gate carries no per-presentation id — so a gate that is asked again in
+a loop would take an answer meant for an earlier round. Telling the rounds apart
+is the caller's job, from the run's history: see ``ictus.answer``.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ictus.interfaces.conductor.runs import token_for
+from ictus.interfaces.conductor.runs import LOOPBACK, token_for
 
 if TYPE_CHECKING:
     from ictus.interfaces.conductor.runs import LiveRun
@@ -75,7 +78,7 @@ def answer_gate(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with LOOPBACK.open(request, timeout=timeout) as response:
             if response.status < 300:
                 return Answered(True)
             return Answered(False, f"the run answered {response.status}")
@@ -85,6 +88,11 @@ def answer_gate(
         return Answered(False, "the run is no longer listening; it has probably finished")
     except TimeoutError:
         return Answered(False, "the run did not answer in time")
+    except (http.client.HTTPException, OSError) as exc:
+        # A dashboard shutting down mid-request drops the connection rather than
+        # refusing it. The press was already acknowledged to Slack, so this is
+        # the only place left to say what happened to it.
+        return Answered(False, f"the run stopped answering partway ({type(exc).__name__})")
 
 
 def _why(status: int, gate: str) -> str:

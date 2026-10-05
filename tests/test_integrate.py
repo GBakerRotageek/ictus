@@ -114,7 +114,9 @@ def test_the_start_gate_is_announced_with_its_own_choices_as_buttons() -> None:
     assert _next(p, _node(p, f"report_{GATE_ID}")) == [GATE_ID]
     asks = _asks(_node(p, f"report_{GATE_ID}"))
     assert asks["gate"] == GATE_ID
-    assert [value for value, _ in asks["buttons"]] == ["start", "cancel"]  # type: ignore[attr-defined]
+    buttons = asks["buttons"]
+    assert isinstance(buttons, list)
+    assert [button[0] for button in buttons] == ["start", "cancel"]
 
 
 def test_the_start_gate_counts_the_work_rather_than_the_reporting() -> None:

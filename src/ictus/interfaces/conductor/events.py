@@ -23,11 +23,10 @@ Three things here are not preference, and each cost a spike to learn:
 from __future__ import annotations
 
 import json
-import urllib.request
 from typing import TYPE_CHECKING
 
 from ictus.interfaces import SignalEvent
-from ictus.interfaces.conductor.runs import token_for
+from ictus.interfaces.conductor.runs import LOOPBACK, token_for
 from ictus.interfaces.conductor.signals import signal_for
 from ictus.websocket import WebSocket
 
@@ -36,7 +35,7 @@ if TYPE_CHECKING:
 
     from ictus.interfaces.conductor.runs import LiveRun
 
-__all__ = ["STATE_TIMEOUT_SECONDS", "history", "signals_from", "watch"]
+__all__ = ["STATE_TIMEOUT_SECONDS", "history", "offered", "signals_from", "step_outputs", "watch"]
 
 STATE_TIMEOUT_SECONDS = 15.0
 
@@ -78,11 +77,54 @@ def signals_from(events: Iterable[dict[str, object]], run: LiveRun) -> Iterator[
 
 def history(run: LiveRun, *, timeout: float = STATE_TIMEOUT_SECONDS) -> list[dict[str, object]]:
     """Everything the run emitted before now. Needs no token."""
-    with urllib.request.urlopen(f"{run.dashboard}/api/state", timeout=timeout) as response:
+    with LOOPBACK.open(f"{run.dashboard}/api/state", timeout=timeout) as response:
         loaded = json.loads(response.read())
     return (
         [event for event in loaded if isinstance(event, dict)] if isinstance(loaded, list) else []
     )
+
+
+def step_outputs(events: Iterable[dict[str, object]], step: str) -> list[dict[str, object]]:
+    """What ``step`` printed each time it completed, oldest first.
+
+    A script step's output reaches the stream only as the stdout of
+    ``script_completed`` — the engine merges the parsed object into what later
+    steps read, and never emits it separately — so it is parsed back here. A run
+    of the step that printed nothing readable counts as an empty object rather
+    than being skipped, because it still happened, and "the latest" has to mean
+    the latest.
+    """
+    found: list[dict[str, object]] = []
+    for event in events:
+        data = event.get("data")
+        if event.get("type") != "script_completed" or not isinstance(data, dict):
+            continue
+        if data.get("agent_name") != step:
+            continue
+        stdout = data.get("stdout")
+        lines = stdout.strip().splitlines() if isinstance(stdout, str) else []
+        try:
+            parsed = json.loads(lines[-1]) if lines else {}
+        except ValueError:
+            parsed = {}
+        found.append(parsed if isinstance(parsed, dict) else {})
+    return found
+
+
+def offered(events: Iterable[dict[str, object]], gate: str) -> tuple[str, ...]:
+    """The answers ``gate`` offered the last time it was asked, if it has been.
+
+    Worth checking before answering: the engine accepts a value its gate does not
+    offer with a 200, then fails the run on it.
+    """
+    options: tuple[str, ...] = ()
+    for event in events:
+        data = event.get("data")
+        if event.get("type") != "gate_presented" or not isinstance(data, dict):
+            continue
+        if data.get("agent_name") == gate and isinstance(data.get("options"), list):
+            options = tuple(str(option) for option in data["options"])
+    return options
 
 
 def watch(run: LiveRun, *, token: str | None = None) -> Iterator[SignalEvent]:

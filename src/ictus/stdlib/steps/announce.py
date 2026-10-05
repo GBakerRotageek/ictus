@@ -132,6 +132,12 @@ def _asked(node_id: str, answers: GateNode | None, to: Integration) -> str:
 
     Taking the gate itself is the point: its choices *are* the buttons, so the
     two cannot drift and a renamed option cannot leave a dead one.
+
+    Each button also says which step posted it, which is how a press finds its
+    run and how a press on an older message is told from one on the current
+    question: the run's own history records what every step posted. And a
+    choice that asks for text says so, so whatever answers it can ask too
+    rather than sending the choice without the text it exists to collect.
     """
     if answers is None:
         return ""
@@ -140,5 +146,8 @@ def _asked(node_id: str, answers: GateNode | None, to: Integration) -> str:
             f"announce node {node_id!r} offers buttons, which {to.name!r} cannot carry "
             "an answer back from"
         )
-    buttons = [(choice.value, choice.label or choice.value) for choice in answers.choices]
-    return json.dumps({"gate": answers.node_id, "buttons": [list(pair) for pair in buttons]})
+    buttons = [
+        [choice.value, choice.label or choice.value, choice.prompt_for or "", choice.multiline]
+        for choice in answers.choices
+    ]
+    return json.dumps({"gate": answers.node_id, "step": node_id, "buttons": buttons})

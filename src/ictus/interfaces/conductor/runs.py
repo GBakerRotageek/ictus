@@ -15,15 +15,24 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["RUNS_DIR", "TOKEN_ENV", "LiveRun", "alive", "live_runs", "token_for"]
+__all__ = ["LOOPBACK", "RUNS_DIR", "TOKEN_ENV", "LiveRun", "alive", "live_runs", "token_for"]
 
 RUNS_DIR = Path.home() / ".conductor" / "runs"
 
 #: Overrides the per-run minted token, and is what the engine checks first.
 TOKEN_ENV = "CONDUCTOR_GATE_TOKEN"
+
+#: How anything here reaches a dashboard: directly, never through a proxy.
+#:
+#: urllib's default opener honours ``$http_proxy`` for 127.0.0.1 unless
+#: ``no_proxy`` lists that literal address, so on a machine with a proxy
+#: configured every call went to the proxy — the run looked unreachable, and a
+#: gate answer carried the dashboard's bearer token to it.
+LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @dataclass(frozen=True, slots=True)

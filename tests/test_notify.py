@@ -220,7 +220,11 @@ def test_buttons_are_read_off_the_gate_they_answer() -> None:
     node = announce(node_id="ask", text="?", to=_channel(), answers=gate)
     spec = json.loads(str(node.args[3]))
     assert spec["gate"] == "ship_it"
-    assert spec["buttons"] == [["approved", "Approve"], ["rejected", "Reject"]]
+    assert spec["step"] == "ask", "a press finds its run through the step that posted it"
+    assert spec["buttons"] == [
+        ["approved", "Approve", "", False],
+        ["rejected", "Reject", "notes", True],
+    ]
 
 
 def test_buttons_need_a_service_that_can_carry_an_answer_back() -> None:
@@ -319,9 +323,10 @@ def test_a_channel_program_threads_and_publishes_the_thread(
     assert json.loads(done.stdout)["thread"] == "1700000000.000100", "named for what it is"
 
 
-def test_a_button_carries_the_run_the_gate_and_the_choice(
+def test_a_button_names_its_gate_its_choice_and_the_step_that_posted_it(
     collector: tuple[str, list[tuple[str, dict[str, object]]]],
 ) -> None:
+    """No run id: a foreground run never exported the variable it was read from."""
     url, received = collector
     gate = approval_gate(node_id="ship_it", prompt="Deploy?")
     node = announce(node_id="ask", text="Deploy?", to=_channel(), answers=gate)
@@ -333,14 +338,13 @@ def test_a_button_carries_the_run_the_gate_and_the_choice(
         TEST_TOKEN="xoxb-pretend",
         TEST_CHANNEL="C0TEST",
         SLACK_API_URL=url,
-        CONDUCTOR_RUN_ID="abc12345",
     )
     assert done.returncode == 0, done.stderr
     blocks = received[0][1]["blocks"]
     assert isinstance(blocks, list)
     assert [json.loads(e["value"]) for e in blocks[1]["elements"]] == [
-        {"run": "abc12345", "gate": "ship_it", "choice": "approved"},
-        {"run": "abc12345", "gate": "ship_it", "choice": "rejected"},
+        {"gate": "ship_it", "step": "ask", "choice": "approved", "ask": "", "multiline": False},
+        {"gate": "ship_it", "step": "ask", "choice": "rejected", "ask": "notes", "multiline": True},
     ]
 
 

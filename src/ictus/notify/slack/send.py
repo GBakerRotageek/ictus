@@ -18,7 +18,9 @@ Three decisions in it are not preferences:
 
 from __future__ import annotations
 
+import http.client
 import json
+import os
 import string
 import urllib.error
 import urllib.request
@@ -27,12 +29,12 @@ from typing import TYPE_CHECKING
 from ictus.graph.requirements import Integration
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ictus.graph.requirements import EnvVar
     from ictus.graph.signals import RunSignal
 
-__all__ = ["API", "API_ENV", "reply", "slack_channel", "slack_webhook"]
+__all__ = ["API", "API_ENV", "api_call", "endpoint", "reply", "slack_channel", "slack_webhook"]
 
 API = "https://slack.com/api/chat.postMessage"
 
@@ -197,12 +199,20 @@ def post(url, body, headers, timeout):
         return response.read()
 
 
-def button(asks, value, label):
-    run_now = os.environ.get("CONDUCTOR_RUN_ID", "")
+def button(asks, value, label, ask, multiline):
+    # No run id: the run is found from the message the button is on, which the
+    # run's own history records, so a press cannot name the wrong one.
+    pressed = {
+        "gate": asks["gate"],
+        "step": asks["step"],
+        "choice": value,
+        "ask": ask,
+        "multiline": multiline,
+    }
     return {
         "type": "button",
         "text": {"type": "plain_text", "text": clip(label, LABEL_LIMIT)},
-        "value": json.dumps({"run": run_now, "gate": asks["gate"], "choice": value}),
+        "value": json.dumps(pressed),
         "action_id": clip("ictus_gate_" + value, 255),
     }
 
@@ -227,7 +237,7 @@ def send(text, parent, asks, timeout):
             {"type": "section", "text": {"type": "mrkdwn", "text": clip(text, SECTION_LIMIT)}},
             {
                 "type": "actions",
-                "elements": [button(asks, value, label) for value, label in asks["buttons"]],
+                "elements": [button(asks, *spec) for spec in asks["buttons"]],
             },
         ]
     headers = {
@@ -274,6 +284,51 @@ main()
 )
 
 
+def endpoint(method: str) -> str:
+    """Where a Web API method lives, honouring the override the program honours.
+
+    The override names ``chat.postMessage``; every other method sits beside it.
+    """
+    override = os.environ.get(API_ENV, "").strip()
+    return (override or API).rsplit("/", 1)[0] + "/" + method
+
+
+def api_call(
+    method: str,
+    token: str,
+    body: Mapping[str, object],
+    *,
+    timeout: float = TIMEOUT_SECONDS,
+) -> tuple[dict[str, object], str]:
+    """Call one Web API method: ``(answer, "")``, or ``(answer, why not)``.
+
+    Never raises, and never quotes an exception, for the program's reason. The
+    answer comes back on a refusal too: its ``error`` decides whether a caller
+    gives up or tries again.
+    """
+    request = urllib.request.Request(
+        endpoint(method),
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            answer = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return {}, f"Slack answered HTTP {exc.code} to {method}"
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        return {}, f"could not reach Slack ({type(exc).__name__})"
+    if not isinstance(answer, dict):
+        return {}, f"Slack sent an unreadable answer to {method}"
+    if not answer.get("ok"):
+        return answer, f"Slack refused {method}: {answer.get('error')}"
+    return answer, ""
+
+
 def reply(
     *,
     token: str,
@@ -291,21 +346,5 @@ def reply(
     body: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts:
         body["thread_ts"] = thread_ts
-    request = urllib.request.Request(
-        API,
-        data=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            answer = json.loads(response.read())
-    except (OSError, json.JSONDecodeError) as exc:
-        return f"could not reach Slack: {type(exc).__name__}"
-    if isinstance(answer, dict) and answer.get("ok"):
-        return ""
-    error = str(answer.get("error")) if isinstance(answer, dict) else "unreadable reply"
-    return f"Slack refused the reply: {error}"
+    _, why = api_call("chat.postMessage", token, body, timeout=timeout)
+    return why
