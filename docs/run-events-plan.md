@@ -122,7 +122,7 @@ the URL in its own exceptions, so every failure is rewritten to carry the
 notifier's name and the status and nothing else. Tested by asserting a known
 secret path never appears in any message.
 
-`tests/smoke/fake_channel.py` accepts the same POST an incoming webhook does,
+`smoke/fake_channel.py` accepts the same POST an incoming webhook does,
 so the whole path is watchable before anyone creates a Slack app.
 
 - `webhook.py` first. HTTP POST via `urllib.request`. No dependency.

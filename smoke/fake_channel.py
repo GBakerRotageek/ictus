@@ -5,7 +5,7 @@ Slack's incoming webhooks take a JSON POST over ordinary HTTPS and nothing else,
 so anything that accepts a POST will do — which means the delivery path can be
 watched end to end before anyone creates a Slack app.
 
-    python3 tests/smoke/fake_channel.py
+    python3 smoke/fake_channel.py
     export SMOKE_WEBHOOK_URL=http://127.0.0.1:8723/not-a-real-hook
 
 Then add a notifier to a pipeline and run `ictus watch <folder>`. See the README.

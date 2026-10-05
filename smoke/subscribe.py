@@ -10,8 +10,8 @@ run, ``WebSocket`` to talk to it, ``history`` to seed. What is left here is the
 part the library does not do yet: *answering* a gate, which is phase 4. When
 that lands this file should shrink again rather than grow.
 
-    python3 tests/smoke/subscribe.py                       # take the first option
-    python3 tests/smoke/subscribe.py smoke_gate=rejected:no thanks
+    python3 smoke/subscribe.py                       # take the first option
+    python3 smoke/subscribe.py smoke_gate=rejected:no thanks
 
 Each argument is ``<agent>=<value>``, with an optional ``:<free text>`` for a
 choice that declares ``prompt_for``.

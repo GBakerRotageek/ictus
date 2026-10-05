@@ -66,11 +66,11 @@ the subscriber works whether or not a browser is attached.
 
 **Two — subscribe and answer:**
 
-    python3 tests/smoke/subscribe.py 'confirm_start=start' 'smoke_gate=approved'
+    python3 smoke/subscribe.py 'confirm_start=start' 'smoke_gate=approved'
 
 Approve both and the `set` step runs. To exercise free text instead:
 
-    python3 tests/smoke/subscribe.py 'confirm_start=start' \
+    python3 smoke/subscribe.py 'confirm_start=start' \
       'smoke_gate=rejected:not this time'
 
 ## What you should see
@@ -110,7 +110,7 @@ source and delivers.
 You do not need Slack to watch this work. `fake_channel.py` accepts the same
 JSON POST an incoming webhook does and prints what it was sent:
 
-    python3 tests/smoke/fake_channel.py
+    python3 smoke/fake_channel.py
     export SMOKE_WEBHOOK_URL=http://127.0.0.1:8723/not-a-real-hook
 
 Add this to the bottom of `demo_work/pipelines/smoke-events/pipeline.py`:
@@ -134,7 +134,7 @@ Then, in three terminals — the fake channel, the run, and the watcher:
 
     ictus run demo_work/pipelines/smoke-events
     ictus watch demo_work/pipelines/smoke-events
-    python3 tests/smoke/subscribe.py 'confirm_start=start' 'smoke_gate=rejected:not tonight'
+    python3 smoke/subscribe.py 'confirm_start=start' 'smoke_gate=rejected:not tonight'
 
 What lands in the channel:
 
