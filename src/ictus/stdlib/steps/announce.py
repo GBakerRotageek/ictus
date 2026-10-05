@@ -91,7 +91,18 @@ if channel:
     )
     answer = json.loads(r.urlopen(req, timeout={timeout}).read())
     if not answer.get("ok"):
-        sys.exit("slack refused the message: " + str(answer.get("error")))
+        why = str(answer.get("error"))
+        fix = {{
+            "missing_scope": "the bot token needs chat:write - add it under OAuth & "
+            "Permissions, then reinstall the app to the workspace",
+            "not_in_channel": "the app is not in that channel - /invite it there",
+            "channel_not_found": "check the channel id; it looks like C0ABC123 and is "
+            "at the bottom of View channel details",
+            "invalid_auth": "the token is wrong or has been revoked",
+            "account_inactive": "the app has been disabled in that workspace",
+            "token_revoked": "the token has been rotated; export the new one",
+        }}.get(why, "")
+        sys.exit("slack refused the message: " + why + ((" - " + fix) if fix else ""))
     print(json.dumps({{"thread_ts": answer.get("ts", ""), "posted": "true"}}))
 else:
     req = r.Request(
