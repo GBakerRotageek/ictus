@@ -15,17 +15,19 @@ been run against the wrong interpreter.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
+from ictus.graph.signals import ANNOUNCED_BY_STEPS
 from ictus.interfaces import PreflightIssue
 
 if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.requirements import Executable
 
-__all__ = ["executable_issues"]
+__all__ = ["executable_issues", "integration_issues"]
 
 #: Long enough for a cold `--version`, short enough not to hang a launch.
 PROBE_TIMEOUT_SECONDS = 10.0
@@ -89,3 +91,58 @@ def _probe(tool: Executable, found: str) -> list[PreflightIssue]:
             remedy=tool.setup_hint or f"reinstall {tool.name}",
         )
     ]
+
+
+def integration_issues(pipeline: Pipeline) -> list[PreflightIssue]:
+    """Every declared integration this machine cannot supply a credential for.
+
+    Offline only, and deliberately: probing would mean posting something to find
+    out, and an integration's endpoint is somewhere people read. A preflight that
+    announced itself in a channel every time anyone checked a pipeline would be
+    turned off, and then the real notification would be ignored with it.
+    """
+    issues: list[PreflightIssue] = []
+    for service in pipeline.all_integrations():
+        if shutil.which(service.command) is None:
+            # A step that cannot start is the one way a report still fails the
+            # run: the engine raises before the program's own guard can run.
+            issues.append(
+                PreflightIssue(
+                    requirement=f"integrate:{service.name}",
+                    problem=(
+                        f"{service.command!r} is not on PATH, so {service.name!r} could never "
+                        "send anything, and the step that tries would fail the run"
+                    ),
+                    remedy=f"install {service.command} or put it on PATH",
+                )
+            )
+        issues.extend(
+            PreflightIssue(
+                requirement=f"integrate:{service.name}",
+                problem=(
+                    f"${var.name} is not set, so {service.name!r} cannot be reached "
+                    f"({service.purpose})"
+                ),
+                remedy=service.setup_hint or f"export {var.name}=... before the run",
+            )
+            for var in service.required_env
+            if not os.environ.get(var.name)
+        )
+        unseen = sorted(s.value for s in service.reports if s not in ANNOUNCED_BY_STEPS)
+        if unseen:
+            # Not blocking: the watcher is a real way to deliver these. Said out
+            # loud because without it they are configured, pass preflight, and
+            # never arrive.
+            issues.append(
+                PreflightIssue(
+                    requirement=f"integrate:{service.name}",
+                    problem=(
+                        f"{service.name!r} asks to hear about {', '.join(unseen)}, which no "
+                        "step can see; they are reported only while `ictus watch` is "
+                        "attached to the run"
+                    ),
+                    remedy="run `ictus watch <folder> --follow` alongside the run",
+                    blocking=False,
+                )
+            )
+    return issues

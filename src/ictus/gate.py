@@ -34,7 +34,7 @@ from ictus.stdlib.terminals.succeed import succeed
 if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline
 
-__all__ = ["CANCELLED_ID", "GATE_ID", "add_start_gate"]
+__all__ = ["CANCELLED_ID", "GATE_ID", "add_start_gate", "attach_start_herald"]
 
 GATE_ID = "confirm_start"
 CANCELLED_ID = "not_started"
@@ -53,7 +53,16 @@ def add_start_gate(pipeline: Pipeline) -> Pipeline:
                 f"pipeline {pipeline.pipeline_id!r} already has a node called {taken!r}, "
                 "which the start gate needs. Rename it, or set start_gate: false."
             )
+    # Read before the gate exists, so the prompt describes the work rather than
+    # the asking, and so a herald can be put in front of the gate below.
     entry = pipeline.entry()
+    herald = pipeline.start_herald
+    if herald is not None and herald is entry:
+        raise CompositionError(
+            f"pipeline {pipeline.pipeline_id!r} both names {herald.node_id!r} as its entry "
+            "point and asks to run it before the start gate; leave the entry on the first "
+            "real step and the placement is worked out from there"
+        )
     parts: list[TemplatePart] = [
         f"Start **{pipeline.pipeline_id}**?\n\n",
     ]
@@ -110,5 +119,28 @@ def add_start_gate(pipeline: Pipeline) -> Pipeline:
     for param in declared:
         pipeline.connect_input(param, gate, param.name)
     pipeline.branch(gate, {"start": entry, "cancel": stopped})
-    pipeline.set_entry(gate)
+    if herald is None:
+        pipeline.set_entry(gate)
+    else:
+        # The whole point: something gets to speak before the run parks.
+        pipeline.route(herald, gate)
+        pipeline.set_entry(herald)
+    return pipeline
+
+
+def attach_start_herald(pipeline: Pipeline) -> Pipeline:
+    """Put whatever ``before_start_gate`` named in front, with no gate behind it.
+
+    The other half of the policy. Without this a pipeline that declares a herald
+    and turns the gate off would carry an unreachable node, and the lint would
+    refuse it for a reason the author never wrote down.
+    """
+    herald = pipeline.start_herald
+    if herald is None:
+        return pipeline
+    entry = pipeline.entry()
+    if herald is entry:
+        return pipeline
+    pipeline.route(herald, entry)
+    pipeline.set_entry(herald)
     return pipeline

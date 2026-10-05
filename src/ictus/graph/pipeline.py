@@ -33,7 +33,8 @@ from ictus.graph.ref import Origin, Ref, Template, equals
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from ictus.graph.requirements import Executable, McpServer
+    from ictus.graph.requirements import Executable, Integration, McpServer
+    from ictus.graph.signals import RunSignal
     from ictus.graph.values import YamlScalar
 
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
@@ -305,6 +306,8 @@ class Pipeline:
         self._maps: dict[str, MapGroup] = {}
         self._mcp: dict[str, McpServer] = {}
         self._executables: dict[str, Executable] = {}
+        self._integrations: dict[str, Integration] = {}
+        self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
     # -- construction ----------------------------------------------------
@@ -529,6 +532,164 @@ class Pipeline:
             for server in child.all_mcp_servers():
                 seen.setdefault(server.name, server)
         return tuple(seen.values())
+
+    def before_start_gate[N: Node](self, node: N) -> N:
+        """Run ``node`` first, ahead of the confirmation gate.
+
+        The start gate is placed at the entry point when a pipeline is loaded,
+        which means nothing can ordinarily precede it — and the one thing most
+        worth saying out loud is that a run has parked on it and is waiting for
+        somebody. A pipeline whose job is to report had no way to report that.
+
+        Wire nothing: the node is placed by whoever applies the start policy, so
+        it is correct whether the gate is on or off. Its outputs are readable
+        like any other node's, which is how an announcement that opens a thread
+        can have the rest of the run reply underneath it.
+        """
+        if self._before_start is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already runs {self._before_start.node_id!r} "
+                "before the start gate; only one thing can go first"
+            )
+        self.add(node)
+        self._before_start = node
+        return node
+
+    @property
+    def start_herald(self) -> Node | None:
+        """What runs before the start gate, if anything was asked to."""
+        return self._before_start
+
+    def integrate(self, service: Integration) -> Integration:
+        """Declare a third-party service this pipeline talks to.
+
+        Put these at the top of a pipeline. A reader should see what a run will
+        reach outside the machine before they read what it does, and whoever
+        approves the run is shown the same list at the start gate.
+
+        Declaring is not attaching. Nothing is inserted until the pipeline is
+        loaded, and what gets inserted is decided by the signals the integration
+        names — so adding a destination is one line here and removing it is
+        deleting that line, rather than unpicking nodes and data edges by hand.
+        """
+        existing = self._integrations.get(service.name)
+        if existing is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already integrates something called "
+                f"{service.name!r}; names are how one is addressed and must be unique"
+            )
+        self._integrations[service.name] = service
+        return service
+
+    @property
+    def integrations(self) -> tuple[Integration, ...]:
+        """Every service this pipeline declares, in declaration order."""
+        return tuple(self._integrations.values())
+
+    def all_integrations(self) -> tuple[Integration, ...]:
+        """This pipeline's services and those of every stage it contains.
+
+        A stage reports onto its caller's conversation — one run, one thread — so
+        a nested declaration is the caller's problem too.
+        """
+        seen: dict[str, Integration] = dict(self._integrations)
+        for child in self._children.values():
+            for service in child.all_integrations():
+                seen.setdefault(service.name, service)
+        return tuple(seen.values())
+
+    def insert_before[N: Node](self, existing: Node, inserted: N) -> N:
+        """Put ``inserted`` in front of ``existing``, taking over its inbound edges.
+
+        Every route that pointed at ``existing`` now points at ``inserted``, and
+        ``inserted`` routes on to ``existing``. The entry point moves too when
+        ``existing`` was it.
+
+        This is what lets an announcement be attached to a graph somebody else
+        wrote. Doing it by hand means knowing every edge that arrives — including
+        the gate branches, which name their target by choice — and getting one
+        wrong is a step that silently never runs.
+        """
+        self._require_member(existing, "insertion point")
+        self.add(inserted)
+        self._edges = [
+            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
+            if edge.target_node is existing
+            else edge
+            for edge in self._edges
+        ]
+        self._edges.append(Edge(source=inserted, target=existing))
+        if self._entry is existing:
+            self._entry = inserted
+        return inserted
+
+    def insert_before_end[N: Node](self, inserted: N) -> N:
+        """Put ``inserted`` on every way this graph reaches the end of the run.
+
+        The ``END`` counterpart of ``insert_before``: each edge that finished the
+        run now runs ``inserted`` instead, and ``inserted`` finishes it. A gate's
+        branch keeps its case, so "no" still means no.
+        """
+        finishing = [edge for edge in self._edges if edge.is_end]
+        if not finishing:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} has no route to END to put "
+                f"{inserted.node_id!r} in front of"
+            )
+        self.add(inserted)
+        self._edges = [
+            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
+            if edge.is_end
+            else edge
+            for edge in self._edges
+        ]
+        self._edges.append(Edge(source=inserted, target=END))
+        return inserted
+
+    def prepend[N: Node](self, node: N) -> N:
+        """Run ``node`` before whatever this graph currently starts with.
+
+        Unlike ``insert_before``, the old entry keeps every edge that arrives at
+        it later: a loop that returns to the first step returns there, not to
+        ``node``, which runs once.
+        """
+        first = self.entry()
+        self.add(node)
+        self.route(node, first)
+        self.set_entry(node)
+        return node
+
+    def widen_subworkflow(self, host: SubGraphNode, port: InputPort) -> None:
+        """Give a stage already placed here one more parameter.
+
+        For what is attached after a stage was placed — an integration threading
+        its conversation into the stage's own gates — rather than for authoring;
+        a stage's contract is otherwise fixed when it is instantiated.
+
+        The node is changed in place, which a frozen node is not supposed to
+        allow. Replacing it was the alternative and is worse: every edge, data
+        dependency and typed reference holds the node itself, and a replacement
+        would leave all of them pointing at one that is no longer in the graph.
+        Only an optional port is accepted, so every other placement of the same
+        stage, and every caller that does not supply it, stays valid.
+        """
+        self._require_member(host, "stage")
+        if host.node_id not in self._children:
+            raise CompositionError(
+                f"{host.node_id!r} is not a stage placed in pipeline {self.pipeline_id!r}"
+            )
+        if not port.optional:
+            raise CompositionError(
+                f"stage {host.node_id!r} can only be given an optional parameter after it "
+                f"was placed; {port.name!r} is required, and every caller would break"
+            )
+        if any(existing.name == port.name for existing in host.inputs):
+            raise CompositionError(f"stage {host.node_id!r} already has a parameter {port.name!r}")
+        object.__setattr__(host, "inputs", (*host.inputs, port))
+
+    def subscribed_signals(self) -> frozenset[RunSignal]:
+        """Every signal any integration here or in a nested stage asked for."""
+        return frozenset(s for service in self.all_integrations() for s in service.reports)
 
     def declare_input(
         self,

@@ -298,7 +298,7 @@ class TestStages:
             "type": "workflow",
             "workflow": "./inner.yaml",
             "input": ["workflow.input.x"],
-            "input_mapping": {"x": "{{ workflow.input.x }}"},
+            "input_mapping": {"x": "{{ workflow.input.x | tojson }}"},
             "routes": [{"to": "done"}],
         }
 

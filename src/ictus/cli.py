@@ -2,33 +2,59 @@
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
+import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Queue
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
+from ictus.answer import resolve, submit
 from ictus.config import CONFIG_FILE, MINIMAL, PipelineConfig, read_config
 from ictus.errors import IctusError
-from ictus.gate import add_start_gate
+from ictus.gate import add_start_gate, attach_start_herald
 from ictus.graph.pipeline import Pipeline
+from ictus.graph.signals import RunSignal
+from ictus.integrate import apply_integrations
 from ictus.interfaces.conductor import conductor
+from ictus.interfaces.conductor.events import history, step_outputs
+from ictus.interfaces.conductor.events import watch as watch_run
+from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
+from ictus.notify import Delivered, deliver
+from ictus.notify.slack.listen import (
+    Click,
+    Note,
+    SlackError,
+    open_form,
+    presses,
+    retire,
+    say,
+    verdict,
+)
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.interfaces import PreflightIssue
+    from ictus.graph.requirements import Integration
+    from ictus.interfaces import PreflightIssue, SignalEvent
 
 app = typer.Typer(
     help="Typed composition for Conductor workflows.",
     no_args_is_help=True,
     add_completion=False,
+    # Typer prints every local of every frame on an uncaught exception, which
+    # in `listen` and `watch` means the Slack tokens, whole.
+    pretty_exceptions_show_locals=False,
 )
 
 
@@ -75,12 +101,17 @@ def _load_module(module_path: Path) -> list[Pipeline]:
     return [p for p in found if id(p) not in nested]
 
 
-def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeline]:
+def _load(
+    folder: PipelineFolder, *, require_config: bool = True, attach: bool = True
+) -> list[Pipeline]:
     """The pipelines a folder defines, with its run policy applied.
 
     Policy and the start gate are applied here rather than in the composition so
     every command sees the same thing: a lint reading a different provider from
     the emit would be checking a workflow nobody runs.
+
+    ``attach=False`` leaves integrations for the caller to apply, for one that
+    needs to know what attaching them inserted.
 
     ``require_config`` is what ``lint`` relaxes. A folder with no ``config.yaml``
     used to fail before a single composition rule ran, so the one command whose
@@ -98,6 +129,12 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
             fg=typer.colors.YELLOW,
             err=True,
         )
+        try:
+            for pipeline in pipelines:
+                if attach:
+                    apply_integrations(pipeline)
+        except IctusError as exc:
+            _fail(str(exc))
         return pipelines
     try:
         settings = read_config(folder.config_file)
@@ -106,6 +143,13 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
             settings.apply(pipeline, where=str(folder.config_file))
             if settings.start_gate:
                 add_start_gate(pipeline)
+            else:
+                attach_start_herald(pipeline)
+            # After the start policy: the start gate is the first gate every run
+            # stops at, so it is announced like the others, and its prompt counts
+            # the work being approved rather than the reporting about it.
+            if attach:
+                apply_integrations(pipeline)
     except IctusError as exc:
         _fail(str(exc))
     return pipelines
@@ -130,9 +174,9 @@ def _policy(folder: PipelineFolder) -> PipelineConfig:
         raise
 
 
-def _only(folder: PipelineFolder) -> Pipeline:
+def _only(folder: PipelineFolder, *, attach: bool = True) -> Pipeline:
     """The single pipeline a folder defines, which a run needs."""
-    pipelines = _load(folder)
+    pipelines = _load(folder, attach=attach)
     if not pipelines:
         _fail(f"{folder.module} defines no pipeline")
     if len(pipelines) > 1:
@@ -333,12 +377,15 @@ def preflight(
     for pipeline in pipelines:
         declared = pipeline.all_mcp_servers()
         commands = pipeline.all_executables()
-        total = len(declared) + len(commands)
+        reporting = pipeline.all_integrations()
+        total = len(declared) + len(commands) + len(reporting)
         typer.echo(f"{pipeline.pipeline_id}: {total} requirement(s) declared")
         for server in declared:
             typer.echo(f"  - mcp:{server.name} — {server.purpose}")
         for tool in commands:
             typer.echo(f"  - exe:{tool.name} — {tool.purpose}")
+        for service in reporting:
+            typer.echo(f"  - integrate:{service.name} — {service.purpose}")
         issues.extend(BACKEND.preflight(pipeline, probe=probe))
     _report_preflight(issues, probed=probe)
     if any(i.blocking for i in issues):
@@ -750,6 +797,319 @@ def trace(
         typer.echo(
             "That is right for a step whose whole input is in its prompt, and wrong "
             "for one asked to assess something it was only shown a summary of."
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _Finished:
+    """A watched run stopped, for whatever reason."""
+
+    run_id: str
+    error: str = ""
+
+
+def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
+    """Relay one run's signals onto the queue, then say it is done.
+
+    Every failure is reported rather than raised: this runs on its own thread,
+    and one unreachable run must not take the watcher down with it.
+    """
+    try:
+        for event in watch_run(run):
+            out.put(event)
+    except Exception as exc:
+        # The thread boundary. Anything not reported here is lost with the
+        # thread, and the watcher would wait forever on a run it has stopped
+        # following: a truncated read of the run's history did exactly that.
+        out.put(_Finished(run.run_id, f"{type(exc).__name__}: {exc}"))
+        return
+    out.put(_Finished(run.run_id))
+
+
+def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...], dict[str, str]]:
+    """A pipeline folder's id, the integrations it declares, and their openers.
+
+    Read from the source rather than from the emitted workflow: the steps an
+    integration inserts are in the YAML, but which service they report to, and
+    what it is subscribed to, exist only in `pipeline.py`. The openers are the
+    steps whose output is each service's thread for a run, so a report from
+    outside can land in it.
+    """
+    if folder is None:
+        return "", (), {}
+    pipeline = _only(PipelineFolder.at(folder), attach=False)
+    openers = {a.integration: a.opener for a in apply_integrations(pipeline) if a.opener}
+    return pipeline.pipeline_id, pipeline.all_integrations(), openers
+
+
+def _threads(run: LiveRun, openers: dict[str, str]) -> dict[str, str]:
+    """Each integration's thread for ``run``, read from what its opener printed.
+
+    Best effort: a report that cannot find its thread still goes, to the channel.
+    """
+    if not openers:
+        return {}
+    try:
+        events = history(run)
+    except (OSError, ValueError, http.client.HTTPException):
+        return {}
+    found: dict[str, str] = {}
+    for name, opener in openers.items():
+        printed = step_outputs(events, opener)
+        thread = printed[-1].get("thread") if printed else None
+        if isinstance(thread, str) and thread:
+            found[name] = thread
+    return found
+
+
+@app.command()
+def watch(
+    folder: Annotated[
+        Path | None,
+        typer.Argument(help="A pipeline folder, to also report to what it integrates"),
+    ] = None,
+    follow: Annotated[
+        bool, typer.Option("--follow", "-f", help="Keep attaching to runs as they start")
+    ] = False,
+    poll_seconds: Annotated[
+        float, typer.Option("--poll", help="How often to look for new runs, with --follow")
+    ] = 2.0,
+) -> None:
+    """Report what live runs are doing, as signals.
+
+    Attaches to every run currently serving a dashboard and prints each moment
+    worth reporting. Without `--follow` it exits once the runs it found have
+    ended; with it, it keeps looking for new ones until interrupted.
+
+    Given a pipeline folder, it also reports to what that pipeline integrates,
+    for runs of that workflow, into each run's own thread — but only what no step
+    inside the run already said: a step failing, a budget crossed, a run paused,
+    the iteration limit reached, the engine dying. Gates and endings are
+    announced from inside the graph, and what happened before it attached is not
+    news. A destination whose variable is unset is reported once per signal
+    rather than silently skipped — one nobody can tell is not firing is the
+    failure the declaration exists to prevent.
+
+    A dropped connection is dialled again while the run's process lives; a run
+    whose process vanished without saying so is reported as failed.
+
+    It detaches the moment a run ends, and that is not tidiness: a detached run
+    shuts itself down only once every client has disconnected, so a watcher that
+    held on would leave one resident process per run, each keeping that run's
+    whole event history in memory. While attached it is a client, so an agent
+    paused from the dashboard stays paused until somebody resumes it.
+    """
+    try:
+        workflow, targets, openers = _notifiers_of(folder)
+    except IctusError as exc:
+        _fail(str(exc))
+        return
+    if targets:
+        typer.secho(
+            f"reporting {workflow} to: {', '.join(t.name for t in targets)}",
+            fg=typer.colors.CYAN,
+        )
+
+    events: Queue[SignalEvent | _Finished] = Queue()
+    attached: set[str] = set()
+    threads: list[threading.Thread] = []
+    followed: dict[str, LiveRun] = {}
+    conversations: dict[str, dict[str, str]] = {}
+
+    def attach() -> int:
+        started = 0
+        for run in live_runs():
+            if run.run_id in attached:
+                continue
+            attached.add(run.run_id)
+            followed[run.run_id] = run
+            thread = threading.Thread(target=_follow, args=(run, events), daemon=True)
+            thread.start()
+            threads.append(thread)
+            started += 1
+            typer.secho(
+                f"watching {run.workflow} ({run.run_id}) on {run.dashboard}",
+                fg=typer.colors.CYAN,
+            )
+        return started
+
+    if attach() == 0 and not follow:
+        typer.secho("no run is serving a dashboard", fg=typer.colors.YELLOW)
+        typer.echo("Start one with `ictus run <folder>`, or pass --follow to wait for one.")
+        return
+
+    live = len(attached)
+    try:
+        while live or follow:
+            try:
+                item = events.get(timeout=poll_seconds)
+            except Empty:
+                live += attach()
+                continue
+            if isinstance(item, _Finished):
+                live -= 1
+                if item.error:
+                    typer.secho(f"  {item.run_id}: {item.error}", fg=typer.colors.RED)
+                else:
+                    typer.secho(f"  {item.run_id}: detached", fg=typer.colors.BRIGHT_BLACK)
+                continue
+            _report_signal(item)
+            if not (targets and item.workflow == workflow):
+                continue
+            run = followed[item.run_id]
+            # Learnt on the first event, while the run can still be asked: the
+            # report most worth threading is the engine dying, and by then its
+            # dashboard is gone and so is the history the thread is read from.
+            if item.run_id not in conversations:
+                found = _threads(run, openers)
+                if len(found) == len(openers):
+                    conversations[item.run_id] = found
+            if not (item.at_a_step or item.replayed):
+                threads_now = conversations.get(item.run_id) or _threads(run, openers)
+                _report_delivery(
+                    deliver(item, targets, dashboard=run.dashboard, threads=threads_now)
+                )
+    except KeyboardInterrupt:
+        typer.secho("\nstopped watching; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
+
+
+def _report_signal(event: SignalEvent) -> None:
+    """One line per signal, with the detail that decides what to do about it."""
+    colour = {
+        RunSignal.DECISION_NEEDED: typer.colors.YELLOW,
+        RunSignal.RUN_FAILED: typer.colors.RED,
+        RunSignal.STEP_FAILED: typer.colors.RED,
+        RunSignal.BUDGET_EXCEEDED: typer.colors.RED,
+    }.get(event.signal, typer.colors.GREEN)
+    when = "  (before attaching)" if event.replayed else ""
+    detail = event.step or event.reason
+    typer.secho(f"  {event.workflow}  {event.signal.value}  {detail}{when}", fg=colour)
+    if event.signal is RunSignal.DECISION_NEEDED and event.options:
+        typer.echo(f"      waiting on: {', '.join(event.options)}")
+
+
+def _report_delivery(results: list[Delivered]) -> None:
+    """Say what was reported, and say when it was not.
+
+    A failure here is never fatal — the run is unaffected by whether anyone was
+    told about it — but it is always printed, because a destination that quietly
+    stops working is indistinguishable from a quiet week.
+    """
+    for result in results:
+        if result.sent:
+            typer.secho(f"      -> {result.integration}", fg=typer.colors.BRIGHT_BLACK)
+        else:
+            typer.secho(f"      -> {result.integration}: {result.detail}", fg=typer.colors.RED)
+
+
+APP_TOKEN_ENV = "SLACK_APP_TOKEN"
+#: Needed to reply under the question, to ask for a choice's text, and to take
+#: the buttons off a question once it is answered.
+BOT_TOKEN_ENV = "SLACK_BOT_TOKEN"
+
+#: Presses handled at once. The socket thread only acknowledges and hands on,
+#: so one slow run cannot hold up the acknowledgement of the next press.
+LISTEN_WORKERS = 4
+
+
+@app.command()
+def listen(
+    allow: Annotated[
+        list[str] | None,
+        typer.Option("--allow", help="Slack user id that may answer; repeatable"),
+    ] = None,
+) -> None:
+    """Answer gates from Slack, by listening for button presses.
+
+    Opens a websocket outward to Slack, so nothing here has to be publicly
+    reachable. Reads the app-level token from $SLACK_APP_TOKEN and the bot token
+    from $SLACK_BOT_TOKEN.
+
+    A press is answered on the run that posted the button, and only if that
+    message is the newest time the question was asked — a button from an
+    earlier round of a loop is refused rather than applied to the current one.
+    A choice that asks for text opens a form for it. What happened is posted
+    back where the button was, including when nothing happened, because a button
+    that silently does nothing is worse than no button; an answered question
+    loses its buttons.
+
+    The connection is redialled whenever it drops. Only Slack refusing the
+    token stops it.
+
+    Without `--allow`, anyone who can see the button may answer. That is right
+    for a channel people were invited to and wrong for a deploy; there is no
+    middle setting, because who may approve something is a decision to make
+    rather than inherit.
+    """
+    token = os.environ.get(APP_TOKEN_ENV)
+    bot = os.environ.get(BOT_TOKEN_ENV, "")
+    if not token:
+        _fail(
+            f"${APP_TOKEN_ENV} is not set. Enable Socket Mode on the Slack app, generate "
+            "an app-level token with connections:write, and export it."
+        )
+        return
+    if not bot:
+        _fail(
+            f"${BOT_TOKEN_ENV} is not set. Without it a choice that needs text cannot ask "
+            "for it, nothing can be said in the thread, and an answered question keeps "
+            "its buttons. Export the same bot token the pipeline posts with."
+        )
+        return
+    permitted = frozenset(allow or ())
+    typer.secho(
+        "listening for button presses"
+        + (f"; only {', '.join(sorted(permitted))} may answer" if permitted else ""),
+        fg=typer.colors.CYAN,
+    )
+    with ThreadPoolExecutor(max_workers=LISTEN_WORKERS) as pool:
+        try:
+            for event in presses(token):
+                pool.submit(_handle_press, event, permitted, bot)
+        except KeyboardInterrupt:
+            typer.secho("\nstopped listening; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
+        except SlackError as exc:
+            _fail(str(exc))
+
+
+def _handle_press(event: Click | Note, permitted: frozenset[str], bot: str) -> None:
+    """Answer one press or one submitted form, and say what became of it.
+
+    Every failure is printed rather than raised: this runs on a worker thread,
+    where an exception would vanish with nobody told — the press already
+    acknowledged, and the thread under the question silent.
+    """
+    click = event.click if isinstance(event, Note) else event
+    try:
+        if isinstance(event, Note):
+            outcome = submit(event, allowed=permitted)
+        else:
+            outcome = resolve(event, allowed=permitted)
+            if outcome.needs_note:
+                why = open_form(bot, event)
+                if why:
+                    say(
+                        event,
+                        verdict(
+                            event, answered=False, reason=f"could not ask for {event.ask}: {why}"
+                        ),
+                        token=bot,
+                    )
+                return
+        line = verdict(
+            click, answered=outcome.answered, reason=outcome.reason, run_id=outcome.run_id
+        )
+        typer.echo(f"  {outcome.run_id or '-'} {click.gate}={click.choice} -> {line}")
+        say(click, line, token=bot)
+        if outcome.answered:
+            why = retire(bot, click, line)
+            if why:
+                typer.secho(f"  could not take the buttons off: {why}", fg=typer.colors.YELLOW)
+    except Exception as exc:
+        typer.secho(
+            f"  {click.gate}={click.choice}: {type(exc).__name__} while answering: {exc}",
+            fg=typer.colors.RED,
+            err=True,
         )
 
 

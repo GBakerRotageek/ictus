@@ -1,6 +1,6 @@
 # Smoke test: the run event surface
 
-Proves what [run-events.md](../run-events.md) claims, against a live engine:
+Proves what [run-events.md](../docs/run-events.md) claims, against a live engine:
 a run is discoverable, its event stream is readable, and its gates are
 answerable from outside the process.
 
@@ -66,11 +66,11 @@ the subscriber works whether or not a browser is attached.
 
 **Two — subscribe and answer:**
 
-    python3 docs/smoke/subscribe.py 'confirm_start=start' 'smoke_gate=approved'
+    python3 smoke/subscribe.py 'confirm_start=start' 'smoke_gate=approved'
 
 Approve both and the `set` step runs. To exercise free text instead:
 
-    python3 docs/smoke/subscribe.py 'confirm_start=start' \
+    python3 smoke/subscribe.py 'confirm_start=start' \
       'smoke_gate=rejected:not this time'
 
 ## What you should see
@@ -100,6 +100,81 @@ Approve both and the `set` step runs. To exercise free text instead:
 back up it. The events are written to `smoke-events-<run_id>.jsonl` in the
 working directory, which `.gitignore` already covers.
 
+## Seeing a report arrive
+
+An integration is declared in `pipeline.py`, and attached when the pipeline
+loads: the announcement steps it adds are in the emitted YAML like any other
+step, so what is committed in `build/` is what runs. Which service they report
+to, and what it is subscribed to, are in `pipeline.py` only.
+
+You do not need Slack to watch this work. `fake_channel.py` answers both shapes
+ictus posts in and prints what it was sent:
+
+    python3 smoke/fake_channel.py
+    export SLACK_BOT_TOKEN=xoxb-pretend
+    export SLACK_CHANNEL=C0PRETEND
+    export SLACK_API_URL=http://127.0.0.1:8723/api/chat.postMessage
+
+Add this to `demo_work/pipelines/smoke-events/pipeline.py`:
+
+```python
+from ictus import EnvVar, RunSignal
+from ictus.notify.slack import slack_channel
+
+pipeline.integrate(
+    slack_channel(
+        token=EnvVar("SLACK_BOT_TOKEN", "a bot token with chat:write"),
+        channel=EnvVar("SLACK_CHANNEL", "the channel id to post in"),
+        reports=(RunSignal.DECISION_NEEDED, RunSignal.RUN_FINISHED),
+    )
+)
+```
+
+That one line is the whole attachment: an opener the run's thread hangs off,
+an announcement before every gate — the start gate included, with its own
+choices as buttons — and one before every way the run ends. Deleting the line
+removes it, with no nodes or data edges left behind.
+
+Then run it as above. What lands in the channel, one thread per run:
+
+    *smoke-events* — new run
+      ↳ *smoke-events* needs a decision
+        Start **smoke-events**? …        [Start the run] [Stop — do not run]
+      ↳ *smoke-events* needs a decision
+        Approve to continue, or reject and leave a note.     [Approve] [Reject]
+      ↳ ✅ *smoke-events* finished
+
+Point the variables at a real workspace and the same messages arrive there. A
+report that cannot be sent never fails the run: its step records
+`posted: "false"` and why, and the run goes on. Stop `fake_channel.py` halfway
+through to see it.
+
+**Unset a variable and `ictus preflight` refuses the run** before anything is
+spent — the point of declaring it. The committed pipeline integrates nothing, so
+the gate needs no configuration.
+
+### Answering from the channel
+
+`ictus listen` answers a gate when one of its buttons is pressed. It needs a
+Slack app with Socket Mode on, an app-level token with `connections:write`, and
+the same bot token the pipeline posts with:
+
+    export SLACK_APP_TOKEN=xapp-...
+    uv run ictus listen --allow U0123ABC
+
+A press is answered on the run that posted the button, and only on the newest
+message a question was asked in — a button left over from an earlier round of a
+loop is refused. Reject asks for its note in a form. The fake channel cannot
+deliver presses; this part needs a real workspace.
+
+### Watching from outside
+
+    uv run ictus watch demo_work/pipelines/smoke-events --follow
+
+reports what no step can: a step failing, a budget crossed, the iteration limit
+reached, the engine killed. It posts those into the run's thread, and nothing a
+step already said.
+
 ## What it demonstrates
 
 - **Discovery.** The run is found from `~/.conductor/runs/<run_id>.json` — port,
@@ -118,7 +193,7 @@ working directory, which `.gitignore` already covers.
       curl -s http://127.0.0.1:<port>/api/info    # answers, then stops answering
 
   Hold the socket open instead and it never exits — which is the hazard
-  [run-events.md](../run-events.md) records under Reaping.
+  [run-events.md](../docs/run-events.md) records under Reaping.
 
 ## Re-recording the fixtures
 

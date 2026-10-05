@@ -21,7 +21,9 @@ from ictus.errors import CompositionError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["EnvVar", "Executable", "McpServer", "McpTransport"]
+    from ictus.graph.signals import RunSignal
+
+__all__ = ["EnvVar", "Executable", "Integration", "McpServer", "McpTransport"]
 
 
 class McpTransport(StrEnum):
@@ -131,3 +133,77 @@ class McpServer:
     def required_env(self) -> tuple[EnvVar, ...]:
         """Environment variables that must be set for this server to work."""
         return self.env
+
+
+@dataclass(frozen=True, slots=True)
+class Integration:
+    """A third-party service a pipeline talks to, declared where it is written.
+
+    The air gap. Nothing in the composition model knows Slack, or any other
+    service, exists — the same way nothing here knows what an MCP server is for.
+    This holds the *shape* of an integration: what it is called, why it is there,
+    what the environment must supply, and an opaque program that sends one
+    report. Who fills that in lives behind ``ictus.notify``, and a second service
+    is a new module there rather than a new branch anywhere else.
+
+    Declared at the top of a pipeline on purpose. A reader should see what a run
+    will talk to before they read what it does, and whoever approves the run is
+    shown the same list at the start gate — a pipeline that reaches outside the
+    machine should say so where it cannot be missed.
+
+    ``env`` names variables, never values. A bot token or a webhook URL is the
+    whole authorisation to act as somebody, so it is read at run time and never
+    written into a pipeline or an emitted workflow.
+    """
+
+    name: str
+    purpose: str
+    env: tuple[EnvVar, ...] = ()
+    reports: tuple[RunSignal, ...] = ()
+    """Which moments this integration is told about, when it is attached.
+
+    Empty means it is attached by hand — a pipeline that announces at points of
+    its own choosing rather than at every gate.
+    """
+
+    command: str = "python3"
+    program: str = ""
+    """How one report is sent. Opaque here, and never read above ``notify``."""
+
+    threads: bool = False
+    """Whether a report can be hung under an earlier one.
+
+    Not every destination has threads, and one that does not gets a flat
+    sequence rather than a broken reference to a parent that never existed.
+    """
+
+    setup_hint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise CompositionError("an integration needs a name")
+        if not self.purpose:
+            raise CompositionError(
+                f"integration {self.name!r} needs a purpose; it is what the person "
+                "being asked to configure it will read"
+            )
+        if not self.program:
+            raise CompositionError(
+                f"integration {self.name!r} has no program, so it could never send "
+                "anything. Build it with one of the constructors in ictus.notify."
+            )
+        duplicated = sorted({s for s in self.reports if self.reports.count(s) > 1})
+        if duplicated:
+            raise CompositionError(
+                f"integration {self.name!r} names {[s.value for s in duplicated]} more "
+                "than once; a signal is reported once or not at all"
+            )
+
+    @property
+    def required_env(self) -> tuple[EnvVar, ...]:
+        """Environment variables that must be set for this to work."""
+        return self.env
+
+    def wants(self, signal: RunSignal) -> bool:
+        """Whether this integration asked to hear about ``signal``."""
+        return signal in self.reports

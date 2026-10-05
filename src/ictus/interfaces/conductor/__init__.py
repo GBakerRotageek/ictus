@@ -26,9 +26,10 @@ from ictus.interfaces.conductor.mapping import for_each_block
 from ictus.interfaces.conductor.mcp import preflight_issues
 from ictus.interfaces.conductor.parallel import parallel_block
 from ictus.interfaces.conductor.serialize import dump_yaml
+from ictus.interfaces.conductor.signals import REPORTABLE
 from ictus.interfaces.conductor.templates import output_block
 from ictus.interfaces.conductor.workflow import NOTHING_INHERITED, Inherited, workflow_block
-from ictus.interfaces.environment import executable_issues
+from ictus.interfaces.environment import executable_issues, integration_issues
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -55,6 +56,7 @@ class ConductorBackend:
             providers=frozenset(
                 {"copilot", "openai", "claude", "claude-agent-sdk", "hermes", "aca"}
             ),
+            signals=REPORTABLE,
             # Conductor's `tools:` holds *workflow* tool names, which the
             # claude-agent-sdk provider cannot translate to CLI tool ids — it
             # raises ProviderError on a non-empty list rather than silently
@@ -136,6 +138,7 @@ class ConductorBackend:
         """
         return [
             *executable_issues(pipeline, probe=probe),
+            *integration_issues(pipeline),
             *preflight_issues(pipeline, probe=probe),
         ]
 

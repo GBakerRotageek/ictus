@@ -22,7 +22,7 @@ pipeline = Pipeline(
 gate = pipeline.add(
     approval_gate(
         node_id="smoke_gate",
-        description="Answered over the websocket by docs/smoke/subscribe.py",
+        description="Answered over the websocket by smoke/subscribe.py",
         prompt="Approve to continue, or reject and leave a note.",
     )
 )

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ictus.graph.node import Node
     from ictus.graph.pipeline import Pipeline, RouteEnd
     from ictus.graph.ref import Ref
+    from ictus.interfaces import Capabilities
 
 # Conductor carries an abandoned question set on `abort_route`, not in `routes:`.
 ABORT_CASE = "__abort__"
@@ -295,3 +296,20 @@ def stage_contract_problems(where: str, host: SubGraphNode, child: Pipeline) -> 
         if port.name not in exposed
     )
     return problems
+
+
+def capability_problems(pipeline: Pipeline, can: Capabilities, where: str) -> list[str]:
+    """What this pipeline asks for that the chosen backend cannot supply.
+
+    Generic because the question is: the backend declares what it can do, and
+    this compares the graph against that declaration. A backend that grows a new
+    capability says so in one place and every pipeline is rechecked against it.
+    """
+    unreportable = sorted(signal.value for signal in pipeline.subscribed_signals() - can.signals)
+    if not unreportable:
+        return []
+    reportable = ", ".join(sorted(s.value for s in can.signals)) or "(none)"
+    return [
+        f"{where}: integration(s) subscribe to {unreportable}, which {can.name} cannot "
+        f"report, so they would be configured and never fire; it reports: {reportable}"
+    ]

@@ -128,8 +128,10 @@ and the run record archived.
 - A side effect that belongs in the graph is a node: costed against
   `max_iterations`, routed, visible in the dashboard and in `ictus trace`.
 - A side effect that cannot be a node is a subscriber, and never enters the
-  emitted YAML.
-- The subscription is declared in ictus beside `require_mcp` /
-  `require_executable`, and is preflight-checked.
+  emitted YAML. Reporting is both: an integration's announcements are steps,
+  inserted when the pipeline loads and present in the YAML; what no step can see
+  is the watcher's.
+- An integration is declared in ictus with `pipeline.integrate(...)`, beside
+  `require_mcp` / `require_executable`, and is preflight-checked.
 - Event-vocabulary parsing lives in `interfaces/conductor/`, beside `trace.py`.
 - Delivery — Slack, Jira, webhook — sits above that and is not Conductor-shaped.

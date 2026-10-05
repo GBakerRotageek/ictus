@@ -8,7 +8,11 @@
 soundcheck:
 > uv run ruff check .
 > uv run ruff format --check .
-> uv run mypy src tests
+# `smoke/` is named explicitly because it is not under src or tests. It holds the
+# harness that drives a live engine, which `pytest` cannot run and `soundcheck`
+# therefore never executes — so type checking is the only gate it has, and
+# leaving it off one meant six errors sat in it unnoticed.
+> uv run mypy src tests smoke
 # Each pipeline folder holds a file called pipeline.py, so mypy sees four modules
 # with one name. Checking them a folder at a time keeps the folder names readable
 # (a hyphen is not a valid module component, so package-based disambiguation is
