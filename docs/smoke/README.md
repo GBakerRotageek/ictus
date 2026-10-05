@@ -54,8 +54,8 @@ With the venv activated, drop the `uv run` prefix from the commands below.
 
 ## Run it
 
-From the repository root. Two terminals, because the run parks at a gate and
-waits for the subscriber to answer it.
+From the repository root, one terminal, two commands. `ictus run` detaches and
+returns straight away; the run is left parked at its first gate, waiting.
 
 **One — launch.** Detached, serving a dashboard:
 
