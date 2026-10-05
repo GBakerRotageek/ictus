@@ -38,7 +38,7 @@ from ictus.stdlib.stages import (
     try_shell,
     validate_mcps,
 )
-from ictus.stdlib.steps import bindings, constant, counter, save_text, shell, wait
+from ictus.stdlib.steps import announce, bindings, constant, counter, save_text, shell, wait
 from ictus.stdlib.terminals import fail, succeed
 
 __all__ = [
@@ -55,6 +55,7 @@ __all__ = [
     "ScriptStep",
     "Speaker",
     "Voice",
+    "announce",
     "approval_gate",
     "ask_human",
     "ask_human_for",

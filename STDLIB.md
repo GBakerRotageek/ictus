@@ -44,9 +44,17 @@ No provider call, still 1 iteration each.
 | `constant` | One computed value | `value`, `output_type` | `value`, typed as `output_type` |
 | `bindings` | Several named values at once | `values`, `outputs` | one port per declared output |
 | `counter` | Count passes through a point, from one | — | `value: number` |
+| `announce` | Report to a webhook from inside the graph | `text`, `to`, `timeout` | — |
 | `save_text` | Write a value another step produced to a file | `text`, `to`, `append`, `working_dir` | `path: string` |
 | `shell` | Run a command | `command`, `args`, `outputs`, `stdin`, `timeout`, `working_dir`, `enforce_outputs` | whatever `outputs` declares |
 | `wait` | Pause | `seconds`, `reason` | — |
+
+`announce` posts `text` to the URL held in the `to` environment variable — a
+`Notifier` declaration gets the same variable checked by preflight. Being a
+node is the point: it is costed, routed, visible in the dashboard and in
+`ictus trace`, and a wrong endpoint is a red step rather than a message nobody
+notices never arrived. What it cannot report is anything no step can see — a
+budget tripping, the engine being killed — which is what `ictus watch` is for.
 
 ## Terminals
 

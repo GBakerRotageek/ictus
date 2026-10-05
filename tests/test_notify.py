@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING, ClassVar
@@ -10,13 +12,17 @@ from typing import TYPE_CHECKING, ClassVar
 import pytest
 
 from ictus import EnvVar, Notifier, NotifierKind, RunSignal
+from ictus.errors import CompositionError
+from ictus.graph.node import NodeKind
 from ictus.interfaces import SignalEvent
 from ictus.notify import Delivered, DeliveryError, body_for, deliver, endpoint_for
 from ictus.notify.slack import HEADLINE, message
 from ictus.notify.webhook import post
+from ictus.stdlib import announce
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 SECRET = "/services/T000/B000/sup3rs3cr3t"
 
@@ -237,3 +243,81 @@ def test_an_unconfigured_notifier_says_which_variable_is_unset() -> None:
 
 def test_nothing_delivered_is_an_empty_result_not_an_error() -> None:
     assert deliver(_event(), [], env={}) == []
+
+
+# --- announcing from inside the graph ----------------------------------------
+
+
+def test_an_announce_node_is_a_script_step_not_a_model_call() -> None:
+    node = announce(node_id="tell", text="hello", to=EnvVar("HOOK", "where"))
+    assert node.kind is NodeKind.SUBPROCESS
+    assert node.command == "python3"
+
+
+def test_the_url_is_never_in_what_is_emitted() -> None:
+    """The step names the variable and reads it in the subprocess."""
+    node = announce(node_id="tell", text="hello", to=EnvVar("HOOK", "where"))
+    rendered = " ".join(str(a) for a in node.args)
+    assert "HOOK" in rendered
+    assert "hooks.slack.com" not in rendered
+    assert "https://" not in rendered
+
+
+def test_the_message_is_piped_rather_than_put_on_the_command_line() -> None:
+    """A gate prompt is prose; interpolating it into argv breaks on an apostrophe."""
+    node = announce(node_id="tell", text='it\'s a prompt "with" quotes', to=EnvVar("HOOK", "w"))
+    assert node.stdin == 'it\'s a prompt "with" quotes'
+    assert "apostrophe" not in " ".join(str(a) for a in node.args)
+
+
+def test_stdout_is_not_a_contract() -> None:
+    """Enforcing it would make the engine parse 'reported' as JSON and raise
+    after the message had already gone."""
+    assert not announce(node_id="t", text="x", to=EnvVar("H", "w")).enforce_outputs
+
+
+def test_an_announce_step_refuses_a_nameless_variable() -> None:
+    with pytest.raises(CompositionError, match="needs a variable"):
+        announce(node_id="t", text="x", to=EnvVar("", "w"))
+
+
+def test_the_posting_script_is_valid_python() -> None:
+    """It is built as a string, so nothing else checks it."""
+    node = announce(node_id="t", text="x", to=EnvVar("HOOK", "w"))
+    compile(str(node.args[1]), "<announce>", "exec")
+
+
+def test_an_unset_variable_fails_the_step_rather_than_posting_nowhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A red step in the dashboard beats a message nobody notices never arrived."""
+    node = announce(node_id="t", text="x", to=EnvVar("DEFINITELY_UNSET_HOOK", "w"))
+    monkeypatch.delenv("DEFINITELY_UNSET_HOOK", raising=False)
+    done = subprocess.run(
+        [sys.executable, "-c", str(node.args[1])],
+        input="hello",
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+    assert done.returncode != 0
+    assert "DEFINITELY_UNSET_HOOK" in done.stderr
+
+
+def test_the_posting_script_actually_posts(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The script is a string in a YAML file; only running it proves it works."""
+    url, received = collector
+    node = announce(node_id="t", text="x", to=EnvVar("TEST_HOOK_URL", "w"))
+    monkeypatch.setenv("TEST_HOOK_URL", url)
+    done = subprocess.run(
+        [sys.executable, "-c", str(node.args[1])],
+        input='it\'s a gate, "really"',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert received[0][1] == {"text": 'it\'s a gate, "really"'}
