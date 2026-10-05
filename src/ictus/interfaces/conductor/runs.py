@@ -7,8 +7,11 @@ rather than the directory trusted. Nothing filters on *age*: a run parked at a
 gate overnight is still a run, and a heuristic that aged it out would discard
 exactly the one somebody still has to answer.
 
-The path is not configurable — ``conductor.rundir.runs_dir`` builds it from
-``Path.home()`` with no environment override — so neither is this.
+Two directories, and they are not the same one. The engine writes the run
+records with ``fleet.records.run_records_dir``, which honours ``$CONDUCTOR_HOME``;
+it writes a dashboard's token with ``rundir.runs_dir``, which does not. Treating
+them as one meant a machine with ``$CONDUCTOR_HOME`` set had live runs nobody
+here could find.
 """
 
 from __future__ import annotations
@@ -19,9 +22,26 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["LOOPBACK", "RUNS_DIR", "TOKEN_ENV", "LiveRun", "alive", "live_runs", "token_for"]
+__all__ = [
+    "LOOPBACK",
+    "TOKENS_DIR",
+    "TOKEN_ENV",
+    "LiveRun",
+    "alive",
+    "live_runs",
+    "records_dir",
+    "token_for",
+]
 
-RUNS_DIR = Path.home() / ".conductor" / "runs"
+#: Where a dashboard's token is written. Not configurable in the engine.
+TOKENS_DIR = Path.home() / ".conductor" / "runs"
+
+
+def records_dir() -> Path:
+    """Where the engine writes one record per run: ``$CONDUCTOR_HOME/runs``, else home's."""
+    home = os.environ.get("CONDUCTOR_HOME")
+    return (Path(home) if home else Path.home() / ".conductor") / "runs"
+
 
 #: Overrides the per-run minted token, and is what the engine checks first.
 TOKEN_ENV = "CONDUCTOR_GATE_TOKEN"
@@ -91,7 +111,7 @@ def live_runs(*, runs_dir: Path | None = None) -> list[LiveRun]:
     stopped answering, and ``ictus watch`` would report runs nobody is running.
     """
     found: list[LiveRun] = []
-    for path in sorted((runs_dir or RUNS_DIR).glob("*.json")):
+    for path in sorted((runs_dir or records_dir()).glob("*.json")):
         record = _read(path)
         if record is None:
             continue
@@ -126,7 +146,7 @@ def token_for(port: int, *, runs_dir: Path | None = None) -> str | None:
     override = os.environ.get(TOKEN_ENV)
     if override:
         return override
-    path = (runs_dir or RUNS_DIR) / f"dashboard-{port}.token"
+    path = (runs_dir or TOKENS_DIR) / f"dashboard-{port}.token"
     try:
         return path.read_text(encoding="utf-8").strip() or None
     except OSError:

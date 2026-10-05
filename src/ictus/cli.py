@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import os
 import sys
@@ -22,6 +23,7 @@ from ictus.graph.pipeline import Pipeline
 from ictus.graph.signals import RunSignal
 from ictus.integrate import apply_integrations
 from ictus.interfaces.conductor import conductor
+from ictus.interfaces.conductor.events import history, step_outputs
 from ictus.interfaces.conductor.events import watch as watch_run
 from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
@@ -99,12 +101,17 @@ def _load_module(module_path: Path) -> list[Pipeline]:
     return [p for p in found if id(p) not in nested]
 
 
-def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeline]:
+def _load(
+    folder: PipelineFolder, *, require_config: bool = True, attach: bool = True
+) -> list[Pipeline]:
     """The pipelines a folder defines, with its run policy applied.
 
     Policy and the start gate are applied here rather than in the composition so
     every command sees the same thing: a lint reading a different provider from
     the emit would be checking a workflow nobody runs.
+
+    ``attach=False`` leaves integrations for the caller to apply, for one that
+    needs to know what attaching them inserted.
 
     ``require_config`` is what ``lint`` relaxes. A folder with no ``config.yaml``
     used to fail before a single composition rule ran, so the one command whose
@@ -124,7 +131,8 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
         )
         try:
             for pipeline in pipelines:
-                apply_integrations(pipeline)
+                if attach:
+                    apply_integrations(pipeline)
         except IctusError as exc:
             _fail(str(exc))
         return pipelines
@@ -140,7 +148,8 @@ def _load(folder: PipelineFolder, *, require_config: bool = True) -> list[Pipeli
             # After the start policy: the start gate is the first gate every run
             # stops at, so it is announced like the others, and its prompt counts
             # the work being approved rather than the reporting about it.
-            apply_integrations(pipeline)
+            if attach:
+                apply_integrations(pipeline)
     except IctusError as exc:
         _fail(str(exc))
     return pipelines
@@ -165,9 +174,9 @@ def _policy(folder: PipelineFolder) -> PipelineConfig:
         raise
 
 
-def _only(folder: PipelineFolder) -> Pipeline:
+def _only(folder: PipelineFolder, *, attach: bool = True) -> Pipeline:
     """The single pipeline a folder defines, which a run needs."""
-    pipelines = _load(folder)
+    pipelines = _load(folder, attach=attach)
     if not pipelines:
         _fail(f"{folder.module} defines no pipeline")
     if len(pipelines) > 1:
@@ -808,23 +817,49 @@ def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
     try:
         for event in watch_run(run):
             out.put(event)
-    except (OSError, IctusError) as exc:
-        out.put(_Finished(run.run_id, str(exc)))
+    except Exception as exc:
+        # The thread boundary. Anything not reported here is lost with the
+        # thread, and the watcher would wait forever on a run it has stopped
+        # following: a truncated read of the run's history did exactly that.
+        out.put(_Finished(run.run_id, f"{type(exc).__name__}: {exc}"))
         return
     out.put(_Finished(run.run_id))
 
 
-def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...]]:
-    """A pipeline folder's id and the integrations it declares.
+def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...], dict[str, str]]:
+    """A pipeline folder's id, the integrations it declares, and their openers.
 
     Read from the source rather than from the emitted workflow: the steps an
     integration inserts are in the YAML, but which service they report to, and
-    what it is subscribed to, exist only in `pipeline.py`.
+    what it is subscribed to, exist only in `pipeline.py`. The openers are the
+    steps whose output is each service's thread for a run, so a report from
+    outside can land in it.
     """
     if folder is None:
-        return "", ()
-    pipeline = _only(PipelineFolder.at(folder))
-    return pipeline.pipeline_id, pipeline.all_integrations()
+        return "", (), {}
+    pipeline = _only(PipelineFolder.at(folder), attach=False)
+    openers = {a.integration: a.opener for a in apply_integrations(pipeline) if a.opener}
+    return pipeline.pipeline_id, pipeline.all_integrations(), openers
+
+
+def _threads(run: LiveRun, openers: dict[str, str]) -> dict[str, str]:
+    """Each integration's thread for ``run``, read from what its opener printed.
+
+    Best effort: a report that cannot find its thread still goes, to the channel.
+    """
+    if not openers:
+        return {}
+    try:
+        events = history(run)
+    except (OSError, ValueError, http.client.HTTPException):
+        return {}
+    found: dict[str, str] = {}
+    for name, opener in openers.items():
+        printed = step_outputs(events, opener)
+        thread = printed[-1].get("thread") if printed else None
+        if isinstance(thread, str) and thread:
+            found[name] = thread
+    return found
 
 
 @app.command()
@@ -847,17 +882,25 @@ def watch(
     ended; with it, it keeps looking for new ones until interrupted.
 
     Given a pipeline folder, it also reports to what that pipeline integrates,
-    for runs of that workflow. A destination whose variable is unset is reported
-    once per signal rather than silently skipped — one nobody can tell is not
-    firing is the failure the declaration exists to prevent.
+    for runs of that workflow, into each run's own thread — but only what no step
+    inside the run already said: a step failing, a budget crossed, a run paused,
+    the iteration limit reached, the engine dying. Gates and endings are
+    announced from inside the graph, and what happened before it attached is not
+    news. A destination whose variable is unset is reported once per signal
+    rather than silently skipped — one nobody can tell is not firing is the
+    failure the declaration exists to prevent.
+
+    A dropped connection is dialled again while the run's process lives; a run
+    whose process vanished without saying so is reported as failed.
 
     It detaches the moment a run ends, and that is not tidiness: a detached run
     shuts itself down only once every client has disconnected, so a watcher that
     held on would leave one resident process per run, each keeping that run's
-    whole event history in memory.
+    whole event history in memory. While attached it is a client, so an agent
+    paused from the dashboard stays paused until somebody resumes it.
     """
     try:
-        workflow, targets = _notifiers_of(folder)
+        workflow, targets, openers = _notifiers_of(folder)
     except IctusError as exc:
         _fail(str(exc))
         return
@@ -870,7 +913,8 @@ def watch(
     events: Queue[SignalEvent | _Finished] = Queue()
     attached: set[str] = set()
     threads: list[threading.Thread] = []
-    seats: dict[str, str] = {}
+    followed: dict[str, LiveRun] = {}
+    conversations: dict[str, dict[str, str]] = {}
 
     def attach() -> int:
         started = 0
@@ -878,7 +922,7 @@ def watch(
             if run.run_id in attached:
                 continue
             attached.add(run.run_id)
-            seats[run.run_id] = run.dashboard
+            followed[run.run_id] = run
             thread = threading.Thread(target=_follow, args=(run, events), daemon=True)
             thread.start()
             threads.append(thread)
@@ -910,8 +954,21 @@ def watch(
                     typer.secho(f"  {item.run_id}: detached", fg=typer.colors.BRIGHT_BLACK)
                 continue
             _report_signal(item)
-            if targets and item.workflow == workflow:
-                _report_delivery(deliver(item, targets, dashboard=seats.get(item.run_id, "")))
+            if not (targets and item.workflow == workflow):
+                continue
+            run = followed[item.run_id]
+            # Learnt on the first event, while the run can still be asked: the
+            # report most worth threading is the engine dying, and by then its
+            # dashboard is gone and so is the history the thread is read from.
+            if item.run_id not in conversations:
+                found = _threads(run, openers)
+                if len(found) == len(openers):
+                    conversations[item.run_id] = found
+            if not (item.at_a_step or item.replayed):
+                threads_now = conversations.get(item.run_id) or _threads(run, openers)
+                _report_delivery(
+                    deliver(item, targets, dashboard=run.dashboard, threads=threads_now)
+                )
     except KeyboardInterrupt:
         typer.secho("\nstopped watching; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
 
@@ -924,12 +981,11 @@ def _report_signal(event: SignalEvent) -> None:
         RunSignal.STEP_FAILED: typer.colors.RED,
         RunSignal.BUDGET_EXCEEDED: typer.colors.RED,
     }.get(event.signal, typer.colors.GREEN)
-    detail = event.data.get("agent_name") or event.data.get("status") or ""
-    typer.secho(f"  {event.workflow}  {event.signal.value}  {detail}", fg=colour)
-    if event.signal is RunSignal.DECISION_NEEDED:
-        options = event.data.get("options")
-        if isinstance(options, list):
-            typer.echo(f"      waiting on: {', '.join(str(o) for o in options)}")
+    when = "  (before attaching)" if event.replayed else ""
+    detail = event.step or event.reason
+    typer.secho(f"  {event.workflow}  {event.signal.value}  {detail}{when}", fg=colour)
+    if event.signal is RunSignal.DECISION_NEEDED and event.options:
+        typer.echo(f"      waiting on: {', '.join(event.options)}")
 
 
 def _report_delivery(results: list[Delivered]) -> None:

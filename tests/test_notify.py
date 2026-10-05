@@ -32,14 +32,14 @@ SECRET = "/services/T000/B000/sup3rs3cr3t"
 SRC = Path(__file__).resolve().parent.parent / "src" / "ictus"
 
 
-def _event(signal: RunSignal = RunSignal.DECISION_NEEDED, **data: object) -> SignalEvent:
+def _event(signal: RunSignal = RunSignal.DECISION_NEEDED, **facts: object) -> SignalEvent:
     return SignalEvent(
         signal=signal,
         run_id="bd13f80e",
         workflow="smoke-events",
         at=1791192899.88,
         event_type="gate_presented",
-        data=data,
+        **facts,  # type: ignore[arg-type]
     )
 
 
@@ -138,7 +138,7 @@ def test_a_webhook_cannot_thread_and_says_so() -> None:
 
 def test_a_decision_says_what_it_is_waiting_for() -> None:
     text = summarise(
-        _event(agent_name="confirm_start", options=["start", "cancel"], prompt="Start it?\n\nx")
+        _event(step="confirm_start", options=("start", "cancel"), prompt="Start it?\n\nx")
     )
     assert "smoke-events" in text
     assert "needs a decision" in text
@@ -154,11 +154,7 @@ def test_a_long_prompt_is_cut_to_its_opening() -> None:
 
 def test_an_answer_carries_the_choice_and_the_note() -> None:
     text = summarise(
-        _event(
-            RunSignal.DECISION_MADE,
-            selected_option="rejected",
-            additional_input={"notes": "not this time"},
-        )
+        _event(RunSignal.DECISION_MADE, choice="rejected", notes=(("notes", "not this time"),))
     )
     assert "`rejected`" in text
     assert "not this time" in text
@@ -486,6 +482,39 @@ def test_the_watcher_sends_through_the_same_program(
     (result,) = deliver(_event(), [_hook()], env={"HOOK_URL": url})
     assert result == Delivered("slack", "decision_needed", sent=True)
     assert "needs a decision" in str(received[0][1]["text"])
+
+
+def test_a_moment_a_step_already_announced_is_not_delivered_again(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """It would arrive twice, the second time outside the thread and without buttons."""
+    url, received = collector
+    assert deliver(_event(at_a_step=True), [_hook()], env={"HOOK_URL": url}) == []
+    assert received == []
+
+
+def test_what_happened_before_anybody_was_watching_is_not_delivered(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """A watcher restarted mid-run reads the history; it is not news."""
+    url, received = collector
+    assert deliver(_event(replayed=True), [_hook()], env={"HOOK_URL": url}) == []
+    assert received == []
+
+
+def test_a_report_from_outside_lands_in_the_run_s_thread(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    url, received = collector
+    failed = _event(RunSignal.STEP_FAILED, reason="lint failed")
+    (result,) = deliver(
+        failed,
+        [_channel(reports=(RunSignal.STEP_FAILED,))],
+        threads={"slack": "1700000000.000001"},
+        env={"TEST_TOKEN": "xoxb-pretend", "TEST_CHANNEL": "C0TEST", "SLACK_API_URL": url},
+    )
+    assert result.sent, result.detail
+    assert received[0][1]["thread_ts"] == "1700000000.000001"
 
 
 def test_only_subscribers_to_that_signal_are_told(

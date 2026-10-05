@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import socket
+import struct
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
+from typer.testing import CliRunner
+
 from ictus import RunSignal
+from ictus.cli import app
 from ictus.interfaces import ENDED, SignalEvent
-from ictus.interfaces.conductor.events import signals_from
+from ictus.interfaces.conductor.events import signals_from, watch
 from ictus.interfaces.conductor.runs import LiveRun, live_runs, token_for
 
 if TYPE_CHECKING:
-    import pytest
+    from collections.abc import Callable
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -69,8 +78,8 @@ def test_a_decision_carries_what_is_being_asked() -> None:
         for e in signals_from(_recorded("run-events-approved.jsonl"), RUN)
         if e.signal is RunSignal.DECISION_NEEDED
     )
-    assert gate.data["agent_name"] == "confirm_start"
-    assert gate.data["options"] == ["start", "cancel"]
+    assert gate.step == "confirm_start"
+    assert gate.options == ("start", "cancel")
 
 
 def test_the_answer_comes_back_with_the_free_text() -> None:
@@ -80,10 +89,8 @@ def test_the_answer_comes_back_with_the_free_text() -> None:
         for e in signals_from(_recorded("run-events-rejected.jsonl"), RUN)
         if e.signal is RunSignal.DECISION_MADE
     ]
-    assert answered[-1].data["selected_option"] == "rejected"
-    assert answered[-1].data["additional_input"] == {
-        "notes": "not this time — from the spike client"
-    }
+    assert answered[-1].choice == "rejected"
+    assert answered[-1].notes == (("notes", "not this time — from the spike client"),)
 
 
 # --- what it must stop doing -------------------------------------------------
@@ -128,6 +135,183 @@ def test_a_malformed_event_does_not_stop_the_stream() -> None:
         {"type": "workflow_completed", "timestamp": 1.0},
     ]
     assert [e.signal for e in signals_from(stream, RUN)] == [RunSignal.RUN_FINISHED]
+
+
+def test_a_stage_finishing_is_not_the_run_finishing() -> None:
+    """A stage is a child workflow emitting its own lifecycle into the same stream.
+
+    Read as the run's, it reported "finished" partway through and stopped
+    watching before the run's later gates and its real end.
+    """
+    stream: list[dict[str, object]] = [
+        {"type": "workflow_completed", "timestamp": 1.0, "data": {"subworkflow_path": ["review"]}},
+        {"type": "gate_presented", "timestamp": 2.0, "data": {"agent_name": "ship_it"}},
+        {"type": "workflow_completed", "timestamp": 3.0, "data": {}},
+    ]
+    seen = [e.signal for e in signals_from(stream, RUN)]
+    assert seen == [RunSignal.DECISION_NEEDED, RunSignal.RUN_FINISHED]
+
+
+def test_what_happened_before_attaching_is_marked_as_such() -> None:
+    stream: list[dict[str, object]] = [
+        {"type": "workflow_started", "timestamp": 10.0, "data": {}},
+        {"type": "budget_exceeded", "timestamp": 30.0, "data": {}},
+    ]
+    seen = list(signals_from(stream, RUN, live_from=20.0))
+    assert [e.replayed for e in seen] == [True, False]
+
+
+def test_what_a_step_already_announced_is_said_to_be() -> None:
+    """Every gate and ending has a step in front of it; an engine failure does not."""
+    stream: list[dict[str, object]] = [
+        {"type": "gate_presented", "timestamp": 1.0, "data": {"agent_name": "g"}},
+        {"type": "iteration_limit_reached", "timestamp": 2.0, "data": {"agent_name": "g"}},
+        {"type": "budget_exceeded", "timestamp": 3.0, "data": {}},
+    ]
+    announced = {e.event_type: e.at_a_step for e in signals_from(stream, RUN)}
+    assert announced == {
+        "gate_presented": True,
+        "iteration_limit_reached": False,
+        "budget_exceeded": False,
+    }
+    explicit = [{"type": "workflow_failed", "timestamp": 1.0, "data": {"is_explicit": True}}]
+    raised = [{"type": "workflow_failed", "timestamp": 1.0, "data": {"error_type": "KeyError"}}]
+    assert next(iter(signals_from(explicit, RUN))).at_a_step
+    assert not next(iter(signals_from(raised, RUN))).at_a_step
+
+
+def test_the_waits_no_gate_stands_in_front_of_are_decisions_too() -> None:
+    """A background run parks on its iteration limit until somebody answers."""
+    stream: list[dict[str, object]] = [
+        {"type": "iteration_limit_reached", "timestamp": 1.0, "data": {"agent_name": "loop"}},
+        {"type": "dialog_started", "timestamp": 2.0, "data": {"agent_name": "chat"}},
+    ]
+    assert [e.signal for e in signals_from(stream, RUN)] == [
+        RunSignal.DECISION_NEEDED,
+        RunSignal.DECISION_NEEDED,
+    ]
+
+
+def test_one_dedupe_holds_across_reconnects() -> None:
+    """Each reconnect reads the history again; none of it is new the second time."""
+    seen: set[tuple[str, float]] = set()
+    events = _recorded("run-events-approved.jsonl")[:-1]  # stop short of the end
+    first = list(signals_from(events, RUN, seen=seen))
+    again = list(signals_from(events, RUN, seen=seen))
+    assert first
+    assert again == []
+
+
+# --- the watch itself, against a stand-in dashboard --------------------------
+
+
+def _frame(message: dict[str, object]) -> bytes:
+    payload = json.dumps(message).encode()
+    if len(payload) < 126:
+        return bytes([0x81, len(payload)]) + payload
+    return bytes([0x81, 126]) + struct.pack("!H", len(payload)) + payload
+
+
+def _dashboard(
+    history: list[dict[str, object]], sockets: list[Callable[[socket.socket], None]]
+) -> int:
+    """A dashboard serving ``history`` at /api/state and one socket per plan, in order."""
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    plans = iter(sockets)
+
+    def serve() -> None:
+        while True:
+            connection, _ = listener.accept()
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += connection.recv(4096)
+            line = request.split(b"\r\n", 1)[0]
+            if b" /api/state" in line:
+                body = json.dumps(history).encode()
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                    + body
+                )
+                connection.close()
+                continue
+            connection.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n")
+            plan = next(plans, None)
+            if plan is not None:
+                plan(connection)
+            connection.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    port: int = listener.getsockname()[1]
+    return port
+
+
+def _closed_port() -> int:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port: int = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def test_a_dropped_socket_is_dialled_again_while_the_run_lives() -> None:
+    """A watcher used to treat any disconnect as the run ending, and let go."""
+    history: list[dict[str, object]] = [
+        {"type": "workflow_started", "timestamp": 1.0, "data": {}},
+        {"type": "gate_presented", "timestamp": 2.0, "data": {"agent_name": "g"}},
+    ]
+    ended = {"type": "workflow_completed", "timestamp": time.time() + 1000, "data": {}}
+
+    def drops(_: socket.socket) -> None:
+        """Hang up at once, with no close frame."""
+
+    def ends(connection: socket.socket) -> None:
+        connection.sendall(_frame(ended))
+        time.sleep(0.5)
+
+    port = _dashboard(history, [drops, ends])
+    run = LiveRun(run_id="r", workflow="w", port=port, pid=os.getpid(), started_at="2026")
+    seen = list(watch(run, token="t", pause=lambda _: None))
+    assert [(e.signal, e.replayed) for e in seen] == [
+        (RunSignal.RUN_STARTED, True),
+        (RunSignal.DECISION_NEEDED, True),
+        (RunSignal.RUN_FINISHED, False),
+    ]
+
+
+def test_a_run_whose_engine_vanished_is_reported_as_failed() -> None:
+    """Killed, crashed or asleep, it says nothing; nothing inside it can either."""
+    run = LiveRun(run_id="r", workflow="w", port=_closed_port(), pid=_a_dead_pid(), started_at="x")
+    (gone,) = list(watch(run, token="t", pause=lambda _: None))
+    assert gone.signal is RunSignal.RUN_FAILED
+    assert gone.event_type == "engine_gone"
+    assert not gone.at_a_step and not gone.replayed, "this one has to be delivered"
+
+
+def test_a_live_process_whose_dashboard_never_answers_is_given_up_on() -> None:
+    """A recycled pid can belong to something that is not a run."""
+    run = LiveRun(run_id="r", workflow="w", port=_closed_port(), pid=os.getpid(), started_at="x")
+    with pytest.raises(ConnectionError, match="stopped answering"):
+        list(watch(run, token="t", pause=lambda _: None))
+
+
+def test_a_watcher_whose_run_breaks_unexpectedly_says_so_and_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated read of the history killed the thread silently, and the watch hung."""
+    run = LiveRun(run_id="r1", workflow="w", port=1, pid=os.getpid(), started_at="2026")
+
+    def breaks(_: LiveRun) -> list[SignalEvent]:
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr("ictus.cli.live_runs", lambda: [run])
+    monkeypatch.setattr("ictus.cli.watch_run", breaks)
+    result = CliRunner().invoke(app, ["watch"])
+    assert result.exit_code == 0
+    assert "IncompleteRead" in result.output
 
 
 # --- discovery ---------------------------------------------------------------
@@ -213,21 +397,32 @@ def test_the_environment_overrides_the_token_file(
     assert token_for(50000, runs_dir=tmp_path) == "from-env"
 
 
+def test_records_are_found_where_conductor_home_puts_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine honours $CONDUCTOR_HOME for run records, though not for tokens."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    (tmp_path / "runs").mkdir()
+    _record(tmp_path / "runs", "elsewhere", port=50001)
+    assert [r.run_id for r in live_runs()] == ["elsewhere"]
+
+
 def test_a_missing_token_is_not_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Reading state needs none, so a listener still works without one."""
     monkeypatch.delenv("CONDUCTOR_GATE_TOKEN", raising=False)
     assert token_for(50000, runs_dir=tmp_path) is None
 
 
-def test_an_event_reaches_a_caller_as_a_signal() -> None:
-    """The dataclass a integration will be handed."""
+def test_an_event_reaches_a_caller_as_engine_neutral_facts() -> None:
+    """Nothing above the backend reads an engine's payload keys."""
     event = SignalEvent(
         signal=RunSignal.DECISION_NEEDED,
         run_id="abc",
         workflow="w",
         at=1.0,
         event_type="gate_presented",
-        data={"agent_name": "approve"},
+        step="approve",
     )
     assert not event.ends_the_run
-    assert event.data["agent_name"] == "approve"
+    assert event.step == "approve"
+    assert not hasattr(event, "data")

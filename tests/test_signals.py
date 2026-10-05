@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -137,7 +141,7 @@ def test_the_recorded_runs_are_readable_as_signals(fixture: str) -> None:
 
 
 def test_the_gate_events_in_the_fixtures_still_have_the_names_mapped() -> None:
-    """What catches a rename: these two names came out of a live 0.1.41 run."""
+    """These names came out of a live 0.1.41 run, and the recordings depend on them."""
     recorded = {
         json.loads(line)["type"]
         for line in (FIXTURES / "run-events-approved.jsonl").read_text().splitlines()
@@ -145,6 +149,56 @@ def test_the_gate_events_in_the_fixtures_still_have_the_names_mapped() -> None:
     assert "gate_presented" in recorded
     assert "gate_resolved" in recorded
     assert recorded >= {"workflow_started", "workflow_completed"}
+
+
+#: Mapped names an engine older than the version given does not emit yet.
+_INTRODUCED = {"mcp_failed": (0, 1, 41)}
+
+
+def _installed_engine() -> tuple[str, tuple[int, ...]]:
+    """The installed engine's source, and its version.
+
+    Found through the console script, because the engine lives in its own
+    environment and importing it from this one fails — which is a fact about
+    the interpreter asked, not about the engine.
+    """
+    binary = shutil.which("conductor")
+    assert binary is not None
+    python = Path(os.path.realpath(binary)).parent / "python"
+    located = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "import conductor, pathlib; print(pathlib.Path(conductor.__file__).parent)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    package = Path(located.stdout.strip())
+    source = "\n".join(path.read_text(encoding="utf-8") for path in package.rglob("*.py"))
+    printed = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
+    found = re.search(r"(\d+)\.(\d+)\.(\d+)", printed.stdout)
+    assert found is not None, printed.stdout
+    return source, tuple(int(part) for part in found.groups())
+
+
+def test_every_mapped_event_is_one_the_installed_engine_emits(backend: ConductorBackend) -> None:
+    """What catches the engine renaming an event under us.
+
+    A renamed event is not an error anywhere: the watcher drops names it does
+    not know, so the signal silently stops arriving. This reads the engine's own
+    source for each name rather than trusting a recording that holds only some.
+    """
+    assert backend is not None
+    source, version = _installed_engine()
+    expected = {
+        name
+        for names in SIGNAL_EVENTS.values()
+        for name in names
+        if version >= _INTRODUCED.get(name, (0, 0, 0))
+    }
+    assert sorted(name for name in expected if f'"{name}"' not in source) == []
 
 
 # --- preflight --------------------------------------------------------------

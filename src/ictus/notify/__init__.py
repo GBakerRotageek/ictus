@@ -72,36 +72,26 @@ def summarise(event: SignalEvent, *, dashboard: str = "") -> str:
     dashboard, which is linked when its address is known.
     """
     lines = [f"*{event.workflow}* {HEADLINE.get(event.signal, event.signal.value)}"]
-
-    step = event.data.get("agent_name")
-    if isinstance(step, str) and step:
-        lines.append(f"> step: `{step}`")
-
+    if event.step:
+        lines.append(f"> step: `{event.step}`")
     if event.signal is RunSignal.DECISION_NEEDED:
-        options = event.data.get("options")
-        if isinstance(options, list) and options:
-            lines.append("> waiting on: " + ", ".join(f"`{o}`" for o in options))
-        lines.extend(_opening(event.data.get("prompt")))
-
+        if event.options:
+            lines.append("> waiting on: " + ", ".join(f"`{o}`" for o in event.options))
+        lines.extend(_opening(event.prompt))
     if event.signal is RunSignal.DECISION_MADE:
-        chosen = event.data.get("selected_option")
-        if isinstance(chosen, str) and chosen:
-            lines.append(f"> answered: `{chosen}`")
-        note = event.data.get("additional_input")
-        if isinstance(note, dict):
-            lines.extend(f"> {key}: {value}" for key, value in note.items() if value)
-
+        if event.choice:
+            lines.append(f"> answered: `{event.choice}`")
+        lines.extend(f"> {name}: {text}" for name, text in event.notes)
     if event.signal in (RunSignal.RUN_FAILED, RunSignal.STEP_FAILED):
-        lines.extend(_opening(event.data.get("termination_reason") or event.data.get("error")))
-
+        lines.extend(_opening(event.reason))
     footer = f"run `{event.run_id}`"
     lines.append(f"{footer} · {dashboard}" if dashboard else footer)
     return "\n".join(lines)
 
 
-def _opening(value: object, *, limit: int = 160) -> list[str]:
+def _opening(value: str, *, limit: int = 160) -> list[str]:
     """The first line of some prose, flattened. A channel is not a document."""
-    if not isinstance(value, str) or not value.strip():
+    if not value.strip():
         return []
     opening = value.strip().splitlines()[0]
     return ["> " + (opening if len(opening) <= limit else opening[: limit - 1] + "…")]
@@ -174,18 +164,31 @@ def deliver(
     services: Iterable[Integration],
     *,
     dashboard: str = "",
+    threads: Mapping[str, str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> list[Delivered]:
     """Report ``event`` to every service that asked for its signal.
 
     One result per attempt, successes included, so a caller can say what it did
     as well as what it could not. Raises nothing: see the module note.
+
+    Two kinds of event are not reported at all. One a step already announced
+    from inside the run — every gate, question and ending, when an integration
+    is attached — would arrive twice, the second time outside the thread and
+    without its buttons. And one read from the run's history on attaching
+    happened before anybody was watching; reporting it would announce, again, a
+    gate answered an hour ago.
+
+    ``threads`` is each service's conversation for this run, by name, so a
+    report from outside lands where the run's own reports do.
     """
+    if event.at_a_step or event.replayed:
+        return []
     text = summarise(event, dashboard=dashboard)
     results: list[Delivered] = []
     for service in services:
         if not service.wants(event.signal):
             continue
-        why = send(service, text, env=env)
+        why = send(service, text, thread=(threads or {}).get(service.name, ""), env=env)
         results.append(Delivered(service.name, event.signal.value, sent=not why, detail=why))
     return results

@@ -11,9 +11,14 @@ most of Conductor's ~45 event types map to no signal at all — ``agent_started`
 ``checkpoint_saved``, ``route_taken`` and the per-tool events are a trace, not
 news, and forwarding them would make a report a firehose.
 
-Verified against conductor-cli 0.1.41, and against the recorded streams in
-``tests/fixtures/``. ``test_signals.py`` checks every name here still appears in
-one of those, which is what catches the engine renaming an event under us.
+A gate is not the only place a run waits for a person. The iteration-limit
+prompt parks a background run until somebody raises the limit or stops it, and
+an agent's dialog waits for a reply; no step can stand in front of either, so
+the watcher is the only thing that can say a run is waiting on them.
+
+``test_signals.py`` checks every name here against the installed engine's own
+source, which is what catches the engine renaming an event under us. The
+recorded streams in ``tests/fixtures/`` hold only the names a gate run emits.
 """
 
 from __future__ import annotations
@@ -28,8 +33,12 @@ SIGNAL_EVENTS: dict[RunSignal, frozenset[str]] = {
     RunSignal.RUN_FINISHED: frozenset({"workflow_completed"}),
     RunSignal.RUN_FAILED: frozenset({"workflow_failed"}),
     RunSignal.RUN_PAUSED: frozenset({"agent_paused"}),
-    RunSignal.DECISION_NEEDED: frozenset({"gate_presented", "questions_presented"}),
-    RunSignal.DECISION_MADE: frozenset({"gate_resolved", "questions_completed"}),
+    RunSignal.DECISION_NEEDED: frozenset(
+        {"gate_presented", "questions_presented", "iteration_limit_reached", "dialog_started"}
+    ),
+    RunSignal.DECISION_MADE: frozenset(
+        {"gate_resolved", "questions_completed", "iteration_limit_resolved", "dialog_completed"}
+    ),
     RunSignal.STEP_FAILED: frozenset(
         {
             "agent_failed",
