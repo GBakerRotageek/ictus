@@ -310,6 +310,6 @@ def capability_problems(pipeline: Pipeline, can: Capabilities, where: str) -> li
         return []
     reportable = ", ".join(sorted(s.value for s in can.signals)) or "(none)"
     return [
-        f"{where}: notifier(s) subscribe to {unreportable}, which {can.name} cannot "
+        f"{where}: integration(s) subscribe to {unreportable}, which {can.name} cannot "
         f"report, so they would be configured and never fire; it reports: {reportable}"
     ]

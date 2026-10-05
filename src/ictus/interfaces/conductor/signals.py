@@ -9,7 +9,7 @@ answering a questions step are the same moment to anyone being told about it,
 and so is a failure whatever kind of step it happened in. Going the other way,
 most of Conductor's ~45 event types map to no signal at all — ``agent_started``,
 ``checkpoint_saved``, ``route_taken`` and the per-tool events are a trace, not
-news, and forwarding them would make a notifier a firehose.
+news, and forwarding them would make a report a firehose.
 
 Verified against conductor-cli 0.1.41, and against the recorded streams in
 ``tests/fixtures/``. ``test_signals.py`` checks every name here still appears in

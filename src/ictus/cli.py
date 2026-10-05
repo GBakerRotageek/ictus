@@ -795,7 +795,7 @@ def _follow(run: LiveRun, out: Queue[SignalEvent | _Finished]) -> None:
 
 
 def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...]]:
-    """A pipeline folder's id and the notifiers it declares.
+    """A pipeline folder's id and the integrations it declares.
 
     Read from the source rather than from the emitted workflow, because a
     subscription deliberately never reaches the YAML: the engine runs no side
@@ -812,7 +812,7 @@ def _notifiers_of(folder: Path | None) -> tuple[str, tuple[Integration, ...]]:
 def watch(
     folder: Annotated[
         Path | None,
-        typer.Argument(help="A pipeline folder, to also report to the notifiers it declares"),
+        typer.Argument(help="A pipeline folder, to also report to what it integrates"),
     ] = None,
     follow: Annotated[
         bool, typer.Option("--follow", "-f", help="Keep attaching to runs as they start")
@@ -827,10 +827,10 @@ def watch(
     worth reporting. Without `--follow` it exits once the runs it found have
     ended; with it, it keeps looking for new ones until interrupted.
 
-    Given a pipeline folder, it also delivers to that pipeline's notifiers, for
-    runs of that workflow. A declared endpoint whose variable is unset is
-    reported once per signal rather than silently skipped — a notifier nobody
-    can tell is not firing is the failure the declaration exists to prevent.
+    Given a pipeline folder, it also reports to what that pipeline integrates,
+    for runs of that workflow. A destination whose variable is unset is reported
+    once per signal rather than silently skipped — one nobody can tell is not
+    firing is the failure the declaration exists to prevent.
 
     It detaches the moment a run ends, and that is not tidiness: a detached run
     shuts itself down only once every client has disconnected, so a watcher that
@@ -917,7 +917,7 @@ def _report_delivery(results: list[Delivered]) -> None:
     """Say what was reported, and say when it was not.
 
     A failure here is never fatal — the run is unaffected by whether anyone was
-    told about it — but it is always printed, because a notifier that quietly
+    told about it — but it is always printed, because a destination that quietly
     stops working is indistinguishable from a quiet week.
     """
     for result in results:

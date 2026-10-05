@@ -29,7 +29,7 @@ from ictus.interfaces.conductor.runs import token_for
 if TYPE_CHECKING:
     from ictus.interfaces.conductor.runs import LiveRun
 
-__all__ = ["Answered", "answer_gate", "waiting_gate"]
+__all__ = ["Answered", "answer_gate"]
 
 TIMEOUT_SECONDS = 10.0
 
@@ -41,24 +41,6 @@ class Answered:
     accepted: bool
     detail: str = ""
     """Why not, when not. Phrased for whoever clicked, not for a log."""
-
-
-def waiting_gate(run: LiveRun, *, timeout: float = TIMEOUT_SECONDS) -> str | None:
-    """The gate this run is parked on, or ``None`` if it is not waiting.
-
-    Needs no token: reading a run's state is Origin/Host-guarded only.
-    """
-    try:
-        with urllib.request.urlopen(
-            f"{run.dashboard}/api/gate-status", timeout=timeout
-        ) as response:
-            state = json.loads(response.read())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(state, dict) or not state.get("waiting"):
-        return None
-    agent = state.get("agent_name")
-    return agent if isinstance(agent, str) else None
 
 
 def answer_gate(

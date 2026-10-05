@@ -70,8 +70,6 @@ class Click:
     *is* the thread — so both are read and the first that exists wins.
     """
 
-    envelope_id: str = ""
-
 
 def open_socket(app_token: str) -> str:
     """Ask Slack for a websocket URL. Single use, and it expires quickly."""
@@ -168,7 +166,6 @@ def _pressed(envelope: dict[str, object]) -> Iterator[Click]:
             who=who,
             channel=channel,
             thread_ts=thread,
-            envelope_id=str(envelope.get("envelope_id", "")),
         )
 
 

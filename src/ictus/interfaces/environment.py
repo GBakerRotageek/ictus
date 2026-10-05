@@ -96,7 +96,7 @@ def integration_issues(pipeline: Pipeline) -> list[PreflightIssue]:
     """Every declared integration this machine cannot supply a credential for.
 
     Offline only, and deliberately: probing would mean posting something to find
-    out, and a notifier's endpoint is somewhere people read. A preflight that
+    out, and an integration's endpoint is somewhere people read. A preflight that
     announced itself in a channel every time anyone checked a pipeline would be
     turned off, and then the real notification would be ignored with it.
     """

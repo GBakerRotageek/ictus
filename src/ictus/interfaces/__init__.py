@@ -123,7 +123,7 @@ class Capabilities:
 
     A pipeline subscribing to one that is absent is refused while it is being
     written, for the same reason an unsupported ``NodeKind`` is: the alternative
-    is a notifier that is configured, passes preflight, and silently never fires
+    is an integration that is configured, passes preflight, and never fires
     — which looks exactly like a quiet run.
 
     Empty means the engine reports nothing, so any subscription is refused.

@@ -71,7 +71,7 @@ def slack_channel(
         env=(token, channel),
         reports=tuple(reports),
         command="python3",
-        program=_PROGRAM.format(secret=token.name, channel=channel.name, timeout=TIMEOUT_SECONDS),
+        program=_program(secret=token.name, channel=channel.name),
         threads=True,
         setup_hint=setup_hint,
     )
@@ -96,9 +96,20 @@ def slack_webhook(
         env=(url,),
         reports=tuple(reports),
         command="python3",
-        program=_PROGRAM.format(secret=url.name, channel="", timeout=TIMEOUT_SECONDS),
+        program=_program(secret=url.name, channel=""),
         threads=False,
         setup_hint=setup_hint,
+    )
+
+
+def _program(*, secret: str, channel: str) -> str:
+    """The sending program, with this integration's variable names baked in.
+
+    One place that knows the endpoint and the name of its override, so the two
+    cannot drift from the constants above.
+    """
+    return _PROGRAM.format(
+        secret=secret, channel=channel, timeout=TIMEOUT_SECONDS, api=API, api_env=API_ENV
     )
 
 
@@ -141,7 +152,7 @@ if channel:
                 ],
             }},
         ]
-    endpoint = os.environ.get("SLACK_API_URL") or "https://slack.com/api/chat.postMessage"
+    endpoint = os.environ.get({api_env!r}) or {api!r}
     req = r.Request(
         endpoint,
         data=json.dumps(body).encode(),
