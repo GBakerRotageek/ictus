@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_PREFIX", "Asked", "Trigger", "asked", "start"]
+__all__ = ["DEFAULT_PREFIX", "Asked", "Started", "Trigger", "asked", "start"]
 
 #: What somebody types to start one.
 DEFAULT_PREFIX = "Start test run:"
@@ -51,6 +51,23 @@ class Asked:
 
     channel: str
     who: str
+
+
+@dataclass(frozen=True, slots=True)
+class Started:
+    """What became of a request to start a run."""
+
+    why: str = ""
+    """Empty when it started. Otherwise what to tell the person who asked."""
+
+    dashboard: str = ""
+    """Where to watch it. ``ictus run`` prints this and nothing else knows it:
+    the port is assigned by the OS when the run binds, so it cannot be worked
+    out beforehand."""
+
+    @property
+    def ok(self) -> bool:
+        return not self.why
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,8 +120,8 @@ def asked(envelope: dict[str, object], trigger: Trigger) -> Iterator[Asked]:
     )
 
 
-def start(request: Asked, trigger: Trigger) -> str:
-    """Launch a run for ``request``. Returns "" on success, else why not.
+def start(request: Asked, trigger: Trigger) -> Started:
+    """Launch a run for ``request``, and say where to watch it.
 
     Never raises. This is driven by somebody typing in a channel, and every way
     it can fail is something to tell them rather than a traceback in a log.
@@ -127,11 +144,25 @@ def start(request: Asked, trigger: Trigger) -> str:
             check=False,
         )
     except FileNotFoundError:
-        return "`ictus` is not on PATH where the listener is running, so nothing started"
+        return Started("`ictus` is not on PATH where the listener is running, so nothing started")
     except subprocess.TimeoutExpired:
-        return "the run did not finish starting in time"
+        return Started("the run did not finish starting in time")
     if done.returncode != 0:
         # Preflight refusing is the common one, and it has already said which
         # variable or command is missing.
-        return (done.stderr or done.stdout or "it refused to start").strip().splitlines()[-1]
+        last = (done.stderr or done.stdout or "it refused to start").strip().splitlines()[-1]
+        return Started(last)
+    return Started(dashboard=_dashboard(done.stdout))
+
+
+def _dashboard(printed: str) -> str:
+    """The run's dashboard, out of what ``ictus run`` printed.
+
+    Scraped rather than asked for: the port is assigned when the run binds, so
+    the only thing that knows it is the launch itself.
+    """
+    for line in printed.splitlines():
+        _, sep, rest = line.partition("Dashboard:")
+        if sep and rest.strip().startswith("http"):
+            return rest.strip()
     return ""

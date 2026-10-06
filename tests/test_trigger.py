@@ -115,7 +115,7 @@ def test_a_missing_ictus_is_reported_not_raised(monkeypatch: pytest.MonkeyPatch)
         raise FileNotFoundError
 
     monkeypatch.setattr(subprocess, "run", _absent)
-    assert "not on PATH" in start(_ask(), TRIGGER)
+    assert "not on PATH" in start(_ask(), TRIGGER).why
 
 
 def test_a_refusal_comes_back_as_its_last_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +127,7 @@ def test_a_refusal_comes_back_as_its_last_line(monkeypatch: pytest.MonkeyPatch) 
         )
 
     monkeypatch.setattr(subprocess, "run", _refuse)
-    assert start(_ask(), TRIGGER) == "error: $SLACK_BOT_TOKEN is not set"
+    assert start(_ask(), TRIGGER).why == "error: $SLACK_BOT_TOKEN is not set"
 
 
 def test_the_question_and_the_thread_are_passed_as_inputs(
@@ -138,10 +138,10 @@ def test_the_question_and_the_thread_are_passed_as_inputs(
 
     def _record(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
         seen.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "Dashboard: http://127.0.0.1:5123\n", "")
 
     monkeypatch.setattr(subprocess, "run", _record)
-    assert start(_ask(), TRIGGER) == ""
+    assert start(_ask(), TRIGGER).ok
     assert "question=why's it failing?" in seen[0]
     assert "reply_to=1.5" in seen[0]
 
@@ -202,3 +202,27 @@ def test_an_input_called_thread_collides_with_what_announcements_publish() -> No
     p.integrate(service, thread=p.workflow_inputs[0])
     with pytest.raises(CompositionError, match="share one namespace"):
         apply_integrations(p)
+
+
+def test_the_dashboard_is_scraped_from_the_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The only moment it is knowable: the port is assigned when the run binds."""
+
+    def _printed(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 0, "asked in /x\nDashboard: http://127.0.0.1:5123\nrunning\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", _printed)
+    assert start(_ask(), TRIGGER).dashboard == "http://127.0.0.1:5123"
+
+
+def test_a_launch_that_printed_no_dashboard_says_nothing_about_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _quiet(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, "started\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _quiet)
+    started = start(_ask(), TRIGGER)
+    assert started.ok
+    assert started.dashboard == ""

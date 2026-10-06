@@ -1151,13 +1151,22 @@ def _handle_ask(request: Asked, trigger: Trigger, bot: str) -> None:
     missing credential — is something the person who asked can act on.
     """
     typer.echo(f"  ask from {request.who}: {request.question[:60]}")
-    why = start(request, trigger)
+    started = start(request, trigger)
     line = (
         f"Working on it — <@{request.who}> asked about *{request.question[:120]}*"
-        if not why
-        else f"Could not start: {why}"
+        if started.ok
+        else f"Could not start: {started.why}"
     )
-    typer.secho(f"    -> {line}", fg=typer.colors.RED if why else typer.colors.BRIGHT_BLACK)
+    if started.dashboard:
+        # The only moment anybody can learn it: the port is assigned when the
+        # run binds, and the run outlives the command that printed it.
+        line += f"\n{started.dashboard}"
+    typer.secho(
+        f"    -> {line.splitlines()[0]}",
+        fg=typer.colors.BRIGHT_BLACK if started.ok else typer.colors.RED,
+    )
+    if started.dashboard:
+        typer.secho(f"    -> {started.dashboard}", fg=typer.colors.CYAN)
     said = reply(token=bot, channel=request.channel, thread_ts=request.thread, text=line)
     if said:
         typer.secho(f"    -> could not say so in the thread: {said}", fg=typer.colors.RED)
