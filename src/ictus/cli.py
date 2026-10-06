@@ -39,6 +39,13 @@ from ictus.notify.slack.listen import (
     say,
     verdict,
 )
+from ictus.notify.slack.send import reply
+from ictus.notify.slack.trigger import (
+    DEFAULT_PREFIX,
+    Asked,
+    Trigger,
+    start,
+)
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
@@ -1018,6 +1025,14 @@ def listen(
         list[str] | None,
         typer.Option("--allow", help="Slack user id that may answer; repeatable"),
     ] = None,
+    start_folder: Annotated[
+        Path | None,
+        typer.Option("--start", help="Pipeline folder to run when somebody asks for one"),
+    ] = None,
+    prefix: Annotated[
+        str,
+        typer.Option("--prefix", help="What somebody types to ask for a run"),
+    ] = DEFAULT_PREFIX,
 ) -> None:
     """Answer gates from Slack, by listening for button presses.
 
@@ -1057,19 +1072,53 @@ def listen(
         )
         return
     permitted = frozenset(allow or ())
+    watch_for = Trigger(folder=start_folder, prefix=prefix) if start_folder is not None else None
     typer.secho(
         "listening for button presses"
         + (f"; only {', '.join(sorted(permitted))} may answer" if permitted else ""),
         fg=typer.colors.CYAN,
     )
+    if watch_for is not None:
+        typer.secho(
+            f'starting {watch_for.folder} on "{watch_for.prefix} ..."', fg=typer.colors.CYAN
+        )
+    seen: set[str] = set()
     with ThreadPoolExecutor(max_workers=LISTEN_WORKERS) as pool:
         try:
-            for event in presses(token):
+            for event in presses(token, trigger=watch_for):
+                if isinstance(event, Asked):
+                    # Slack redelivers what it thinks was not acknowledged, and a
+                    # redelivery reads exactly like somebody asking twice.
+                    if event.thread in seen or watch_for is None:
+                        continue
+                    seen.add(event.thread)
+                    pool.submit(_handle_ask, event, watch_for, bot)
+                    continue
                 pool.submit(_handle_press, event, permitted, bot)
         except KeyboardInterrupt:
             typer.secho("\nstopped listening; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
         except SlackError as exc:
             _fail(str(exc))
+
+
+def _handle_ask(request: Asked, trigger: Trigger, bot: str) -> None:
+    """Start a run for one request, and say in its thread what became of it.
+
+    The acknowledgement is the point. Starting a run takes long enough that
+    silence reads as a bot that is not listening, and a refusal — preflight, a
+    missing credential — is something the person who asked can act on.
+    """
+    typer.echo(f"  ask from {request.who}: {request.question[:60]}")
+    why = start(request, trigger)
+    line = (
+        f"Working on it — <@{request.who}> asked about *{request.question[:120]}*"
+        if not why
+        else f"Could not start: {why}"
+    )
+    typer.secho(f"    -> {line}", fg=typer.colors.RED if why else typer.colors.BRIGHT_BLACK)
+    said = reply(token=bot, channel=request.channel, thread_ts=request.thread, text=line)
+    if said:
+        typer.secho(f"    -> could not say so in the thread: {said}", fg=typer.colors.RED)
 
 
 def _handle_press(event: Click | Note, permitted: frozenset[str], bot: str) -> None:

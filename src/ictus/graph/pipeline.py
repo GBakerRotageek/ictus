@@ -307,6 +307,7 @@ class Pipeline:
         self._mcp: dict[str, McpServer] = {}
         self._executables: dict[str, Executable] = {}
         self._integrations: dict[str, Integration] = {}
+        self._threads: dict[str, WorkflowInput] = {}
         self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
@@ -560,8 +561,14 @@ class Pipeline:
         """What runs before the start gate, if anything was asked to."""
         return self._before_start
 
-    def integrate(self, service: Integration) -> Integration:
+    def integrate(
+        self, service: Integration, *, thread: WorkflowInput | None = None
+    ) -> Integration:
         """Declare a third-party service this pipeline talks to.
+
+        ``thread`` says the conversation is already open and names the input it
+        arrives in — a run started *by* a message reports under that message
+        rather than beside it. Without one a run opens its own.
 
         Put these at the top of a pipeline. A reader should see what a run will
         reach outside the machine before they read what it does, and whoever
@@ -578,8 +585,24 @@ class Pipeline:
                 f"pipeline {self.pipeline_id!r} already integrates something called "
                 f"{service.name!r}; names are how one is addressed and must be unique"
             )
+        if thread is not None:
+            if self._inputs.get(thread.name) is not thread:
+                raise CompositionError(
+                    f"pipeline {self.pipeline_id!r} reports into {thread.name!r}, which it "
+                    "does not declare as an input; declare_input it first"
+                )
+            if thread.port_type is not PortType.STRING:
+                raise CompositionError(
+                    f"pipeline {self.pipeline_id!r} reports into {thread.name!r}, which is "
+                    f"{thread.port_type.value}; a conversation is addressed by a string"
+                )
+            self._threads[service.name] = thread
         self._integrations[service.name] = service
         return service
+
+    def thread_for(self, service: Integration) -> WorkflowInput | None:
+        """The input a run's conversation arrives in, if it was given one."""
+        return self._threads.get(service.name)
 
     @property
     def integrations(self) -> tuple[Integration, ...]:
