@@ -25,6 +25,7 @@ from ictus.integrate import apply_integrations
 from ictus.interfaces.conductor import conductor
 from ictus.interfaces.conductor.events import history, step_outputs
 from ictus.interfaces.conductor.events import watch as watch_run
+from ictus.interfaces.conductor.manifest import SUFFIX as MANIFEST_SUFFIX
 from ictus.interfaces.conductor.runs import LiveRun, live_runs
 from ictus.interfaces.conductor.trace import LOG_DIR, find_logs, read_trace
 from ictus.lint import lint_pipeline
@@ -40,12 +41,7 @@ from ictus.notify.slack.listen import (
     verdict,
 )
 from ictus.notify.slack.send import reply
-from ictus.notify.slack.trigger import (
-    DEFAULT_PREFIX,
-    Asked,
-    Trigger,
-    start,
-)
+from ictus.notify.slack.trigger import Asked, start, triggers_in
 from ictus.runspec import PipelineFolder, read_input_file
 from ictus.scaffold import STARTER_INPUT, STARTER_PIPELINE
 
@@ -247,10 +243,16 @@ def _write(pipeline: Pipeline, out: Path) -> list[_Written]:
 
 
 def _prune(destination: Path, keep: set[Path]) -> list[Path]:
-    """Delete YAML in ``destination`` that no pipeline claims."""
+    """Delete compiled output in ``destination`` that no pipeline claims.
+
+    Manifests as well as workflows: deleting a ``listen_on`` line has to stop
+    the listener starting that pipeline, and a stale manifest left behind would
+    go on matching messages against a prefix nothing declares any more.
+    """
     if not destination.is_dir():
         return []
-    stale = sorted(set(destination.glob("*.yaml")) - keep)
+    compiled = set(destination.glob("*.yaml")) | set(destination.glob(f"*{MANIFEST_SUFFIX}"))
+    stale = sorted(compiled - keep)
     for path in stale:
         path.unlink()
     return stale
@@ -328,8 +330,13 @@ def emit(
             pruned.extend(_prune(destination, keep))
 
     _report_written(written, pruned)
+    # Manifests are not workflows, and counting them as such reads as a stage
+    # nobody wrote.
+    workflows = sum(1 for item in written if item.path.suffix == ".yaml")
+    listening = len(written) - workflows
+    tail = f", {listening} listening" if listening else ""
     typer.secho(
-        f"{len(written)} workflow(s) from {len(pipelines)} pipeline(s)", fg=typer.colors.GREEN
+        f"{workflows} workflow(s) from {len(pipelines)} pipeline(s){tail}", fg=typer.colors.GREEN
     )
 
 
@@ -385,7 +392,8 @@ def preflight(
         declared = pipeline.all_mcp_servers()
         commands = pipeline.all_executables()
         reporting = pipeline.all_integrations()
-        total = len(declared) + len(commands) + len(reporting)
+        reading = pipeline.all_datasources()
+        total = len(declared) + len(commands) + len(reporting) + len(reading)
         typer.echo(f"{pipeline.pipeline_id}: {total} requirement(s) declared")
         for server in declared:
             typer.echo(f"  - mcp:{server.name} — {server.purpose}")
@@ -393,6 +401,9 @@ def preflight(
             typer.echo(f"  - exe:{tool.name} — {tool.purpose}")
         for service in reporting:
             typer.echo(f"  - integrate:{service.name} — {service.purpose}")
+        for source in reading:
+            access = "read-only" if source.read_only else "WRITABLE"
+            typer.echo(f"  - read:{source.name} ({access}) — {source.purpose}")
         issues.extend(BACKEND.preflight(pipeline, probe=probe))
     _report_preflight(issues, probed=probe)
     if any(i.blocking for i in issues):
@@ -1027,51 +1038,16 @@ BOT_TOKEN_ENV = "SLACK_BOT_TOKEN"
 LISTEN_WORKERS = 4
 
 
-def _check_trigger(trigger: Trigger) -> None:
-    """Refuse a trigger whose pipeline cannot take what it would be passed.
-
-    At startup rather than at the first message. The alternative is a listener
-    that looks healthy for a week and then tells somebody, in public, that the
-    thing they just asked for cannot start.
-    """
-    try:
-        pipeline = _only(PipelineFolder.at(trigger.folder))
-    except IctusError as exc:
-        _fail(f"--start {trigger.folder}: {exc}")
-        return
-    declared = {param.name for param in pipeline.workflow_inputs}
-    missing = sorted({trigger.question_input, trigger.thread_input} - declared)
-    if missing:
-        known = ", ".join(sorted(declared)) or "(none)"
-        _fail(
-            f"--start {trigger.folder}: {pipeline.pipeline_id!r} declares no {missing}; "
-            f"it declares {known}. Add them with declare_input, or name the ones it has "
-            "with --question-input and --thread-input."
-        )
-
-
 @app.command()
 def listen(
+    where: Annotated[
+        Path | None,
+        typer.Argument(help="A built pipeline folder, or a directory of them, to start runs from"),
+    ] = None,
     allow: Annotated[
         list[str] | None,
         typer.Option("--allow", help="Slack user id that may answer; repeatable"),
     ] = None,
-    start_folder: Annotated[
-        Path | None,
-        typer.Option("--start", help="Pipeline folder to run when somebody asks for one"),
-    ] = None,
-    prefix: Annotated[
-        str,
-        typer.Option("--prefix", help="What somebody types to ask for a run"),
-    ] = DEFAULT_PREFIX,
-    question_input: Annotated[
-        str,
-        typer.Option("--question-input", help="The input the question is passed as"),
-    ] = "question",
-    thread_input: Annotated[
-        str,
-        typer.Option("--thread-input", help="The input the conversation is passed as"),
-    ] = "reply_to",
 ) -> None:
     """Answer gates from Slack, by listening for button presses.
 
@@ -1111,38 +1087,39 @@ def listen(
         )
         return
     permitted = frozenset(allow or ())
-    watch_for = (
-        Trigger(
-            folder=start_folder,
-            prefix=prefix,
-            question_input=question_input,
-            thread_input=thread_input,
+    watching = triggers_in(where) if where is not None else []
+    if where is not None and not watching:
+        _fail(
+            f"no manifests under {where}. A pipeline is startable from a channel once it "
+            "declares `listen_on(...)` and has been emitted; without that this would "
+            "listen for a prefix nothing claims."
         )
-        if start_folder is not None
-        else None
-    )
-    if watch_for is not None:
-        _check_trigger(watch_for)
     typer.secho(
         "listening for button presses"
         + (f"; only {', '.join(sorted(permitted))} may answer" if permitted else ""),
         fg=typer.colors.CYAN,
     )
-    if watch_for is not None:
+    for trigger in watching:
         typer.secho(
-            f'starting {watch_for.folder} on "{watch_for.prefix} ..."', fg=typer.colors.CYAN
+            f'starting {trigger.pipeline or trigger.workflow.name} on "{trigger.prefix} ..."',
+            fg=typer.colors.CYAN,
         )
+        # At startup, not at the first message: a listener that looks healthy
+        # for a week and then says in public that it cannot start the thing
+        # somebody just asked for is the failure this is here to prevent.
+        for gap in trigger.missing():
+            typer.secho(f"  warn  {gap}", fg=typer.colors.YELLOW)
     seen: set[str] = set()
     with ThreadPoolExecutor(max_workers=LISTEN_WORKERS) as pool:
         try:
-            for event in presses(token, trigger=watch_for):
+            for event in presses(token, triggers=watching):
                 if isinstance(event, Asked):
                     # Slack redelivers what it thinks was not acknowledged, and a
                     # redelivery reads exactly like somebody asking twice.
-                    if event.thread in seen or watch_for is None:
+                    if event.thread in seen or event.trigger is None:
                         continue
                     seen.add(event.thread)
-                    pool.submit(_handle_ask, event, watch_for, bot)
+                    pool.submit(_handle_ask, event, bot)
                     continue
                 pool.submit(_handle_press, event, permitted, bot)
         except KeyboardInterrupt:
@@ -1151,7 +1128,7 @@ def listen(
             _fail(str(exc))
 
 
-def _handle_ask(request: Asked, trigger: Trigger, bot: str) -> None:
+def _handle_ask(request: Asked, bot: str) -> None:
     """Start a run for one request, and say in its thread what became of it.
 
     The acknowledgement is the point. Starting a run takes long enough that
@@ -1159,7 +1136,9 @@ def _handle_ask(request: Asked, trigger: Trigger, bot: str) -> None:
     missing credential — is something the person who asked can act on.
     """
     typer.echo(f"  ask from {request.who}: {request.question[:60]}")
-    started = start(request, trigger)
+    if request.trigger is None:  # pragma: no cover - the caller already checked
+        return
+    started = start(request, request.trigger)
     line = (
         f"Working on it — <@{request.who}> asked about *{request.question[:120]}*"
         if started.ok

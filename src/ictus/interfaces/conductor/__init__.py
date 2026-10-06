@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from ictus.errors import IctusError
 from ictus.graph.node import NODE_KINDS
 from ictus.interfaces import Capabilities, Document, PreflightIssue, ValidationResult
+from ictus.interfaces.conductor import manifest
 from ictus.interfaces.conductor.agents import agent_entry
 from ictus.interfaces.conductor.lints import conductor_problems
 from ictus.interfaces.conductor.mapping import for_each_block
@@ -29,7 +30,11 @@ from ictus.interfaces.conductor.serialize import dump_yaml
 from ictus.interfaces.conductor.signals import REPORTABLE
 from ictus.interfaces.conductor.templates import output_block
 from ictus.interfaces.conductor.workflow import NOTHING_INHERITED, Inherited, workflow_block
-from ictus.interfaces.environment import executable_issues, integration_issues
+from ictus.interfaces.environment import (
+    datasource_issues,
+    executable_issues,
+    integration_issues,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -38,9 +43,61 @@ if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.values import YamlDict, YamlValue
 
-__all__ = ["ConductorBackend", "conductor"]
+__all__ = ["ConductorBackend", "binary", "conductor", "launch_command"]
 
 BINARY = "conductor"
+
+
+def binary() -> str:
+    """The Conductor executable, or a ``FileNotFoundError`` naming what is missing."""
+    found = shutil.which(BINARY)
+    if found is None:
+        raise FileNotFoundError(
+            f"{BINARY!r} is not on PATH; the Conductor backend cannot check or run "
+            "what it compiles without it"
+        )
+    return found
+
+
+def launch_command(
+    executable: str,
+    path: Path,
+    *,
+    inputs: Mapping[str, str],
+    dashboard: bool,
+    background: bool = False,
+    workspace_instructions: bool = True,
+    log_file: str | None = None,
+) -> list[str]:
+    """The argv that runs one compiled workflow.
+
+    Built here rather than at each call site so that everything which starts a
+    run — the CLI, and a listener acting on a message — spells the flags the
+    same way. The difference between ``--web`` and ``--web-bg`` decides whether
+    a gate can be answered from outside the process, which is not a detail to
+    get independently right in two places.
+    """
+    command = [executable, "run", str(path.resolve())]
+    for name, value in inputs.items():
+        command += ["-i", f"{name}={value}"]
+    if log_file is not None:
+        # Passed through verbatim: `auto` is Conductor's own spelling for a
+        # generated temp path, and anything else is taken as a file path.
+        command += ["--log-file", log_file]
+    if workspace_instructions:
+        # The provider runs every step with `setting_sources=[]` — no
+        # CLAUDE.md, no settings, no ambient skills — so a step arrives
+        # knowing nothing the project says about itself. This flag is the
+        # engine's own opt-in: it walks from the working directory up to the
+        # git root and prepends AGENTS.md, .github/copilot-instructions.md,
+        # CLAUDE.md and .github/instructions/*.instructions.md to every
+        # prompt. Nothing else ictus can emit reaches those files.
+        command.append("--workspace-instructions")
+    if background:
+        command.append("--web-bg")
+    elif dashboard:
+        command.append("--web")
+    return command
 
 
 class ConductorBackend:
@@ -111,6 +168,12 @@ class ConductorBackend:
         out = [
             Document(f"{pipeline.pipeline_id}.yaml", dump_yaml(self.document(pipeline, inherited)))
         ]
+        # Only here, never for a stage: a stage is reached through its caller
+        # and has no run of its own for a message to start.
+        if inherited is NOTHING_INHERITED:
+            listening = manifest.render(pipeline)
+            if listening:
+                out.append(Document(manifest.filename_for(pipeline), listening))
         seen = {out[0].filename}
         below = inherited.under(pipeline)
         for child in pipeline.children.values():
@@ -139,6 +202,7 @@ class ConductorBackend:
         return [
             *executable_issues(pipeline, probe=probe),
             *integration_issues(pipeline),
+            *datasource_issues(pipeline),
             *preflight_issues(pipeline, probe=probe),
         ]
 
@@ -193,26 +257,15 @@ class ConductorBackend:
                 "background run without one cannot be reached, and there is no flag "
                 "that does it. Ask for one or the other."
             )
-        command = [self._binary(), "run", str(path.resolve())]
-        for name, value in inputs.items():
-            command += ["-i", f"{name}={value}"]
-        if log_file is not None:
-            # Passed through verbatim: `auto` is Conductor's own spelling for a
-            # generated temp path, and anything else is taken as a file path.
-            command += ["--log-file", log_file]
-        if workspace_instructions:
-            # The provider runs every step with `setting_sources=[]` — no
-            # CLAUDE.md, no settings, no ambient skills — so a step arrives
-            # knowing nothing the project says about itself. This flag is the
-            # engine's own opt-in: it walks from the working directory up to the
-            # git root and prepends AGENTS.md, .github/copilot-instructions.md,
-            # CLAUDE.md and .github/instructions/*.instructions.md to every
-            # prompt. Nothing else ictus can emit reaches those files.
-            command.append("--workspace-instructions")
-        if background:
-            command.append("--web-bg")
-        elif dashboard:
-            command.append("--web")
+        command = launch_command(
+            self._binary(),
+            path,
+            inputs=inputs,
+            dashboard=dashboard,
+            background=background,
+            workspace_instructions=workspace_instructions,
+            log_file=log_file,
+        )
         return subprocess.run(command, check=False, cwd=working_dir).returncode
 
     def plan(self, path: Path, *, working_dir: Path | None = None) -> int:
@@ -230,13 +283,7 @@ class ConductorBackend:
 
     @staticmethod
     def _binary() -> str:
-        found = shutil.which(BINARY)
-        if found is None:
-            raise FileNotFoundError(
-                f"{BINARY!r} is not on PATH; the Conductor backend cannot check or run "
-                "what it compiles without it"
-            )
-        return found
+        return binary()
 
 
 conductor = ConductorBackend()

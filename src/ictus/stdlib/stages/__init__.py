@@ -10,6 +10,7 @@ from __future__ import annotations
 from ictus.stdlib.stages.briefing_gate import APPROVE_OR_REJECT, ReviewOption, briefing_gate
 from ictus.stdlib.stages.converge import CONVERGED, EXHAUSTED, Attempt, converge
 from ictus.stdlib.stages.council import AGREED, HALTED, UNRESOLVED, Voice, council
+from ictus.stdlib.stages.investigate import ANSWERED, investigate
 from ictus.stdlib.stages.resolve_unknowns import resolve_unknowns
 from ictus.stdlib.stages.roundtable import Speaker, roundtable
 from ictus.stdlib.stages.script_sequence import ScriptStep, script_sequence
@@ -18,6 +19,7 @@ from ictus.stdlib.stages.validate_mcps import validate_mcps
 
 __all__ = [
     "AGREED",
+    "ANSWERED",
     "APPROVE_OR_REJECT",
     "CONVERGED",
     "EXHAUSTED",
@@ -33,6 +35,7 @@ __all__ = [
     "briefing_gate",
     "converge",
     "council",
+    "investigate",
     "resolve_unknowns",
     "roundtable",
     "script_sequence",

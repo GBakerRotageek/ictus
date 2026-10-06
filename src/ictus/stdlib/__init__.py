@@ -17,6 +17,7 @@ from ictus.stdlib.agents import briefing, remediate, validate_mcp, verdict, voic
 from ictus.stdlib.gates import approval_gate, ask_human, ask_human_for, choice_gate
 from ictus.stdlib.stages import (
     AGREED,
+    ANSWERED,
     APPROVE_OR_REJECT,
     CONVERGED,
     EXHAUSTED,
@@ -32,17 +33,29 @@ from ictus.stdlib.stages import (
     briefing_gate,
     converge,
     council,
+    investigate,
     resolve_unknowns,
     roundtable,
     script_sequence,
     try_shell,
     validate_mcps,
 )
-from ictus.stdlib.steps import announce, bindings, constant, counter, save_text, shell, wait
+from ictus.stdlib.steps import (
+    announce,
+    bindings,
+    comment,
+    constant,
+    counter,
+    query,
+    save_text,
+    shell,
+    wait,
+)
 from ictus.stdlib.terminals import fail, succeed
 
 __all__ = [
     "AGREED",
+    "ANSWERED",
     "APPROVE_OR_REJECT",
     "CONVERGED",
     "EXHAUSTED",
@@ -63,11 +76,14 @@ __all__ = [
     "briefing",
     "briefing_gate",
     "choice_gate",
+    "comment",
     "constant",
     "converge",
     "council",
     "counter",
     "fail",
+    "investigate",
+    "query",
     "remediate",
     "resolve_unknowns",
     "roundtable",

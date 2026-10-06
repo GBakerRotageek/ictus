@@ -63,7 +63,24 @@ def _channel(**over: object) -> Integration:
 
 # --- the air gap -------------------------------------------------------------
 
-VENDOR = ("slack", "thread_ts", "chat.postmessage", "xoxb", "block kit")
+VENDOR = (
+    "slack",
+    "thread_ts",
+    "chat.postmessage",
+    "xoxb",
+    "block kit",
+    # Every destination and every source, not only the first one written.
+    # A boundary that only knows the service it was built for stops being a
+    # rule and becomes a note about history.
+    "jira",
+    "atlassian",
+    "adf",
+    "postgres",
+    "psql",
+    "pgoptions",
+    "sqlite",
+    "dsn",
+)
 
 
 @pytest.mark.parametrize("package", ["graph", "stdlib", "lint"])

@@ -67,6 +67,10 @@ def slack_channel(
     """A channel reported into through ``chat.postMessage``.
 
     Threads, so several runs at once stay legible. Needs a bot token.
+
+    Listens, too: `ictus listen` holds a socket open to the same workspace, so
+    a pipeline can declare that a message here starts it. That needs an
+    app-level token as well, read by the listener rather than by a run.
     """
     return Integration(
         name=name,
@@ -76,6 +80,8 @@ def slack_channel(
         command="python3",
         program=_program(secret=token.name, channel=channel.name),
         threads=True,
+        listens=True,
+        comments=False,
         setup_hint=setup_hint,
     )
 
@@ -91,7 +97,9 @@ def slack_webhook(
     """A channel posted into through an incoming webhook.
 
     Simpler to set up and strictly less capable: no threads and no buttons, so
-    runs interleave and nothing can be answered from Slack.
+    runs interleave and nothing can be answered from Slack. One-way as well —
+    a webhook is an address to post to, with nothing to hold open and nothing
+    to read — so it cannot start a run either.
     """
     return Integration(
         name=name,
