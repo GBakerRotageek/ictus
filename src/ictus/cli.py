@@ -1019,6 +1019,29 @@ BOT_TOKEN_ENV = "SLACK_BOT_TOKEN"
 LISTEN_WORKERS = 4
 
 
+def _check_trigger(trigger: Trigger) -> None:
+    """Refuse a trigger whose pipeline cannot take what it would be passed.
+
+    At startup rather than at the first message. The alternative is a listener
+    that looks healthy for a week and then tells somebody, in public, that the
+    thing they just asked for cannot start.
+    """
+    try:
+        pipeline = _only(PipelineFolder.at(trigger.folder))
+    except IctusError as exc:
+        _fail(f"--start {trigger.folder}: {exc}")
+        return
+    declared = {param.name for param in pipeline.workflow_inputs}
+    missing = sorted({trigger.question_input, trigger.thread_input} - declared)
+    if missing:
+        known = ", ".join(sorted(declared)) or "(none)"
+        _fail(
+            f"--start {trigger.folder}: {pipeline.pipeline_id!r} declares no {missing}; "
+            f"it declares {known}. Add them with declare_input, or name the ones it has "
+            "with --question-input and --thread-input."
+        )
+
+
 @app.command()
 def listen(
     allow: Annotated[
@@ -1033,6 +1056,14 @@ def listen(
         str,
         typer.Option("--prefix", help="What somebody types to ask for a run"),
     ] = DEFAULT_PREFIX,
+    question_input: Annotated[
+        str,
+        typer.Option("--question-input", help="The input the question is passed as"),
+    ] = "question",
+    thread_input: Annotated[
+        str,
+        typer.Option("--thread-input", help="The input the conversation is passed as"),
+    ] = "reply_to",
 ) -> None:
     """Answer gates from Slack, by listening for button presses.
 
@@ -1072,7 +1103,18 @@ def listen(
         )
         return
     permitted = frozenset(allow or ())
-    watch_for = Trigger(folder=start_folder, prefix=prefix) if start_folder is not None else None
+    watch_for = (
+        Trigger(
+            folder=start_folder,
+            prefix=prefix,
+            question_input=question_input,
+            thread_input=thread_input,
+        )
+        if start_folder is not None
+        else None
+    )
+    if watch_for is not None:
+        _check_trigger(watch_for)
     typer.secho(
         "listening for button presses"
         + (f"; only {', '.join(sorted(permitted))} may answer" if permitted else ""),

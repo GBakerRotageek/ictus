@@ -60,7 +60,9 @@ class Trigger:
     folder: Path
     prefix: str = DEFAULT_PREFIX
     question_input: str = "question"
-    thread_input: str = "thread"
+    thread_input: str = "reply_to"
+    """Not ``thread``: that name collides with what an announcement publishes,
+    so no pipeline can declare an input called it."""
 
     @property
     def pattern(self) -> re.Pattern[str]:

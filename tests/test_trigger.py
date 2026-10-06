@@ -143,7 +143,7 @@ def test_the_question_and_the_thread_are_passed_as_inputs(
     monkeypatch.setattr(subprocess, "run", _record)
     assert start(_ask(), TRIGGER) == ""
     assert "question=why's it failing?" in seen[0]
-    assert "thread=1.5" in seen[0]
+    assert "reply_to=1.5" in seen[0]
 
 
 # --- a run that reports into somebody else's conversation --------------------
