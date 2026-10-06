@@ -26,6 +26,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ictus.interfaces.conductor.runs import live_runs
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
@@ -61,9 +63,9 @@ class Started:
     """Empty when it started. Otherwise what to tell the person who asked."""
 
     dashboard: str = ""
-    """Where to watch it. ``ictus run`` prints this and nothing else knows it:
-    the port is assigned by the OS when the run binds, so it cannot be worked
-    out beforehand."""
+    """Where to watch it, from the run's own record."""
+
+    run_id: str = ""
 
     @property
     def ok(self) -> bool:
@@ -135,6 +137,11 @@ def start(request: Asked, trigger: Trigger) -> Started:
         "-i",
         f"{trigger.thread_input}={request.thread}",
     ]
+    # Which runs were already going. The launcher prints the dashboard only to
+    # a terminal, so a subprocess sees nothing of it — the run's own record is
+    # where the port actually lives, and the new id is whatever was not there a
+    # moment ago.
+    before = {run.run_id for run in live_runs()}
     try:
         done = subprocess.run(
             command,
@@ -152,17 +159,17 @@ def start(request: Asked, trigger: Trigger) -> Started:
         # variable or command is missing.
         last = (done.stderr or done.stdout or "it refused to start").strip().splitlines()[-1]
         return Started(last)
-    return Started(dashboard=_dashboard(done.stdout))
+    return _launched(before)
 
 
-def _dashboard(printed: str) -> str:
-    """The run's dashboard, out of what ``ictus run`` printed.
+def _launched(before: set[str]) -> Started:
+    """The run that was not there before, and where to watch it.
 
-    Scraped rather than asked for: the port is assigned when the run binds, so
-    the only thing that knows it is the launch itself.
+    Returns a bare success if it cannot be told apart — two launches at once, or
+    a record not yet written. Reporting no address is a smaller failure than
+    reporting somebody else's.
     """
-    for line in printed.splitlines():
-        _, sep, rest = line.partition("Dashboard:")
-        if sep and rest.strip().startswith("http"):
-            return rest.strip()
-    return ""
+    fresh = [run for run in live_runs() if run.run_id not in before]
+    if len(fresh) != 1:
+        return Started()
+    return Started(dashboard=fresh[0].dashboard, run_id=fresh[0].run_id)

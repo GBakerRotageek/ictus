@@ -43,6 +43,7 @@ _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
 _GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
 
 ContextMode = Literal["accumulate", "last_only", "explicit"]
+NativeTools = Literal["none", "claude_code"]
 BudgetMode = Literal["audit", "enforce"]
 
 
@@ -254,6 +255,14 @@ class Pipeline:
         # copilot before.
         self.provider = provider
         self.default_model = default_model
+        self.native_tools: NativeTools | None = None
+        """Whether a step that names no tools gets the engine's built-in set.
+
+        Off unless asked for. A step with no ``tools`` used to be handed the
+        filesystem, a shell and the web without the pipeline ever saying so,
+        which Conductor closed — and closing it means a step that was reading
+        files now quietly answers from memory instead. Set it where the policy
+        lives, so the diff shows which pipelines can touch a disk."""
         self.context_mode: ContextMode = context_mode
         self.context_max_tokens = context_max_tokens
         """A soft ceiling on accumulated context, above which the engine trims.

@@ -10,6 +10,7 @@ import pytest
 from ictus import EnvVar, Integration, Pipeline, PortType, RunSignal, WorkflowInput
 from ictus.errors import CompositionError
 from ictus.integrate import OPENER_ID, apply_integrations
+from ictus.interfaces.conductor.runs import LiveRun
 from ictus.notify.slack import slack_channel
 from ictus.notify.slack.listen import events
 from ictus.notify.slack.trigger import DEFAULT_PREFIX, Asked, Trigger, asked, start
@@ -138,7 +139,7 @@ def test_the_question_and_the_thread_are_passed_as_inputs(
 
     def _record(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
         seen.append(command)
-        return subprocess.CompletedProcess(command, 0, "Dashboard: http://127.0.0.1:5123\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", _record)
     assert start(_ask(), TRIGGER).ok
@@ -204,25 +205,33 @@ def test_an_input_called_thread_collides_with_what_announcements_publish() -> No
         apply_integrations(p)
 
 
-def test_the_dashboard_is_scraped_from_the_launch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The only moment it is knowable: the port is assigned when the run binds."""
+def test_the_dashboard_comes_from_the_run_s_own_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launcher prints it only to a terminal, so a subprocess sees nothing."""
+    run = LiveRun(run_id="new1", workflow="asked", port=5123, pid=1, started_at="2026")
+    calls = iter([[], [run]])
 
-    def _printed(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            command, 0, "asked in /x\nDashboard: http://127.0.0.1:5123\nrunning\n", ""
-        )
+    monkeypatch.setattr("ictus.notify.slack.trigger.live_runs", lambda *_, **__: next(calls))
+    monkeypatch.setattr(
+        subprocess, "run", lambda c, **__: subprocess.CompletedProcess(c, 0, "", "")
+    )
+    started = start(_ask(), TRIGGER)
+    assert started.dashboard == "http://127.0.0.1:5123"
+    assert started.run_id == "new1"
 
-    monkeypatch.setattr(subprocess, "run", _printed)
-    assert start(_ask(), TRIGGER).dashboard == "http://127.0.0.1:5123"
 
-
-def test_a_launch_that_printed_no_dashboard_says_nothing_about_one(
+def test_two_launches_at_once_report_no_address_rather_than_the_wrong_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _quiet(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 0, "started\n", "")
-
-    monkeypatch.setattr(subprocess, "run", _quiet)
+    """Somebody else's dashboard is a worse answer than none."""
+    pair = [
+        LiveRun(run_id="a", workflow="asked", port=1, pid=1, started_at="2026"),
+        LiveRun(run_id="b", workflow="asked", port=2, pid=2, started_at="2026"),
+    ]
+    calls = iter([[], pair])
+    monkeypatch.setattr("ictus.notify.slack.trigger.live_runs", lambda *_, **__: next(calls))
+    monkeypatch.setattr(
+        subprocess, "run", lambda c, **__: subprocess.CompletedProcess(c, 0, "", "")
+    )
     started = start(_ask(), TRIGGER)
     assert started.ok
     assert started.dashboard == ""

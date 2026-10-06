@@ -637,20 +637,22 @@ def run(
     except FileNotFoundError as exc:
         _fail(str(exc))
         return
-    _report_activity(pipeline.pipeline_id, background=background)
+    _report_activity(pipeline.pipeline_id, folder, background=background)
     raise typer.Exit(code=code)
 
 
-def _report_activity(workflow: str, *, background: bool) -> None:
+def _report_activity(workflow: str, folder: Path, *, background: bool) -> None:
     """Say which steps answered without looking at anything.
 
     A run's exit code says whether it finished, not whether it thought. The
     engine already records every tool call; not reading them back is how a
     council shipped a report whose findings nobody had checked. A background run
-    is still going, so it gets the command instead of the answer.
+    is still going, so it gets the command instead of the answer — naming the
+    folder, because that is what `ictus trace` takes and the workflow's own
+    name is the thing somebody would otherwise type.
     """
     if background:
-        typer.secho(f"\nwhen it finishes: ictus trace {workflow}", fg=typer.colors.BRIGHT_BLACK)
+        typer.secho(f"\nwhen it finishes: ictus trace {folder}", fg=typer.colors.BRIGHT_BLACK)
         return
     found = find_logs(workflow)
     if not found:

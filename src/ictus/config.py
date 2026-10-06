@@ -31,7 +31,7 @@ from ictus.baseline import AGENT_BASELINE, NO_BASELINE
 from ictus.errors import IctusError
 
 if TYPE_CHECKING:
-    from ictus.graph.pipeline import Pipeline
+    from ictus.graph.pipeline import NativeTools, Pipeline
 
 __all__ = ["CONFIG_FILE", "MINIMAL", "ConfigError", "PipelineConfig", "read_config"]
 
@@ -54,6 +54,7 @@ _KNOWN = frozenset(
         "instructions",
         "workspace_instructions",
         "system_prompt",
+        "native_tools",
     }
 )
 
@@ -86,6 +87,17 @@ class PipelineConfig:
 
     dashboard: bool = True
     """Whether ``ictus run`` serves the dashboard. A gated run needs one."""
+
+    native_tools: NativeTools = "none"
+    """Whether a step that names no tools may read files, run commands, or fetch.
+
+    Off, which is the engine's own default and was not always: a step with no
+    ``tools`` used to be handed the filesystem, a shell and the web without any
+    pipeline saying so. Closing that was right and it is not free — a step that
+    was reading the repository now answers from memory and sounds no different
+    doing it, because nothing fails. Turn it on where a step is meant to go and
+    look, and the diff shows which pipelines can touch a disk.
+    """
 
     system_prompt: str | None = AGENT_BASELINE
     """What every model call is told about how to work, unless it sets its own.
@@ -165,6 +177,22 @@ class PipelineConfig:
             pipeline.instructions = list(self.instructions)
         if pipeline.system_prompt is None:
             pipeline.system_prompt = self.system_prompt
+        if pipeline.native_tools is None:
+            pipeline.native_tools = self.native_tools
+
+
+def _native_tools(loaded: dict[str, object], where: str) -> NativeTools:
+    """``native_tools``, which only takes the two values the engine knows."""
+    value = loaded.get("native_tools", "none")
+    if value == "claude_code":
+        return "claude_code"
+    if value != "none":
+        raise ConfigError(
+            f"{where}: native_tools is {value!r}; it is 'none' or 'claude_code'. "
+            "'claude_code' lets a step that names no tools read files, run "
+            "commands and fetch, which is what the bare `claude` CLI gives you."
+        )
+    return "none"
 
 
 def read_config(path: Path) -> PipelineConfig:
@@ -222,6 +250,7 @@ def read_config(path: Path) -> PipelineConfig:
         instructions=_instructions(loaded, where, beside=path.parent),
         workspace_instructions=_flag(loaded, "workspace_instructions", where, default=True),
         system_prompt=_system_prompt(loaded, where, beside=path.parent),
+        native_tools=_native_tools(loaded, where),
     )
 
 
