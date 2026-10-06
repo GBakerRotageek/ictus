@@ -749,7 +749,13 @@ def trace(
     if log is not None:
         path = log
     else:
-        located = PipelineFolder.at(folder or Path())
+        try:
+            located = PipelineFolder.at(folder or Path())
+        except IctusError as exc:
+            # `ictus trace asked` is the natural thing to type and it takes a
+            # folder, so the wrong guess deserves a line rather than a traceback.
+            _fail(f"{exc}. This takes a pipeline folder, not a workflow name.")
+            return
         pipeline = _only(located)
         ceilings = _declared_ceilings(pipeline)
         found = find_logs(pipeline.pipeline_id)
