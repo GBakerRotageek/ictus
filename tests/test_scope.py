@@ -13,7 +13,7 @@ from ictus.graph.ports import OutputPort
 from ictus.graph.ref import equals, tpl
 from ictus.interfaces.conductor import conductor
 from ictus.lint import lint_pipeline
-from ictus.stdlib.terminals import succeed
+from ictus.stdlib.exits import succeed
 
 if TYPE_CHECKING:
     from collections.abc import Callable

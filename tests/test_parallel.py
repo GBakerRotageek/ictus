@@ -1,9 +1,8 @@
 """Parallel groups, and the validate_mcps stage built on them.
 
-Conductor's constraints drive most of this: a group may contain only model calls
-and computations, members carry no routes of their own, and a member's output is
-addressed *through* the group. That last one is the dangerous rule — the direct
-form validates and renders empty.
+A group may contain only model calls and computations, members carry no routes
+of their own, and a member's output is addressed through the group — the
+direct form validates and renders empty.
 """
 
 from __future__ import annotations
@@ -27,7 +26,8 @@ from ictus import (
 from ictus.graph.pipeline import FailureMode
 from ictus.interfaces.conductor import conductor
 from ictus.lint import lint_pipeline
-from ictus.stdlib import succeed, validate_mcp, validate_mcps
+from ictus.stdlib import succeed, validate_mcps
+from ictus.stdlib.llm import validate_mcp
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -195,9 +195,8 @@ class TestValidateMcpsStage:
 class TestCyclesThroughGroups:
     """A group is a routing endpoint, so a loop can close on one.
 
-    Both checks below skipped any target that was not a ``Node``, so a loop back
-    into a group was invisible: the graph reported acyclic and the iteration
-    budget was priced for a straight line.
+    Skipping a non-``Node`` target reports the graph acyclic and prices the
+    iteration budget for a straight line.
     """
 
     @staticmethod
@@ -223,8 +222,7 @@ class TestCyclesThroughGroups:
     def test_the_loop_is_priced_in_executions_not_hops(self) -> None:
         """The budget is in step executions, and a two-member group costs two.
 
-        `both -> decide -> both` is two hops and three executions. Pricing it at
-        two under-buys every pass, and the run dies partway through one.
+        `both -> decide -> both` is two hops and three executions.
         """
         assert self._looping().longest_cycle_length() == 3
 
@@ -243,9 +241,8 @@ class TestCyclesThroughGroups:
 class TestRemediation:
     """The gate's third option: an agent that works the problem with the person.
 
-    Conductor forbids ``dialog`` on a gate, so the helper has to be a separate
-    node the gate routes to — which the node types already enforce, since only a
-    model call carries the field at all.
+    Conductor forbids ``dialog`` on a gate, so the helper is a separate node
+    the gate routes to.
     """
 
     @staticmethod
@@ -299,7 +296,7 @@ class TestRemediation:
         assert isinstance(agents, list)
         prompt = next(a for a in agents if isinstance(a, dict) and a["name"] == "assist")["prompt"]
         assert isinstance(prompt, str)
-        assert "Never ask the person to paste a token" in prompt
+        assert "Never ask for a token" in prompt
         assert "Never print the value of an environment variable" in prompt
 
     def test_dialog_is_emitted_in_conductors_shape(self) -> None:
@@ -324,10 +321,8 @@ class TestRemediation:
 class TestGroupMemberAvailability:
     """A group runs every member before it routes on, so member output is available.
 
-    Both bugs here rendered *empty* rather than failing: the guard tested a
-    variable that does not exist in the context, so a perfectly good value was
-    silently swallowed. A live run showed both MCP servers answering and the
-    reader seeing nothing.
+    A guard testing a variable the context does not bind renders empty rather
+    than failing, swallowing the value it was protecting.
     """
 
     @staticmethod
@@ -385,11 +380,8 @@ class TestGroupMemberAvailability:
 class TestExposingGroupOutputs:
     """A member's output is addressed through its group, in the final map too.
 
-    `expose_output` used to build the path by hand, so a member was exposed as
-    `member.output.field` — a name Conductor never binds. It passes validation
-    and renders empty, and the `{% if member is defined %}` guard a default
-    would add is always false, so the fallback was the only branch that could
-    ever be taken.
+    `member.output.field` is a name Conductor never binds: it validates,
+    renders empty, and its guard is always false.
     """
 
     @staticmethod
@@ -424,9 +416,8 @@ class TestExposingGroupOutputs:
 def test_a_member_cannot_read_a_sibling() -> None:
     """They run at the same time, and `group.outputs` exists only once all have finished.
 
-    The group spelling made this invisible on both sides: ictus emitted
-    `both.outputs.a.v` as an ordinary dependency, and Conductor's validator sees
-    a well-formed group reference. It resolves to nothing at run time.
+    `both.outputs.a.v` is a well-formed group reference that resolves to
+    nothing at run time.
     """
     p = Pipeline(pipeline_id="sib")
     a = p.add(_checker("a"))

@@ -1,9 +1,8 @@
 """Rules that are true because of how Conductor runs, not how graphs are shaped.
 
-Each was checked against the installed validator and confirmed to pass it, so
-none of them duplicates ``conductor validate``. They live here rather than in
-``ictus.lint`` because every one of them is a claim about Conductor's runtime:
-its template dialect, its strict-undefined rendering, its output wrapper.
+Each is a claim about Conductor's runtime — its template dialect, its
+strict-undefined rendering, its output wrapper — and none duplicates
+``conductor validate``.
 """
 
 from __future__ import annotations
@@ -14,8 +13,8 @@ from typing import TYPE_CHECKING
 
 from ictus.graph.node import AgentNode, GateNode, Node, TerminateNode
 from ictus.graph.ref import Origin
-from ictus.interfaces.conductor.templates import output_path
-from ictus.interfaces.conductor.workflow import DEFAULT_PROVIDER
+from ictus.interfaces.conductor.emit.templates import output_path
+from ictus.interfaces.conductor.emit.workflow import DEFAULT_PROVIDER
 from ictus.lint.rules import describe
 
 if TYPE_CHECKING:
@@ -26,10 +25,9 @@ REMEMBERING_PROVIDERS = frozenset({"claude-agent-sdk"})
 
 __all__ = ["conductor_problems"]
 
-# Conductor's template namespace. Its own validator checks the agent segment of
-# a reference and stops there, so a typo in the field name survives validation.
-# ``\.output`` must not swallow the ``\.outputs`` of a parallel group — doing so
-# reports the group as an unknown agent and hides whatever the reference meant.
+# Conductor's validator checks the agent segment of a reference and stops, so a
+# typo in the field name survives it. ``\.output`` must not swallow a parallel
+# group's ``\.outputs``.
 OUTPUT_REF = re.compile(
     r"\b([a-z_][a-z0-9_]*)\.output(?!s)(?:\.([a-z_][a-z0-9_.]*))?", re.IGNORECASE
 )
@@ -93,92 +91,51 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
     return problems
 
 
-#: Fields Conductor's schema accepts on *any* agent that only some providers act
-#: on, mapped to the providers that actually read them.
+#: Fields Conductor's schema accepts on any agent that only some providers act
+#: on, mapped to the providers that read them. Nothing upstream checks these.
 #:
-#: Every entry was read out of Conductor rather than out of its schema, because
-#: the schema is where these look universal. Two sources, both authoritative:
-#: each provider's ``CAPABILITIES`` declaration (``providers/capabilities.py``
-#: names the flags), and, for the fields with no flag, the code that consumes
-#: the value.
-#:
-#: The failure this exists to stop is quiet, and *quiet* is the entry criterion:
-#: nothing upstream checks these, so a workflow declaring one on a provider that
-#: ignores it loads clean, validates clean, runs, and does nothing. A retry
-#: policy that never retries is worse than none, because it was written by
-#: someone who then stopped worrying about the failure it does not handle.
-#:
-#: A field Conductor checks for itself does **not** belong here — see
-#: :data:`VALIDATED_UPSTREAM`. Adding one would duplicate ``conductor validate``
-#: with a worse message, which is the thing this module promises not to do.
-#:
-#: A field ictus does not expose yet still belongs here: the lint reads the node
-#: with ``getattr``, so an entry is inert until the field is wired and correct
-#: from the moment it is. Wired today: ``working_dir``, ``skills``, ``plugins``,
-#: ``retry``, ``context_tier`` — the first three because ``claude-agent-sdk``
-#: honours them, the last two so that writing one against that provider is
-#: refused rather than quietly ignored.
+#: Entry criterion: the failure is silent. A field ``conductor validate``
+#: refuses belongs in :data:`VALIDATED_UPSTREAM` instead. The lint reads the
+#: node with ``getattr``, so an entry for a field ictus does not expose is inert.
 HONOURED_BY: dict[str, frozenset[str]] = {
-    # Every provider but this one reads `agent.retry`; claude-agent-sdk's own
-    # matches are all `is_retryable=False` on errors it raises.
+    # claude-agent-sdk's own matches are all `is_retryable=False`.
     "retry": frozenset({"claude", "openai", "hermes", "aca", "copilot"}),
-    # The schema documents this as Copilot-only and is stale — aca forwards it
-    # too (providers/aca.py:769).
+    # The schema says Copilot-only and is stale; aca forwards it (providers/aca.py:769).
     "context_tier": frozenset({"copilot", "aca"}),
     # CAPABILITIES.working_dir.
     "working_dir": frozenset({"claude-agent-sdk", "claude", "openai", "copilot"}),
     # CAPABILITIES.skills.
     "skills": frozenset({"claude-agent-sdk", "claude", "openai", "hermes", "copilot"}),
-    # CAPABILITIES.plugins. Narrow by design: a plugin ships skills, subagents
-    # and MCP servers together, and only these two can host all three.
+    # CAPABILITIES.plugins. A plugin ships skills, subagents and MCP servers
+    # together, and only these two host all three.
     "plugins": frozenset({"claude-agent-sdk", "copilot"}),
-    # No capability flag. Consumed only through `AgentDef.effective_output_schema()`,
-    # whose sole caller is providers/copilot.py:1194 — every other provider reads
-    # `agent.output` directly and never sees the mode.
+    # No capability flag. Read only via `AgentDef.effective_output_schema()`,
+    # whose sole caller is providers/copilot.py:1194.
     "output_mode": frozenset({"copilot"}),
 }
 
-#: Fields only some providers act on that Conductor refuses for itself.
-#:
-#: The distinction from :data:`HONOURED_BY` is not which providers honour them —
-#: it is whether anything upstream notices. ``conductor validate`` rejects both
-#: of these with a message naming the provider and, for ``reasoning``, the exact
-#: levels it would take:
-#:
-#:     Agent 'work' resolves to reasoning.effort='max' but provider 'openai'
-#:     supports only ['low', 'medium', 'high'].
-#:
-#: ictus cannot better that, and repeating it would mean maintaining a table of
-#: per-provider *levels* that drifts against ``CAPABILITIES.reasoning_effort``.
-#: So these are recorded and deliberately not linted. Checked by running
-#: ``conductor validate`` over an emitted workflow for each, not inferred.
+#: Fields only some providers act on that ``conductor validate`` already
+#: refuses, naming the provider and the levels it would take. Recorded here and
+#: deliberately not linted.
 VALIDATED_UPSTREAM: frozenset[str] = frozenset(
     {
-        # capabilities.reasoning_effort, a tuple of levels rather than a bool:
-        # claude-agent-sdk None, openai low/medium/high, hermes adds xhigh,
-        # claude/aca/copilot all five.
+        # capabilities.reasoning_effort, a tuple of levels: claude-agent-sdk
+        # None, openai low/medium/high, hermes adds xhigh, the rest all five.
         "reasoning",
-        # capabilities-gated to aca. The two other providers mentioning
-        # "sandbox" do so only in comments.
+        # capabilities-gated to aca.
         "sandbox",
     }
 )
 
 
-#: The same question asked of the rest, and answered "everywhere".
-#:
-#: Recorded rather than omitted so the next person does not re-derive it. Two of
-#: these are engine-level, which is why they hold across providers that share
-#: nothing else; the third is declared by every provider individually. All three
-#: are wired on ``AgentNode`` — having no provider to refuse them on is what made
-#: them the cheap ones to expose.
+#: Fields every provider honours. Recorded so they are not re-derived.
 HONOURED_EVERYWHERE: frozenset[str] = frozenset(
     {
         # engine/workflow.py:1516 — `asyncio.wait_for` around the whole call.
         "timeout_seconds",
         # engine/validator.py — a second model call the engine makes itself.
         "validator",
-        # CAPABILITIES.max_session_seconds is true on all six.
+        # CAPABILITIES.max_session_seconds, true on all six.
         "max_session_seconds",
     }
 )
@@ -200,15 +157,13 @@ def _ignored_field_problems(pipeline: Pipeline, node: Node, where: str) -> list[
     return problems
 
 
-# Conductor's own rule for when a `skills:`/`plugins:` entry is a path rather
-# than a registered name (skills/registry.py:226). Purely syntactic, so a bare
-# name can never be shadowed by a same-named directory.
+# Conductor's rule for when a `skills:`/`plugins:` entry is a path rather than a
+# registered name (skills/registry.py:226). Purely syntactic.
 def _is_path_entry(entry: str) -> bool:
     return entry.startswith(("~", ".")) or "/" in entry or "\\" in entry
 
 
-# Rendered at run time, so ictus cannot know what they resolve to and does not
-# get to refuse them.
+# Rendered at run time, so ictus cannot know what it resolves to.
 def _is_deferred(value: str) -> bool:
     return "{{" in value or "${" in value
 
@@ -216,21 +171,12 @@ def _is_deferred(value: str) -> bool:
 def _relative_path_problems(node: Node, where: str) -> list[str]:
     """Refuse a relative path on an agent, which resolves somewhere useless.
 
-    ``working_dir``, ``skills`` and ``plugins`` all resolve a relative entry
-    against the *workflow file's* directory (engine/workflow.py:620-622 for the
-    first, and the schema says the other two follow it). For ictus that
-    directory is the pipeline's ``build/`` — compiled output that ``ictus emit``
-    rewrites and prunes. Nobody means that, and the failure is quiet in the two
-    ways that matter: a missing ``working_dir`` raises mid-run, and a skill path
-    that does not resolve is a step that runs without the instructions it was
-    supposed to have.
+    ``working_dir``, ``skills`` and ``plugins`` resolve a relative entry against
+    the workflow file's directory (engine/workflow.py:620-622) — the pipeline's
+    ``build/``, which ``ictus emit`` rewrites and prunes.
 
-    ``AgentNode`` only. ``working_dir`` is one Conductor field serving two step
-    kinds and they do not resolve it the same way: a script's goes straight to
-    the subprocess (executor/script.py, ``cwd=``), so it resolves against the
-    directory the run was launched from — the project — where a relative path is
-    both correct and the obvious thing to write. Refusing it there broke every
-    demo that runs a script, which is how this distinction earned its own rule.
+    ``AgentNode`` only: a script's ``working_dir`` goes straight to the
+    subprocess (executor/script.py, ``cwd=``), where relative is correct.
     """
     if not isinstance(node, AgentNode):
         return []
@@ -263,27 +209,16 @@ def _relative_path_problems(node: Node, where: str) -> list[str]:
     return problems
 
 
-#: The strategies that make room by deleting a step's output rather than
-#: shortening it. Read from `engine/context.py`: `_trim_drop_oldest` and
-#: `_trim_summarize` both `del self.agent_outputs[agent_name]`; `_trim_truncate`
-#: shortens fields in place and deletes nothing.
+#: Strategies that make room by deleting a step's output rather than shortening
+#: it (`engine/context.py`: both `del self.agent_outputs[agent_name]`).
 _DELETING_STRATEGIES = frozenset({"drop_oldest", "summarize"})
 
 
 def _context_trim_problems(pipeline: Pipeline, where: str) -> list[str]:
     """A context ceiling that makes room by deleting what a loop reads.
 
-    Trimming is the only thing in the engine that removes a step's output from
-    the run (`engine/context.py`, two `del agent_outputs[...]` sites). A loop
-    reads the pass before through exactly those entries, and the guard that lets
-    a first pass render nothing cannot tell "not run yet" from "deleted a moment
-    ago" — both are an absent key. So a deliberation whose outputs get trimmed
-    does not fail: it goes quiet and reads like a first round, every round,
-    for the rest of the run.
-
-    ``truncate`` is the one strategy that does not do this. It shortens fields
-    in place, so every reference still resolves — to less text, which is what a
-    ceiling is supposed to cost.
+    A deleted output is indistinguishable from one that has not run, so the
+    loop keeps rendering nothing. ``truncate`` shortens in place instead.
     """
     cap = pipeline.context_max_tokens
     if cap is None:
@@ -315,12 +250,7 @@ def _context_trim_problems(pipeline: Pipeline, where: str) -> list[str]:
 
 
 def _tool_allowlist_problems(node: Node, where: str) -> list[str]:
-    """Naming individual tools is a run-time failure this backend cannot avoid.
-
-    Omitting the list and emptying it both work — "the engine's default" and
-    "none at all". Naming them raises ``ProviderError`` partway through the run,
-    on a list that emitted and validated cleanly.
-    """
+    """Naming individual tools raises ``ProviderError`` mid-run. Unset and empty both work."""
     tools = getattr(node, "tools", None)
     if not tools:
         return []
@@ -332,19 +262,16 @@ def _tool_allowlist_problems(node: Node, where: str) -> list[str]:
     ]
 
 
-# Conductor's loader expands `${VAR}` in every string it reads, before anything
-# else happens (config/loader.py resolve_env_vars).
+# Conductor's loader expands `${VAR}` in every string it reads
+# (config/loader.py resolve_env_vars).
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}")
 
 
 def _env_reference_problems(node: Node, where: str) -> list[str]:
     """A `${VAR}` in text a model reads is either a crash or a leak.
 
-    Expansion happens at load, so with the variable unset the workflow refuses
-    to load at all, and with it set the *value* is substituted into the prompt
-    and sent to the provider. A token belongs in an MCP header, which is
-    expanded for exactly that reason; it does not belong in something a model
-    is asked to read.
+    Expansion happens at load: unset refuses the workflow, set puts the value
+    in the prompt.
     """
     problems: list[str] = []
     for text in node.template_strings():
@@ -387,10 +314,7 @@ def _session_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
 def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """Under ``context.mode: explicit`` a node sees only what its ``input:`` names.
 
-    Referencing anything else is an undefined variable at render time. That is
-    late: a gate's terminal step failed this way *after* the human had answered,
-    losing the run. Conductor cannot catch it — the reference is well-formed and
-    the agent exists — so it has to be caught here.
+    Anything else is an undefined variable at render time.
     """
     referenced: set[str] = set()
     for ref in node.prompt_refs():
@@ -400,8 +324,7 @@ def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -
         for ref in edge.condition_refs():
             if not ref.from_input:
                 referenced.add(ref.source_id)
-    # Only the explicit-rendered slots. A terminal's payload is rendered with the
-    # whole run in scope, so requiring it to be declared would be wrong.
+    # Explicit-rendered slots only; a terminal's payload sees the whole run.
     for template in node.template_strings():
         referenced.update(name for name, _ in OUTPUT_REF.findall(template))
         referenced.update(name for name, _ in GROUP_REF.findall(template))
@@ -437,24 +360,16 @@ def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -
 def _undeclared_port_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """A step is in scope port by port, not whole.
 
-    Each ``input:`` entry names one output. A node wired for one of another
-    node's ports has *that port* in scope and nothing else, so reading a second
-    one renders against a dict holding only the first and fails with "'dict
-    object' has no attribute 'basis'" — well after the step that produced it
-    succeeded, and on a graph the node-level check calls wired.
-
-    The node-level check above cannot see this: the source is declared, so it is
-    satisfied. Both have been wrong in the same session, which is what this is
-    for.
+    Each ``input:`` entry carries one output, so reading a second port of the
+    same source fails at render time even though the source is declared.
     """
     carried: dict[str, set[str]] = {}
     for dep in pipeline.deps_into(node):
         carried.setdefault(dep.source.node_id, set()).add(dep.connection.source.name)
     if not carried:
         return []
-    # Prompts only. A route condition is rendered against the whole context
-    # (`engine/router.py`: `eval_context = {**context, "output": ...}`), so a
-    # condition may read a port this node was never wired for and is right to.
+    # Prompts only. A route condition renders against the whole context
+    # (`engine/router.py`), so it may read a port this node was not wired for.
     referenced: list[Ref] = list(node.prompt_refs())
     groups = {g.group_id for g in pipeline.groups} | {m.group_id for m in pipeline.maps}
     return [
@@ -473,7 +388,6 @@ def _undeclared_port_problems(pipeline: Pipeline, node: Node, where: str) -> lis
 
 
 def _listed(ports: set[str]) -> str:
-    """Port names as prose, for a message somebody has to act on."""
     return ", ".join(sorted(repr(name) for name in ports))
 
 
@@ -481,10 +395,7 @@ def _undeclared_member_field_problems(pipeline: Pipeline, node: Node, where: str
     """A parallel group's fields are projected one at a time, not as a whole object.
 
     ``_add_parallel_group_input`` (engine/context.py:99-101) copies exactly the
-    field each ``input:`` entry names, so declaring ``g.outputs.a.position``
-    puts *only* that key under ``a``. Reading ``g.outputs.a.satisfied`` next to
-    it then fails with "'dict object' has no attribute 'satisfied'" — and the
-    group name being declared is what makes that look wired.
+    field each ``input:`` entry names.
     """
     wanted: dict[str, Ref] = {}
     for ref in node.prompt_refs():
@@ -519,9 +430,8 @@ def _collect_member_path(pipeline: Pipeline, ref: Ref, into: dict[str, Ref]) -> 
 def _deferred_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """A reference to a node that may not have run yet must be guarded.
 
-    The ``?`` suffix makes the *dependency* optional. It does not make the
-    template variable defined, and Conductor renders with strict undefined, so
-    the first pass through a loop dies on ``'<node>' is undefined``.
+    The ``?`` suffix makes the dependency optional, not the template variable,
+    and Conductor renders with strict undefined.
     """
     problems: list[str] = []
     for dep in pipeline.deps_into(node):

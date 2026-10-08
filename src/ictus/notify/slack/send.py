@@ -1,19 +1,15 @@
 """Building a Slack report, and posting one.
 
-The program below is what an announcement step runs. It is a string because the
-step is a subprocess: the graph carries it without reading it, the way it
-carries an MCP server's command, which is what keeps Slack out of ``graph`` and
-``stdlib``.
+The program below is what an announcement step runs. A string because the step
+is a subprocess, which is what keeps Slack out of ``graph`` and ``stdlib``.
 
-Three decisions in it are not preferences:
+Three rules:
 
-* The credential is read from the environment, never written into a pipeline or
-  an emitted workflow.
-* The message goes down stdin, not argv. A gate prompt is prose, and the first
-  apostrophe would end a shell-interpolated one.
+* The credential is read from the environment, never written into a pipeline
+  or an emitted workflow.
+* The message goes down stdin, not argv: a prompt is prose.
 * Threading needs ``chat.postMessage``. A webhook accepts ``thread_ts`` but
-  never returns the ``ts`` of what it posted, so there is no parent to reply
-  under. Both shapes are here; only one can hold a conversation.
+  never returns the ``ts`` of what it posted, so it cannot hold a conversation.
 """
 
 from __future__ import annotations
@@ -34,12 +30,20 @@ if TYPE_CHECKING:
     from ictus.graph.requirements import EnvVar
     from ictus.graph.signals import RunSignal
 
-__all__ = ["API", "API_ENV", "api_call", "endpoint", "reply", "slack_channel", "slack_webhook"]
+__all__ = [
+    "API",
+    "API_ENV",
+    "SECTION_LIMIT",
+    "api_call",
+    "endpoint",
+    "reply",
+    "slack_channel",
+    "slack_webhook",
+]
 
 API = "https://slack.com/api/chat.postMessage"
 
-#: Overrides it — a proxy, an Enterprise Grid host, or a local stand-in so the
-#: whole path can be exercised without a workspace.
+#: Overrides it: a proxy, an Enterprise Grid host, or a local stand-in.
 API_ENV = "SLACK_API_URL"
 
 TIMEOUT_SECONDS = 15
@@ -68,9 +72,8 @@ def slack_channel(
 
     Threads, so several runs at once stay legible. Needs a bot token.
 
-    Listens, too: `ictus listen` holds a socket open to the same workspace, so
-    a pipeline can declare that a message here starts it. That needs an
-    app-level token as well, read by the listener rather than by a run.
+    Listens too: `ictus-bridge listen` holds a socket open to the same
+    workspace, which needs an app-level token read by the listener, not a run.
     """
     return Integration(
         name=name,
@@ -96,10 +99,8 @@ def slack_webhook(
 ) -> Integration:
     """A channel posted into through an incoming webhook.
 
-    Simpler to set up and strictly less capable: no threads and no buttons, so
-    runs interleave and nothing can be answered from Slack. One-way as well —
-    a webhook is an address to post to, with nothing to hold open and nothing
-    to read — so it cannot start a run either.
+    Simpler to set up and strictly less capable: no threads, no buttons, and
+    one-way, so it cannot start a run.
     """
     return Integration(
         name=name,
@@ -127,14 +128,11 @@ def _program(*, secret: str, channel: str) -> str:
     )
 
 
-#: Reads the message on stdin, and the parent thread, the buttons and a deadline
-#: from argv; prints ``{"thread", "posted"}`` and exits 0 whatever happened.
-#:
-#: Exiting 0 is the point. The program runs as a step and a failed step fails
-#: the run, so an outage or a rotated token ended runs whose work had succeeded.
-#: A report that cannot be sent says ``posted: "false"``, with the reason on
-#: stderr. The deadline runs on a second thread because a socket timeout does
-#: not bound a hung name lookup, and the engine fails a step that overruns.
+#: Reads the message on stdin, and the parent thread, the buttons and a
+#: deadline from argv; prints ``{"thread", "posted"}`` and exits 0 whatever
+#: happened, so a failed report does not fail the run. The reason goes to
+#: stderr. The deadline runs on a second thread, since a socket timeout does
+#: not bound a hung name lookup.
 #:
 #: A reason never quotes an exception: urllib puts the URL in some of its own,
 #: and a webhook URL is the whole credential.
@@ -175,9 +173,8 @@ def scrub(text):
 
 
 def note(why):
-    # Said alongside the report rather than instead of it: the message landed,
-    # so `posted` is still true, and this is the part a reader needs to know.
-    # `say` writes once and is spoken for by the outcome.
+    # Alongside the report, not instead of it: the message landed, so
+    # `posted` is still true.
     sys.stderr.write(scrub(why) + "\n")
     sys.stderr.flush()
 
@@ -216,8 +213,7 @@ def post(url, body, headers, timeout):
 
 
 def button(asks, value, label, ask, multiline):
-    # No run id: the run is found from the message the button is on, which the
-    # run's own history records, so a press cannot name the wrong one.
+    # No run id: the run is found from the message the button is on.
     pressed = {
         "gate": asks["gate"],
         "step": asks["step"],
@@ -265,10 +261,8 @@ def send(text, parent, asks, timeout):
         code = str(answer.get("error"))
         hint = HINTS.get(code, "")
         return None, "slack refused the message: " + code + ((" - " + hint) if hint else "")
-    # Asking to reply under a message that is no longer there does not fail: the
-    # message is accepted and placed at the top of the channel instead. Several
-    # runs then read as one stream of unattributed updates, and nothing says why
-    # — which is how it was found, by someone noticing it had stopped replying.
+    # Replying under a deleted message does not fail: Slack accepts it and
+    # puts it at the top of the channel instead.
     if parent:
         placed = answer.get("message")
         landed = str(placed.get("thread_ts", "")) if isinstance(placed, dict) else ""
@@ -313,7 +307,7 @@ main()
 
 
 def endpoint(method: str) -> str:
-    """Where a Web API method lives, honouring the override the program honours.
+    """Where a Web API method lives, honouring :data:`API_ENV`.
 
     The override names ``chat.postMessage``; every other method sits beside it.
     """
@@ -330,9 +324,8 @@ def api_call(
 ) -> tuple[dict[str, object], str]:
     """Call one Web API method: ``(answer, "")``, or ``(answer, why not)``.
 
-    Never raises, and never quotes an exception, for the program's reason. The
-    answer comes back on a refusal too: its ``error`` decides whether a caller
-    gives up or tries again.
+    Never raises, and never quotes an exception. The answer comes back on a
+    refusal too, since its ``error`` decides whether to try again.
     """
     request = urllib.request.Request(
         endpoint(method),
@@ -367,9 +360,8 @@ def reply(
 ) -> str:
     """Say ``text`` under ``thread_ts``. Returns "" on success, else why not.
 
-    Not a click's ``response_url``: that posts where the *message* lives, which
-    for a button in a thread is the channel root — so the answer landed beside
-    every other run's. Never raises; the gate is already answered by now.
+    Not a click's ``response_url``, which posts where the message lives — the
+    channel root, for a button in a thread. Never raises.
     """
     body: dict[str, object] = {"channel": channel, "text": text}
     if thread_ts:

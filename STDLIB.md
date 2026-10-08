@@ -1,9 +1,15 @@
 # ictus stdlib
 
 Ready-made pieces, all built from the public API. `from ictus.stdlib import ...`
+`ictus stdlib` prints this list from the installed library; `ictus stdlib <term>`
+searches it.
 
 Every constructor also takes `description`, and most take `inputs`. Options below
 are the rest.
+
+Laid out by what each thing *is*, in `graph.NodeKind`'s own vocabulary — gates,
+model calls, steps, exits, stages, scopes. The folders under `src/ictus/stdlib/`
+match these headings one for one.
 
 | Tier | Placed with | Costs the caller |
 | --- | --- | --- |
@@ -16,10 +22,13 @@ failure that kills the caller.
 
 ## Model calls
 
+`from ictus.stdlib.llm import ...` — not the flat namespace. Each exists because
+a stage below needed it; reaching for one directly is deliberate enough to name
+where it came from.
+
 | Constructor | Use | Options | Produces |
 | --- | --- | --- | --- |
 | `briefing` | Summarise upstream output for a person to decide on | `subject`, `source`, `output_name` | `summary: string` |
-| `verdict` | Answer a yes/no question as a boolean a route can test | `question`, `source`, `output_name` | `verdict: boolean`, `rationale: string` |
 | `voice` | One standpoint's assessment — persona plus focus | `persona`, `focus`, `subject`, `intent`, `prior`, `direction`, `tools`, `max_turns` | `satisfied: boolean`, `position: string`, `concerns: string`, `unchecked: string` |
 | `validate_mcp` | Prove an MCP server is reachable by calling a read-only tool | `server` | `available: boolean`, `detail: string` |
 | `remediate` | Work through a blockage with the person at the terminal | `problem`, `subject` | `resolved: boolean`, `summary: string` |
@@ -91,7 +100,7 @@ carry a value the gate does not offer. Buttons and threads both need a service
 that can carry an answer back; `slack_webhook` cannot, and says so at
 composition.
 
-## Terminals
+## Exits
 
 | Constructor | Use | Options |
 | --- | --- | --- |
@@ -123,6 +132,12 @@ composition.
 
 `Attempt(node_id, prompt, produces)` — a sequence becomes a chain, each step
 reading the last. `Voice(node_id, persona, focus, tools=, max_turns=)`.
+
+The outcome names are constants on `ictus.stdlib`: `AGREED`, `UNRESOLVED`,
+`HALTED`, `CONVERGED`, `EXHAUSTED`, `ANSWERED`, `READ`, `MISSING`, `OK`,
+`FAILED`. Each is defined once, in `stdlib/scopes/outcomes.py`, because several
+scopes end the same ways — `council` and `roundtable` both agree or fail to,
+`converge` and `investigate` both run out.
 `Speaker(node_id, persona, focus, tools=, max_turns=)`.
 
 - **`try_shell` is the only way to route on a command that failed**, and it
@@ -323,7 +338,7 @@ plausible one.
   turns it off for a run that must behave identically against any checkout.
   What still cannot be recovered is Claude Code's own system prompt — Conductor
   types `system_prompt` as `str | None` and the SDK needs a mapping to name the
-  preset, so `ictus.baseline.AGENT_BASELINE` stands in for it.
+  preset, so `ictus.stdlib.baseline.AGENT_BASELINE` stands in for it.
 - **A field the provider ignores is refused, not emitted.** Conductor's schema
   accepts these on any agent; only some providers read them. There is no
   engine-side check, so a workflow setting one on the wrong provider loads,

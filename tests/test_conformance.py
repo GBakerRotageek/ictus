@@ -1,7 +1,4 @@
-"""The gate: everything ictus emits must load in Conductor.
-
-This is the test whose absence let five commits of unloadable YAML ship green.
-"""
+"""The gate: everything ictus emits must load in Conductor."""
 
 from __future__ import annotations
 
@@ -24,8 +21,8 @@ from ictus import (
     ScriptNode,
     WaitNode,
 )
-from ictus.config import read_config
 from ictus.graph.pipeline import Pipeline as PipelineType
+from ictus.runspec.config import read_config
 from ictus.stdlib import approval_gate, choice_gate, succeed
 
 if TYPE_CHECKING:

@@ -4,19 +4,17 @@
 Answers both shapes ictus posts in:
 
 * an **incoming webhook** — any other path. Takes `{"text": ...}` and returns
-  `ok`, exactly as Slack's does, including returning no timestamp, which is why
-  a webhook cannot be threaded onto.
-* **chat.postMessage** — returns `{"ok": true, "ts": ..., "message": {...}}`, so a
-  run can learn its own thread and reply under it, and can tell a reply that
-  landed from one Slack quietly put at the top of the channel instead.
+  `ok` with no timestamp, which is why a webhook cannot be threaded onto.
+* **chat.postMessage** — returns `{"ok": true, "ts": ..., "message": {...}}`,
+  so a run can learn its own thread and reply under it.
 
     python3 smoke/fake_channel.py
     export SLACK_BOT_TOKEN=xoxb-pretend
     export SLACK_CHANNEL=C0PRETEND
     export SLACK_API_URL=http://127.0.0.1:8723/api/chat.postMessage
 
-The transcript it prints is indented by thread, which is the thing worth
-checking: several runs at once should read as separate conversations.
+The transcript is indented by thread, so several runs at once read as
+separate conversations.
 """
 
 from __future__ import annotations
@@ -56,10 +54,8 @@ class Slack(BaseHTTPRequestHandler):
         parent = str(body.get("thread_ts") or "")
         type(self).next_ts += 1
         ts = f"{type(self).next_ts:.6f}"
-        # A parent nobody has seen is one that was deleted. Slack does not
-        # refuse that — it accepts the message and puts it at the top of the
-        # channel — so neither does this, because the whole point of standing
-        # in for Slack is to reproduce the behaviour that caught somebody out.
+        # A parent nobody has seen is one that was deleted. Slack accepts the
+        # message and puts it at the top of the channel, so this does too.
         known = parent in type(self).roots
         if parent and known:
             root = type(self).roots[parent]

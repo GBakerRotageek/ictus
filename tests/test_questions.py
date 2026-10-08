@@ -1,8 +1,7 @@
 """Asking a person for values the run could not work out.
 
-Distinct from a gate: a gate offers a decision among known options; this
-collects values. Conductor fixes the output shape and forbids most other fields,
-so the node type carries only what is legal on it.
+A gate offers a decision; this collects values. Conductor fixes the output
+shape, so the node type carries only what is legal on it.
 """
 
 from __future__ import annotations

@@ -1,9 +1,7 @@
 """The composition model — what a pipeline is made of.
 
-Deliberately holds no re-exports. ``ictus/__init__.py`` is the one public
-surface; a second package re-exporting the same names is how the previous
-``core/`` shim came to duplicate it. Inside the library, import the module you
-mean: ``from ictus.graph.node import AgentNode``.
+No re-exports: ``ictus/__init__.py`` is the one public surface. Inside the
+library, import the module you mean.
 
     values.py    the value domain that crosses a node boundary
     ports.py     typed inputs and outputs

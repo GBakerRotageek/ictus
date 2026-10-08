@@ -155,12 +155,12 @@ the gate needs no configuration.
 
 ### Answering from the channel
 
-`ictus listen` answers a gate when one of its buttons is pressed. It needs a
+`ictus-bridge listen` answers a gate when one of its buttons is pressed. It needs a
 Slack app with Socket Mode on, an app-level token with `connections:write`, and
 the same bot token the pipeline posts with:
 
     export SLACK_APP_TOKEN=xapp-...
-    uv run ictus listen --allow U0123ABC
+    uv run ictus-bridge listen --allow U0123ABC
 
 A press is answered on the run that posted the button, and only on the newest
 message a question was asked in — a button left over from an earlier round of a

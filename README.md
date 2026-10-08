@@ -6,49 +6,81 @@ emitted as Conductor YAML. Conductor executes.
 
 Free software under the **GNU General Public License v3 or later** — see
 [LICENSE](LICENSE). It comes with no warranty, to the extent permitted by law.
+Pre-1.0: the stdlib's constructors are the API and they still move, so every
+rename and removal is in [CHANGELOG.md](CHANGELOG.md).
 
-    src/ictus/               the library
-      __init__.py            the one public surface
-      errors.py              what ictus raises, and why
-      cli.py                 emit / lint / validate / run
-      graph/                 the composition model — knows no engine
-        values.py            the value domain that crosses a node boundary
-        ports.py             typed inputs and outputs
-        ref.py               typed references and templates
-        node.py              one class per kind of work
-        pipeline.py          the graph: control edges, data edges, loop bounds
-        stage.py             a reusable sub-graph
-      interfaces/            the boundary to whatever executes a graph
-        __init__.py          Backend, Capabilities, Document
-        conductor/           every Conductor-shaped thing, and nothing else
-          workflow.py        the workflow: block and the defaults worth stating
-          agents.py          one node to one agents: entry
-          templates.py       typed references into Conductor's Jinja
-          serialize.py       YAML text, without altering any value
-          lints.py           rules true because of how Conductor runs
-      lint/                  composition rules that hold for any graph
-        rules.py             the individual checks
-      stdlib/                ready-made primitives, one per module
-        gates/               human decision points
-        agents/              model calls
-        steps/               zero-model steps (set, wait, script)
-        terminals/           explicit exits
-        stages/              reusable sub-graphs
+## A pipeline
 
-    demo_work/               what a *consumer* of ictus writes, not the library
-      pipelines/
-        <name>/              one folder per pipeline — the running contract
-          pipeline.py        the composition
-          input.md           what to run it on
-          build/             emitted YAML, committed so diffs show what runs
-      scripts/               shell steps invoked by script nodes
+A pipeline is a folder, and `pipeline.py` is the graph in it:
 
-`ictus/__init__.py` is the only public surface — `ictus.graph` deliberately
-re-exports nothing, so there is one place a name is exported from rather than
-two that can drift.
+```python
+from ictus import AgentNode, InputPort, OutputPort, Pipeline, PortType, tpl
+from ictus.stdlib import approval_gate, succeed
 
-Nothing in `src/` imports from `demo_work/`. The demo is there to be read and
-run; deleting it would not touch the library.
+STR = PortType.STRING
+
+pipeline = Pipeline(pipeline_id="review", description="Summarise a diff, then ask a person")
+
+read = pipeline.add(
+    AgentNode(
+        node_id="read_diff",
+        prompt="Summarise the risk in the staged diff, in five lines.",
+        declared_outputs=(OutputPort("summary", STR, "What changed, and the risk"),),
+    )
+)
+gate = pipeline.add(
+    approval_gate(
+        node_id="ship_it",
+        prompt=tpl("Ship this?\n\n", read.ref("summary")),
+        inputs=(InputPort("summary", STR),),
+    )
+)
+shipped = pipeline.add(succeed(node_id="shipped", reason="approved"))
+held = pipeline.add(succeed(node_id="held", reason="a person said no"))
+
+pipeline.set_entry(read)
+pipeline.connect(read, "summary", gate, "summary")
+pipeline.branch(gate, {"approved": shipped, "rejected": held})
+```
+
+Beside it, `config.yaml` says how it runs (`provider: claude-agent-sdk`),
+`input.md` carries this run's values, and `build/` holds the emitted YAML —
+committed, so a diff shows what will actually execute.
+
+```sh
+ictus emit   pipelines/review     # compile to Conductor YAML
+ictus lint   pipelines/review     # composition rules, writes nothing
+ictus run    pipelines/review     # re-emit, preflight, then launch
+```
+
+`read.ref("summary")` is checked when it is written: misname the port and the
+line raises, rather than the run producing a prompt with a hole in it.
+`branch` refuses to leave a gate choice unrouted. Both cost nothing; a live run
+costs money and minutes.
+
+## What is already built for you
+
+**[STDLIB.md](STDLIB.md) is the catalogue** — every ready-made constructor, what
+it is for, its options, and what it produces. It is checked against the code by
+the test suite, so it describes the stdlib that exists rather than the one that
+used to. `ictus stdlib` prints the same list from the installed library, and
+`ictus stdlib <term>` searches it by name or by what a thing does.
+
+| You want | Reach for |
+|---|---|
+| a person to approve, choose, or answer questions | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
+| a step that calls no model | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text` |
+| to report to a channel, or comment on a ticket | `announce`, `comment` — through an `Integration` from `ictus.notify` |
+| to read a database or a ticket | `query`, `fetch` — through a `Datasource` from `ictus.sources` |
+| to end the run, distinguishably | `succeed`, `fail` |
+| a command whose failure you route on | `try_shell` |
+| to try until something is good enough | `converge` |
+| to look something up until the question is answered | `investigate`, `read_ticket` |
+| several models to argue until they agree | `council` (they poll), `roundtable` (they take turns) |
+
+`from ictus.stdlib import ...` for all of it — the folders under
+`src/ictus/stdlib/` group these by what they *are*, which matters when you are
+adding one, not when you are using one.
 
 ## Three tiers
 
@@ -132,23 +164,34 @@ is silent until a run is already in flight:
 - a stage whose contract has drifted from the workflow it hosts
 - a required input nothing is wired to
 
-## The stdlib
+## How the stdlib is laid out
+
+For adding to it. [What is already built for you](#what-is-already-built-for-you)
+is the using half, and [STDLIB.md](STDLIB.md) is the full catalogue.
 
 One primitive per module, so the docstring beside a thing is about that thing.
-**[STDLIB.md](STDLIB.md) is the catalogue** — every constructor, what it is for,
-its options and what it produces.
+Folders are named for what each thing is, in `graph.NodeKind`'s vocabulary. They
+were once named after Conductor's step kinds, which put the engine's billing
+model one layer above the only package allowed to know Conductor exists.
 
-| Group | Emits | What's there |
+| Group | Kind | What's there |
 |---|---|---|
-| `gates/` | `human_gate`, `questions` | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
-| `agents/` | `agent` | `briefing`, `verdict`, `voice`, `validate_mcp`, `remediate` |
-| `steps/` | `set`, `wait`, `script` | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text`, `announce` |
-| `terminals/` | `terminate` | `succeed`, `fail` |
-| `stages/` | `workflow` | `briefing_gate`, `resolve_unknowns`, `script_sequence`, `validate_mcps`, and the scopes `converge`, `council` and `roundtable` |
+| `gates/` | `HUMAN_DECISION` | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
+| `llm/` | `LLM_CALL` | `briefing`, `voice`, `validate_mcp`, `remediate` |
+| `steps/` | `COMPUTATION`, `SUBPROCESS`, `DELAY` | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text`, `announce`, `comment`, `fetch`, `query` |
+| `exits/` | `EXIT` | `succeed`, `fail` |
+| `stages/` | `SUB_GRAPH` | `briefing_gate`, `resolve_unknowns`, `script_sequence`, `validate_mcps` |
+| `scopes/` | `SUB_GRAPH` | `try_shell`, `converge`, `read_ticket`, `investigate`, `roundtable`, `council` |
 
-Each stage is a whole sub-graph costing its caller one iteration. The last three
-are **scopes** — a stage whose every exit is an outcome the caller routes on,
-rather than a failure that raises past it.
+Each stage is a whole sub-graph costing its caller one iteration. A **scope** is
+a stage whose every exit is an outcome the caller routes on, rather than a
+failure that raises past it — the property that decides whether a bad ending is
+something you handle or something that kills the run, which is why it is a
+folder and not a return annotation.
+
+`llm/` is the one group not re-exported from `ictus.stdlib`: each of those exists
+because a stage here needed it, so reaching for one directly names
+`ictus.stdlib.llm`.
 
 - `converge` is a bounded try/judge loop: produce, assess, revise, and exit
   either way.
@@ -357,15 +400,84 @@ should not have to treat "a person looked at it and said no" as an error.
     ictus validate pipelines/  # hands the emitted YAML to conductor
 
     ictus watch pipelines/needs-council --follow   # report what no step can see
-    ictus listen --allow U0123ABC                  # answer gates from Slack buttons
+    ictus-bridge listen --allow U0123ABC                  # answer gates from Slack buttons
 
 A pipeline that calls `pipeline.integrate(...)` reports into a channel from
 inside the run: an announcement before every gate, the start gate included, and
 before every ending. `watch` reports what no step can — a step failing, a budget
-crossed, the engine dying — and `listen` answers a gate when its button is
-pressed. [smoke/README.md](smoke/README.md) walks through all three without a
+crossed, the engine dying — and `ictus-bridge listen` answers a gate when its
+button is pressed. [smoke/README.md](smoke/README.md) walks through all three without a
 Slack workspace.
 
 `soundcheck` ends with `conductor validate`, and that step is not optional: a
 green build that never asked Conductor whether the output loads has checked
 nothing.
+
+## Where things live
+
+For working *on* ictus rather than with it. `AGENTS.md` has the rules each
+layer is held to, and `tests/test_boundaries.py` enforces them.
+
+`ictus/__init__.py` is the only public surface — `ictus.graph` deliberately
+re-exports nothing, so there is one place a name is exported from rather than
+two that can drift. Nothing in `src/` imports from `demo_work/`: the demos are
+there to be read and run, and deleting them would not touch the library.
+
+    src/ictus/               the library
+      __init__.py            the one public surface
+      errors.py              what ictus raises — root vocabulary, like __init__
+
+      graph/                 the composition model — knows no engine
+        values.py            the value domain that crosses a node boundary
+        ports.py             typed inputs and outputs
+        ref.py               typed references and templates
+        node.py              one class per kind of work
+        pipeline.py          the graph: control edges, data edges, loop bounds
+        stage.py             a reusable sub-graph
+        scope.py             a sub-graph whose failures are values
+      stdlib/                ready-made primitives, one per module
+        gates/ llm/ steps/ exits/ stages/ scopes/
+        prompts.py           prompt text ictus ships — not a node group
+      lint/                  composition rules that hold for any graph
+      interfaces/            the boundary to whatever executes a graph
+        conductor/           every Conductor-shaped thing, and nothing else
+          emit/              a graph in, YAML out — no environment, no process
+          control/           acting on a run that already exists
+          preflight.py       can this machine reach what the pipeline declares
+          lints.py           rules true because of how Conductor runs
+
+      runspec/               what specifies a run: the folder, and what it says
+        config.py            config.yaml: provider, budget, gates
+        inputs.py            input.md, and the folder itself
+        scaffold.py          what `ictus init` writes
+      assemble/              nodes policy inserts that the author did not write
+        start_gate.py        a person confirms before anything runs
+        announcements.py     a report in front of every gate and ending
+      runs/                  acting on a run that already exists
+        triggers.py          what could be started, from the emitted manifests
+        launch.py            starting one, and where to watch it
+        answer.py            answering a gate somebody is waiting at
+
+      notify/                where a run reports to — the audience boundary
+        slack/ jira/         one folder per destination, pure data
+      sources/               where a run reads from — the source boundary
+      plugins/               which adapters are installed, from entry points
+      net/                   protocol, with no ictus in it (websocket)
+
+      cli/                   the `ictus` command
+        app.py               the Typer object and what every group shares
+        building.py          emit, lint, preflight, validate, init
+        running.py           run
+        watching.py          trace, watch
+
+      bridge/                NOT ictus: the chat daemon, shipped alongside
+        slack/               a socket held open, presses, forms
+        cli.py               the `ictus-bridge` command
+
+    demo_work/               what a *consumer* of ictus writes, not the library
+      pipelines/
+        <name>/              one folder per pipeline — the running contract
+          pipeline.py        the composition
+          input.md           what to run it on
+          build/             emitted YAML, committed so diffs show what runs
+      scripts/               shell steps invoked by script nodes

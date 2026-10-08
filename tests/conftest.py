@@ -1,10 +1,8 @@
 """Shared fixtures.
 
-The backend's own validator is the checker, not a schema model. For Conductor
-specifically, ``WorkflowConfig.model_validate`` catches a dangling
-``routes[].to`` but accepts a dangling ``options[].route`` — and every gate edge
-ictus emits is an ``options[].route``, so the model alone would pass exactly the
-graphs most worth checking.
+The backend's own validator is the checker, not a schema model:
+``WorkflowConfig.model_validate`` accepts a dangling ``options[].route``, which
+is how every gate edge ictus emits is spelled.
 """
 
 from __future__ import annotations
@@ -25,11 +23,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture(scope="session")
 def backend() -> ConductorBackend:
-    """The backend under test.
-
-    A hard failure rather than a skip when its CLI is missing: a run that cannot
-    check its own output has not verified anything.
-    """
+    """The backend under test. Fails hard rather than skipping when its CLI is absent."""
     if shutil.which("conductor") is None:
         pytest.fail("conductor is not on PATH; the conformance suite cannot verify output")
     return ConductorBackend()

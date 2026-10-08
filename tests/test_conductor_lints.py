@@ -1,8 +1,7 @@
 """Lints that are true because of how Conductor runs.
 
-Every graph below passes ``conductor validate``. That is the whole point: these
-are the failures the engine's own validator cannot see. They are not reported
-without a backend, because none of them is a claim about graphs in general.
+Every graph below passes ``conductor validate``, and none is reported without
+a backend.
 """
 
 from __future__ import annotations
@@ -98,10 +97,8 @@ def test_reserved_output_name_is_reported() -> None:
 class TestDeferredReferences:
     """A reference to a node that may not have run yet must be guarded.
 
-    The ``?`` suffix makes the *dependency* optional. It does not make the Jinja
-    variable defined, and Conductor renders with strict undefined — so the first
-    pass through a loop dies on ``'<node>' is undefined``. This passes
-    ``conductor validate``; it only shows up in a live run.
+    The ``?`` suffix makes the dependency optional, not the Jinja variable.
+    Passes ``conductor validate``; shows up only in a live run.
     """
 
     @staticmethod
@@ -157,10 +154,7 @@ class TestDeferredReferences:
 class TestUndeclaredReferences:
     """Under ``context.mode: explicit`` a node sees only what its ``input:`` names.
 
-    This one cost a live run: a gate's terminal step referenced the gate without
-    declaring it, and failed with ``'review' is undefined`` *after* the human had
-    already answered. Conductor cannot catch it — the reference is well-formed
-    and the agent exists.
+    Conductor cannot catch it: the reference is well-formed and the agent exists.
     """
 
     @staticmethod
@@ -224,13 +218,9 @@ def _with(provider: str, **agent_fields: object) -> Pipeline:
 class TestFieldsTheProviderIgnores:
     """Conductor accepts these on any agent; only some providers act on them.
 
-    There is no capability flag and no validator check for either, so a workflow
-    setting one on a provider that ignores it loads clean, validates clean, runs,
-    and does nothing. A retry policy that never retries is worse than none: it
-    was written by someone who then stopped worrying about the failure it does
-    not handle. The provider tables were read out of each provider's source —
-    the schema documents ``context_tier`` as Copilot-only and is stale, since
-    ``aca`` forwards it too.
+    No capability flag and no validator check, so a workflow setting one on a
+    provider that ignores it loads, validates, runs and does nothing. The
+    tables were read out of each provider's source, not out of the schema.
     """
 
     def test_retry_is_refused_on_the_provider_these_pipelines_use(self) -> None:
@@ -324,9 +314,8 @@ class TestRetryPolicyRefusesNonsense:
 class TestHonouredByIsWellFormed:
     """The table is research, and research rots. These keep it honest.
 
-    Every entry was read out of a provider's ``CAPABILITIES`` or the code that
-    consumes the value, never out of ``config/schema.py`` — which is where all
-    ten of these look universal.
+    Every entry comes from a provider's ``CAPABILITIES`` or the code consuming
+    the value, never from ``config/schema.py``.
     """
 
     def test_every_named_provider_is_one_conductor_has(self) -> None:
@@ -356,11 +345,7 @@ class TestHonouredByIsWellFormed:
 
 
 class TestTheProviderInUse:
-    """What `claude-agent-sdk` — every demo pipeline's provider — actually drops.
-
-    Both of the wiring backlog's top two items land here, which is the point of
-    checking the provider rather than the schema.
-    """
+    """What `claude-agent-sdk` — every demo pipeline's provider — actually drops."""
 
     def test_retry_is_dropped_silently_so_ictus_refuses_it(self) -> None:
         assert "claude-agent-sdk" not in HONOURED_BY["retry"]
@@ -385,13 +370,9 @@ class TestTheProviderInUse:
 class TestRelativePathsOnAnAgent:
     """A relative path on an agent resolves against `build/`, which is output.
 
-    ``working_dir``, ``skills`` and ``plugins`` all resolve a relative entry
-    against the emitted workflow's own directory (engine/workflow.py:620-622).
-    For ictus that is the pipeline's ``build/``, which ``ictus emit`` rewrites
-    and prunes — so the path either does not exist or will not survive the next
-    compile. Both failures are quiet: a missing ``working_dir`` raises mid-run,
-    and a skill path that does not resolve leaves a step running without the
-    instructions it was meant to have.
+    ``working_dir``, ``skills`` and ``plugins`` all resolve against the emitted
+    workflow's own directory (engine/workflow.py:620-622), which ``ictus emit``
+    rewrites and prunes.
     """
 
     def test_a_relative_working_dir_is_refused(self) -> None:
@@ -420,11 +401,8 @@ class TestRelativePathsOnAnAgent:
     def test_a_script_step_keeps_its_relative_working_dir(self) -> None:
         """One Conductor field, two step kinds, two resolutions.
 
-        A script's `working_dir` goes straight to the subprocess, so it resolves
-        against the directory the run was launched from — the project — where a
-        relative path is the obvious thing to write. Every demo that runs a
-        script does exactly this; refusing it there was a real bug, caught by
-        the conformance test rather than by review.
+        A script's `working_dir` goes straight to the subprocess, so it
+        resolves against the directory the run was launched from.
         """
         p = Pipeline(pipeline_id="t", provider="claude-agent-sdk")
         step = p.add(
@@ -474,9 +452,7 @@ class TestSkillsAndPluginsTriState:
 class TestUniversalLimits:
     """`timeout_seconds`, `max_session_seconds` and `validator` hold anywhere.
 
-    Two are engine-level and the third is declared by every provider, so unlike
-    `retry` and `reasoning` there is no provider to refuse them on. That is
-    exactly why these three were wired next.
+    Two are engine-level and the third is declared by every provider.
     """
 
     def _agent(self, **fields: object) -> YamlDict:
@@ -556,10 +532,8 @@ class TestLimitsRefuseNonsense:
 class TestReasoningEffort:
     """Per-node thinking budget, wired so a pipeline can vary it step by step.
 
-    The point is refinement: the step that synthesises usually needs it and the
-    steps either side of it usually do not, so a workflow-wide default is the
-    wrong shape. Each level is a token budget charged whether or not the step
-    needed it, which is why there is no default here.
+    Each level is a token budget charged whether or not the step needed it, so
+    there is no default.
     """
 
     def _agent(self, provider: str, **fields: object) -> YamlDict:
@@ -596,12 +570,7 @@ class TestReasoningEffort:
         assert by_name["synth"]["reasoning"] == {"effort": "max"}
 
     def test_ictus_does_not_lint_it(self) -> None:
-        """Conductor refuses it itself, naming the provider and the levels.
-
-        Repeating that here would duplicate `conductor validate` with a worse
-        message and a per-provider level table that drifts. Verified by running
-        the real validator over an emitted workflow, not by reading the schema.
-        """
+        """Conductor refuses it itself, naming the provider and the levels."""
         assert "reasoning" in VALIDATED_UPSTREAM
         assert "reasoning" not in HONOURED_BY
         assert not _problems(_with("claude-agent-sdk", reasoning=ReasoningEffort.MAX), "ignores")
@@ -610,10 +579,8 @@ class TestReasoningEffort:
 class TestTheTwoTablesStayDistinct:
     """`HONOURED_BY` is for silent no-ops; `VALIDATED_UPSTREAM` for caught ones.
 
-    Both hold provider-restricted fields, so the tempting reading is that they
-    are one table split by accident. The entry criterion is whether anything
-    upstream notices: `retry` on `claude-agent-sdk` validates clean and does
-    nothing, `reasoning` on it is refused outright.
+    The entry criterion is whether anything upstream notices: `retry` on
+    `claude-agent-sdk` validates clean and does nothing, `reasoning` is refused.
     """
 
     def test_no_field_appears_in_both(self) -> None:
@@ -630,11 +597,8 @@ class TestTheTwoTablesStayDistinct:
 class TestContextCeiling:
     """A soft cap on accumulated context, and the one strategy that survives it.
 
-    Trimming is the only thing in the engine that removes a step's output from a
-    run. A loop reads the previous pass through exactly those entries, and the
-    guard that lets a first pass render nothing cannot tell "not run yet" from
-    "deleted a moment ago" — both are an absent key. A council whose outputs get
-    dropped does not fail; it goes quiet and reads like a first round forever.
+    A deleted output is indistinguishable from one that has not run, so a loop
+    reading it keeps rendering nothing.
     """
 
     def _looping(self, **kwargs: object) -> Pipeline:

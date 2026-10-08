@@ -1,25 +1,16 @@
-"""Slack. Nothing above this package names it.
+"""Slack, as a place a run reports to. Nothing above this package names it.
 
-    send.py     building a report and posting one
-    listen.py   receiving a button press, and saying what became of it
+    send.py   building a report and posting one
 
-A second service is a sibling folder, and nothing else moves.
+Pure data: ``slack_channel`` and ``slack_webhook`` return an ``Integration``
+carrying a program nothing in ictus reads.
+
+Receiving from Slack is a process rather than a declaration, and lives in
+``ictus.bridge``.
 """
 
 from __future__ import annotations
 
-from ictus.notify.slack.listen import (
-    Click,
-    Note,
-    SlackError,
-    SlackUnreachableError,
-    events,
-    open_form,
-    presses,
-    retire,
-    say,
-    verdict,
-)
 from ictus.notify.slack.send import (
     API,
     API_ENV,
@@ -33,19 +24,9 @@ from ictus.notify.slack.send import (
 __all__ = [
     "API",
     "API_ENV",
-    "Click",
-    "Note",
-    "SlackError",
-    "SlackUnreachableError",
     "api_call",
     "endpoint",
-    "events",
-    "open_form",
-    "presses",
     "reply",
-    "retire",
-    "say",
     "slack_channel",
     "slack_webhook",
-    "verdict",
 ]

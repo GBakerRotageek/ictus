@@ -63,60 +63,8 @@ def _channel(**over: object) -> Integration:
 
 # --- the air gap -------------------------------------------------------------
 
-VENDOR = (
-    "slack",
-    "thread_ts",
-    "chat.postmessage",
-    "xoxb",
-    "block kit",
-    # Every destination and every source, not only the first one written.
-    # A boundary that only knows the service it was built for stops being a
-    # rule and becomes a note about history.
-    "jira",
-    "atlassian",
-    "adf",
-    "postgres",
-    "psql",
-    "pgoptions",
-    "sqlite",
-    "dsn",
-)
-
-
-@pytest.mark.parametrize("package", ["graph", "stdlib", "lint"])
-def test_no_service_is_named_above_the_notify_boundary(package: str) -> None:
-    """The rule `interfaces/conductor` has for engines, one axis over.
-
-    A pipeline declares an integration and attaches it; which service that is
-    must be answerable in one package. Prose saying "this does not know Slack"
-    is allowed — naming the thing being excluded is not coupling to it.
-    """
-    offending: list[str] = []
-    for path in (SRC / package).rglob("*.py"):
-        for name, line in _code_of(path):
-            if any(word in name.lower() for word in VENDOR):
-                offending.append(f"{path.relative_to(SRC)}:{line}: {name}")
-    assert not offending, "a service's spelling above notify/:\n" + "\n".join(offending)
-
-
-def _code_of(path: Path) -> list[tuple[str, int]]:
-    """Every token that is code, with its line. Comments and strings dropped.
-
-    Tokenising rather than reading lines: a docstring saying "this knows no
-    Slack" is documentation of the boundary, not a breach of it, and no
-    line-by-line heuristic tells the two apart reliably.
-    """
-    import io
-    import tokenize
-
-    kept: list[tuple[str, int]] = []
-    with path.open("rb") as handle:
-        for token in tokenize.tokenize(io.BytesIO(handle.read()).readline):
-            if token.type in (tokenize.COMMENT, tokenize.STRING, tokenize.NL, tokenize.NEWLINE):
-                continue
-            if token.string.strip():
-                kept.append((token.string, token.start[0]))
-    return kept
+# Which packages may name a service, and the one-way edge to the bridge, are
+# in `test_boundaries.py`.
 
 
 def test_the_graph_layer_carries_a_program_it_never_reads() -> None:
@@ -468,8 +416,8 @@ def test_a_long_message_and_label_fit_inside_slack_s_limits(
 def test_the_program_survives_the_engine_rendering_it_as_a_template() -> None:
     """Every argument of a script step is rendered before the step runs.
 
-    Nothing the engine would treat as the start of a template expression, block
-    or comment may appear in it, or the program that runs is not the one tested.
+    Nothing the engine reads as the start of a template expression, block or
+    comment may appear in it.
     """
     for service in (_channel(), _hook()):
         assert not re.search(r"\{\{|\{%|\{#", service.program)
@@ -587,10 +535,7 @@ def test_a_report_that_slack_declines_to_thread_says_so(
     collector: tuple[str, list[tuple[str, dict[str, object]]]],
 ) -> None:
     """Asking to reply under a deleted message does not fail: Slack accepts it
-    and puts it at the top of the channel. Several runs then read as one stream
-    of unattributed updates, and nothing says why — which is how this was found,
-    by somebody noticing the bot had stopped replying.
-    """
+    and puts it at the top of the channel instead."""
     url, _ = collector
     _Collector.reply = {
         "ok": True,

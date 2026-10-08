@@ -1,25 +1,20 @@
 """Scopes — stages whose failures are values rather than exceptions.
 
-A sub-workflow that ends in a failed terminal does not hand control back. The
-child engine converts the termination into ``SubworkflowTerminatedError`` before
-any parent route is evaluated (``engine/workflow.py:2131``), so a stage that
-"fails" detonates its caller instead of being handled by it.
+A sub-workflow ending in a failed terminal does not hand control back: the
+child engine raises ``SubworkflowTerminatedError`` before any parent route is
+evaluated (``engine/workflow.py:2131``).
 
-A scope closes that hole by construction. Every exit is a *success* terminal
-carrying a closed-vocabulary ``outcome``, so what would have been an exception
-arrives at the parent as data it can branch on. The vocabulary is declared once
-and checked on both sides: ``Scope.exit`` refuses an outcome that is not in it,
-and ``Pipeline.branch_on_outcome`` refuses to leave one unrouted.
+Every exit of a scope is therefore a success terminal carrying a
+closed-vocabulary ``outcome``. The vocabulary is checked on both sides:
+``Scope.exit`` refuses an undeclared outcome, ``Pipeline.branch_on_outcome``
+refuses to leave one unrouted.
 
-The payload rules are not taste:
+Two payload rules:
 
-* Every exit carries *every* declared value. A key one branch omits is absent
-  from the whole object on that path, and reading it is a hard template error.
-  Omitted keys are filled with a type-appropriate empty literal.
-* Outcome names that survive a JSON parse as something other than a string are
-  refused. Conductor runs a rendered output through ``_maybe_parse_json``, so an
-  outcome named ``true`` arrives as a boolean and every comparison against it
-  silently fails.
+* Every exit carries every declared value; omitted keys get a
+  type-appropriate empty literal.
+* An outcome name that survives ``_maybe_parse_json`` as a non-string is
+  refused, since every comparison against it would silently fail.
 """
 
 from __future__ import annotations
@@ -40,9 +35,8 @@ if TYPE_CHECKING:
 
 __all__ = ["OUTCOME_PORT", "Scope", "ScopeNode", "outcome_scope"]
 
-# What an omitted key becomes. A missing key is not the same as an empty value,
-# but an empty value of the right type is the only thing a consumer can be asked
-# to handle — the alternative is a template error on a path nobody exercised.
+# What an omitted key becomes: an empty value of the right type, since a
+# missing one is a template error on whichever path omitted it.
 _EMPTY: dict[PortType, str] = {
     PortType.STRING: "",
     PortType.OBJECT: "{}",
@@ -52,10 +46,7 @@ _EMPTY: dict[PortType, str] = {
 }
 
 # Exactly what `_maybe_parse_json` (engine/workflow.py:7076-7095) turns into a
-# non-string: the three Python repr spellings, the three JSON literals, anything
-# opening a JSON container, and anything int()/float() accepts. Not a
-# conservative superset — an outcome named "yes" is fine, and refusing it would
-# be a rule with no mechanism behind it.
+# non-string, together with the numeric and container checks below.
 _COERCED = frozenset({"True", "False", "None", "true", "false", "null"})
 
 
@@ -87,9 +78,8 @@ class Scope:
             if not name or name != name.strip():
                 raise CompositionError(f"scope {stage_id!r} has a malformed outcome {name!r}")
         self.outcomes = tuple(outcomes)
-        # An OutputPort rather than a bare type wherever the shape matters: an
-        # array's element schema has to survive the scope boundary, or nothing
-        # downstream can fan out over it.
+        # An OutputPort rather than a bare type where the shape matters: an
+        # array's element schema has to survive the scope boundary.
         self.carry: dict[str, OutputPort] = {
             name: value if isinstance(value, OutputPort) else OutputPort(name, value)
             for name, value in carry.items()
@@ -135,14 +125,8 @@ class Scope:
     ) -> TerminateNode:
         """Add an exit reporting ``outcome``.
 
-        Every reference handed in is wired as well as rendered. A payload key
-        and the dependency that makes it resolvable are the same fact, and
-        splitting them across two calls is how a template ends up referring to
-        a node the exit never declared.
-
-        Unnamed carried values are filled with an empty literal of their
-        declared type, because a key present on one path and absent on another
-        is a template error waiting for the branch nobody tested.
+        Every reference handed in is wired as well as rendered. Carried values
+        left unnamed are filled with an empty literal of their declared type.
         """
         if outcome not in self.outcomes:
             raise CompositionError(
@@ -239,16 +223,13 @@ class Scope:
             max_depth=max_depth,
             outcomes=self.outcomes,
         )
-        parent.add_subworkflow(node, self.body)
+        parent.add_subgraph(node, self.body)
         return node
 
     def _check_sealed(self) -> None:
         """Every way out must be an exit, and nothing may leak past them."""
-        # An edge to END is a way out that reports nothing. The child then
-        # returns whatever its `output:` map holds — for a scope, nothing — and
-        # the parent's outcome routes all read an undefined variable. That also
-        # silently voids `branch_on_outcome`'s exhaustiveness, which is the one
-        # exemption the "only conditional routes" lint grants.
+        # An edge to END reports nothing, so the parent's outcome routes would
+        # read an undefined variable.
         loose = sorted({e.source.node_id for e in self.body.edges if e.is_end})
         if loose:
             raise CompositionError(
@@ -274,12 +255,8 @@ class Scope:
                 "reports; either add an exit or drop them from the vocabulary"
             )
         if self.body.back_edges() and self.body.loop_passes is None:
-            # Conductor has no route for exhaustion: `_run_child_engine` catches
-            # WorkflowTerminated and nothing else, so MaxIterationsError from a
-            # child escapes as an ExecutionError in the parent — past every
-            # outcome route the parent declared. A looping body must therefore
-            # carry its own bound and take an exit before the engine's budget
-            # runs out; `converge` is the constructor that does the counting.
+            # `_run_child_engine` catches WorkflowTerminated and nothing else,
+            # so a child's MaxIterationsError escapes past every outcome route.
             raise CompositionError(
                 f"scope {self.stage_id!r} loops but sets no loop_passes. Exhaustion is not an "
                 "outcome — a child that runs out of iterations raises past the parent's routes "

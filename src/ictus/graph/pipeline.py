@@ -1,12 +1,7 @@
 """The composition graph.
 
-``Pipeline`` owns every edge. Nodes never point at each other, so a node stays
-reusable across pipelines and there is exactly one place that knows the shape of
-the graph.
-
-Every rejection happens at the call that introduces the invalid state, not at
-emission: a port mismatch fails in ``connect``, a foreign node fails in
-``connect``, an unroutable gate choice fails in ``branch``.
+``Pipeline`` owns every edge; nodes never point at each other. Invalid state is
+rejected at the call that introduces it, not at emission.
 """
 
 from __future__ import annotations
@@ -37,15 +32,32 @@ if TYPE_CHECKING:
     from ictus.graph.signals import RunSignal
     from ictus.graph.values import YamlScalar
 
+__all__ = [
+    "END",
+    "BudgetMode",
+    "ContextMode",
+    "DataDep",
+    "Edge",
+    "EdgeTarget",
+    "ExposedOutput",
+    "FailureMode",
+    "Listener",
+    "NativeTools",
+    "ParallelGroup",
+    "Pipeline",
+    "RouteEnd",
+    "TrimStrategy",
+    "WorkflowInput",
+]
+
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
 
 # Conductor permits only these inside a parallel group (config/validator.py:748-785).
 _GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
 
 ContextMode = Literal["accumulate", "last_only", "explicit"]
-#: What built-in tools a step that names none of its own is given. ``none``,
-#: everything the CLI can do, or exactly the tool ids listed — which is the one
-#: that lets a step read a repository without also being handed a shell.
+#: Built-in tools for a step that names none of its own: nothing, everything
+#: the CLI can do, or exactly the tool ids listed.
 NativeTools = Literal["none", "claude_code"] | tuple[str, ...]
 BudgetMode = Literal["audit", "enforce"]
 
@@ -68,21 +80,15 @@ class TrimStrategy(StrEnum):
     """Delete whole step outputs, oldest first."""
 
     SUMMARIZE = "summarize"
-    """Replace outputs with one short summary, deleting the originals — and fall
-    back to ``DROP_OLDEST`` where the engine cannot reach a model to write it."""
+    """Replace outputs with one summary. Falls back to ``DROP_OLDEST`` with no model."""
 
 
 @dataclass(frozen=True, eq=False)
 class ParallelGroup:
-    """Members that run at once, addressed as one thing by the graph.
+    """Members that run at once, routed as one node.
 
-    Routing goes to and from the *group*; members carry no edges of their own.
-    That is not an ictus choice — Conductor rejects a member with ``routes``,
-    and rejects gates, scripts, waits, sub-workflows and terminals as members
-    outright. Only model calls and computations may run in a group.
-
-    ``node_id`` is deliberately the same attribute a node uses, so every routing
-    path treats a group and a node identically.
+    Only model calls and computations may be members.
+    Members carry no edges of their own.
     """
 
     group_id: str
@@ -92,7 +98,6 @@ class ParallelGroup:
 
     @property
     def node_id(self) -> str:
-        """The identifier routing resolves against."""
         return self.group_id
 
 
@@ -121,15 +126,9 @@ class WorkflowInput:
     default: YamlScalar = None
     description: str = ""
     prose: bool = False
-    """Whether an input file's body text feeds this parameter.
-
-    At most one per pipeline. It is the long input — a brief, a charge, a diff —
-    and putting it in the body rather than under a YAML key is the difference
-    between editing a document and editing a config file.
-    """
+    """Whether the input file's body text feeds this parameter. At most one per pipeline."""
 
     def ref(self) -> Ref:
-        """A typed reference to this pipeline parameter."""
         return Ref(
             source_id=self.name,
             port=self.name,
@@ -141,16 +140,7 @@ class WorkflowInput:
 
 @dataclass(frozen=True, slots=True)
 class Listener:
-    """What wakes a pipeline, declared beside what it reports to.
-
-    The other half of ``integrate``. A pipeline that announces into a channel
-    but is started by a flag somebody typed is only half written down: a reader
-    can see where it will talk and not what makes it run, and the two have to
-    agree about which input carries the conversation.
-
-    Compiled into a manifest beside the workflow, so what starts a run ships
-    with the run and is reviewed in the same diff.
-    """
+    """What wakes a pipeline. Compiled into a manifest beside the workflow."""
 
     service: Integration
     prefix: str
@@ -160,17 +150,14 @@ class Listener:
     """The input the text after the prefix arrives in."""
 
     thread: WorkflowInput | None = None
-    """Where the conversation is addressed, taken from the same service's
-    ``integrate``. ``None`` when the pipeline reports nowhere."""
+    """Where the conversation is addressed. ``None`` when the pipeline reports nowhere."""
 
 
 @dataclass(frozen=True, eq=False)
 class Edge:
     """A control edge — who runs next. Emitted as ``routes`` or ``options[].route``.
 
-    Carries no data. Conductor separates control (``routes``) from data
-    (``input``), and collapsing them loses every reference that has to cross a
-    gate: a gate's branch decides where to go, not what the target reads.
+    Carries no data; what a node reads is a ``DataDep``.
     """
 
     source: RouteEnd
@@ -179,12 +166,10 @@ class Edge:
     when: str | Template | None = None
 
     def condition_refs(self) -> tuple[Ref, ...]:
-        """Typed references inside this edge's condition."""
         return tuple(self.when.refs()) if isinstance(self.when, Template) else ()
 
     @property
     def is_end(self) -> bool:
-        """Whether this edge terminates the run rather than naming a successor."""
         return isinstance(self.target, _End)
 
     @property
@@ -194,7 +179,7 @@ class Edge:
 
     @property
     def describe_target(self) -> str:
-        """A human-readable target, for error messages only — never emitted."""
+        """For error messages only. Never emitted."""
         target = self.target_node
         return "END" if target is None else target.node_id
 
@@ -203,10 +188,7 @@ class Edge:
 class ExposedOutput:
     """One entry of a pipeline's final ``output:`` map, before rendering.
 
-    Kept as the source and the port rather than a finished template so the
-    backend decides how to address it — which is the only place that knows a
-    group member is read through its group, and that a value crossing a
-    rendered-text boundary has to survive being parsed back.
+    Held as source and port, not a rendered template; the backend addresses it.
     """
 
     source: Node | MapGroup
@@ -218,34 +200,23 @@ class ExposedOutput:
 class DataDep:
     """A data edge — what a node reads. Emitted into the target's ``input`` list.
 
-    The source may be a map group as well as a node: a for-each group publishes
-    one aggregate under its own name, and a later step reads it exactly the way
-    it reads a step's output.
+    The source may be a map group, which publishes one aggregate under its name.
     """
 
     source: Node | MapGroup
     target: Node
     connection: PortConnection
     previous_pass: bool = False
-    """Whether this edge reads what the source produced on the *last* time round.
+    """Whether this edge reads what the source produced on the previous pass.
 
-    Only meaningful between two members of one parallel group, where it is the
-    difference between a reference that resolves to nothing and one that carries
-    the previous round. The engine stores a group's result under the group's own
-    name and overwrites it when the group next finishes, so while a member is
-    running its siblings' entries still hold the pass before. Outside a loop
-    there is no such pass, which is what the lint checks.
+    Only valid between two members of one parallel group, inside a loop.
     """
 
 
 class Pipeline:
     """A workflow graph plus the run-level settings Conductor needs.
 
-    ``loop_passes`` is mandatory once the graph contains a cycle. Conductor's
-    ``limits.max_iterations`` defaults to 10 *total step executions*, so a
-    six-node graph with one retry loop is force-stopped on its second pass by a
-    number nobody chose. Requiring the bound makes the choice explicit and lets
-    the emitter derive a value from the actual graph.
+    ``loop_passes`` is mandatory once the graph contains a cycle.
     """
 
     def __init__(
@@ -277,58 +248,36 @@ class Pipeline:
         self.pipeline_id = pipeline_id
         self.description = description
         self.version = version
-        # None means "whatever the backend defaults to". The graph has no
-        # opinion about providers; leaving it unset here is not the same as
-        # leaving it unset in the emitted file, which is what silently selected
-        # copilot before.
+        # None means "whatever the backend defaults to".
         self.provider = provider
         self.default_model = default_model
         self.native_tools: NativeTools | None = None
-        """Whether a step that names no tools gets the engine's built-in set.
-
-        Off unless asked for. A step with no ``tools`` used to be handed the
-        filesystem, a shell and the web without the pipeline ever saying so,
-        which Conductor closed — and closing it means a step that was reading
-        files now quietly answers from memory instead. Set it where the policy
-        lives, so the diff shows which pipelines can touch a disk."""
+        """Whether a step naming no tools gets the engine's built-in set. Off unless set."""
         self.context_mode: ContextMode = context_mode
         self.context_max_tokens = context_max_tokens
         """A soft ceiling on accumulated context, above which the engine trims.
 
-        Per workflow file, which means per *stage*: a stage compiles to its own
-        document with its own ``context:`` block, so a long council can be
-        bounded without bounding its caller. There is no per-node equivalent —
-        the engine has no per-agent context config.
+        Per workflow file, so per stage. There is no per-node equivalent.
         """
 
         self.context_trim = context_trim
         """How the engine makes room once the ceiling is reached.
 
-        Named rather than left to the engine, which silently uses
-        ``drop_oldest``. That one deletes whole step outputs, oldest first, and
-        a deleted output is indistinguishable from inside a prompt from a step
-        that has not run yet — so a loop reading it carries on rendering nothing
-        and looks like a first pass forever. ``TRUNCATE`` shortens fields in
-        place and leaves every reference resolvable, which is the only strategy
-        that degrades rather than disappears.
+        Unset, the engine uses ``drop_oldest``.
         """
         self.loop_passes = loop_passes
         self.budget_usd = budget_usd
         self.budget_mode: BudgetMode = budget_mode
         self.max_iterations = max_iterations
-        # A wall-clock ceiling on the whole run, as against a step's own
-        # `timeout_seconds`, which bounds one model call. Nothing else bounds
-        # elapsed time: `budget_usd` bounds spend and `max_iterations` bounds
-        # step count, and a run can sit for hours without moving either.
+        # Wall-clock ceiling on the whole run, as against a step's own
+        # `timeout_seconds`, which bounds one model call.
         self.timeout_seconds = timeout_seconds
         self.metadata: dict[str, str] = dict(metadata or {})
-        # Prepended to every step's prompt. The engine runs its agents with no
-        # settings sources at all — no CLAUDE.md, no ambient skills, no hooks —
-        # so a step knows nothing about the project it is working on beyond what
-        # its prompt says. This is where that context goes back in.
+        # Prepended to every step's prompt. The engine loads no CLAUDE.md,
+        # skills or hooks, so this is a step's only project context.
         self.instructions: list[str] = list(instructions)
-        # Applied to every model call that does not set its own. Left unset the
-        # engine sends an *empty* system prompt, not a default one.
+        # Applied to every model call that does not set its own. Unset, the
+        # engine sends an empty system prompt, not a default one.
         self.system_prompt = system_prompt
 
         self._nodes: list[Node] = []
@@ -350,19 +299,15 @@ class Pipeline:
         self.workspace_instructions = True
         """Whether a run is given what the working directory says about itself.
 
-        Policy, set from ``config.yaml``, and it travels in the listen manifest
-        because the process that starts a run is the one that has to pass the
-        flag. On by default: a step otherwise arrives knowing nothing a project
-        says about how it wants to be worked in. Off for a pipeline whose work
-        is not *about* the directory it runs in — a tracker ticket does not want
-        a contributor guide prepended to every prompt."""
+        Set from ``config.yaml``; travels in the listen manifest. On by default.
+        """
         self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
     # -- construction ----------------------------------------------------
 
     def add[N: Node](self, node: N) -> N:
-        """Register a node. Returns it unchanged so callers keep the concrete type."""
+        """Register a node. Returns it unchanged, keeping the concrete type."""
         existing = self._by_id.get(node.node_id)
         if existing is not None:
             what = "the same node twice" if existing is node else "two nodes"
@@ -374,11 +319,14 @@ class Pipeline:
         self._by_id[node.node_id] = node
         return node
 
-    def add_subworkflow(self, node: SubGraphNode, body: Pipeline) -> SubGraphNode:
+    def add_subgraph(self, node: SubGraphNode, body: Pipeline) -> SubGraphNode:
+        # `subgraph`, not `subworkflow`: the graph's own noun for this is
+        # SUB_GRAPH, and "workflow" is what Conductor calls the file it compiles
+        # to. The engine's spelling on a public method of the composition model
+        # is the defect AGENTS.md names; test_boundaries.py now refuses it.
         """Register a nested workflow and the pipeline it compiles from.
 
-        The child is a full ``Pipeline`` with its own entry point and graph;
-        the parent spends exactly one iteration on it.
+        The parent spends exactly one iteration on it.
         """
         self.add(node)
         self._children[node.node_id] = body
@@ -399,9 +347,8 @@ class Pipeline:
     ) -> ParallelGroup:
         """Run ``members`` at once, as one addressable step.
 
-        The members must already be part of this pipeline; the group is a way of
-        scheduling them, not a second place to declare them. A group costs its
-        member count against the iteration budget all at once.
+        Members must already be registered here. The group costs its member
+        count against the iteration budget.
         """
         if group_id in self._groups or group_id in self._by_id:
             raise CompositionError(
@@ -448,13 +395,10 @@ class Pipeline:
         failure_mode: FailureMode | None = None,
         key_by: str | None = None,
     ) -> MapGroup:
-        """Run ``body`` once per element of ``source``, however many there are.
+        """Run ``body`` once per element of ``source``, whose width is known only at run time.
 
-        This is the fan-out whose width the author does not know: it comes out
-        of an earlier step at run time. ``body`` is a node of this pipeline and
-        stops being an ordinary step — it gets no routes of its own, since an
-        item cannot decide where the run goes next, and it is not emitted in
-        ``agents:``; it becomes the group's inline template.
+        ``body`` gets no routes of its own and is not emitted in ``agents:``; it
+        becomes the group's inline template.
         """
         if group_id in self._groups or group_id in self._maps or group_id in self._by_id:
             raise CompositionError(
@@ -496,7 +440,6 @@ class Pipeline:
         return next((m for m in self._maps.values() if m.body is node), None)
 
     def map_named(self, group_id: str) -> MapGroup | None:
-        """The map group with this id, if the pipeline has one."""
         return self._maps.get(group_id)
 
     @property
@@ -507,8 +450,7 @@ class Pipeline:
     def group_of(self, node: Node) -> ParallelGroup | None:
         """The group ``node`` runs inside, if any.
 
-        Load-bearing for references: a member's output is read through the
-        group, not directly, and emitting the direct form renders empty.
+        A member's output is read through the group; the direct form renders empty.
         """
         for group in self._groups.values():
             if any(m is node for m in group.members):
@@ -539,9 +481,7 @@ class Pipeline:
     def require_executable(self, tool: Executable) -> Executable:
         """Declare a command that must be reachable before this pipeline runs.
 
-        For a step whose job is to check something against a tool: if the tool
-        is not there, the step does not crash, it concludes. Refusing at the
-        launch is the difference between a free failure and a paid one.
+        Checked by preflight, so a missing tool refuses the launch.
         """
         existing = self._executables.get(tool.name)
         if existing is not None:
@@ -558,11 +498,7 @@ class Pipeline:
         return tuple(self._executables.values())
 
     def all_executables(self) -> tuple[Executable, ...]:
-        """This pipeline's commands and those of every stage it contains.
-
-        A stage runs in the same environment as its caller, so its requirement
-        is the caller's problem too — the same reasoning as ``all_mcp_servers``.
-        """
+        """This pipeline's commands and those of every stage it contains."""
         seen: dict[str, Executable] = dict(self._executables)
         for child in self._children.values():
             for tool in child.all_executables():
@@ -572,15 +508,7 @@ class Pipeline:
     def require_datasource(self, source: Datasource) -> Datasource:
         """Declare somewhere this pipeline reads data from.
 
-        Beside ``require_executable`` and ``integrate``, and for the same
-        reason: a reader should see what a run reaches outside the machine
-        before they read what it does, and a connection string that is not set
-        should refuse the launch rather than fail a step that has already been
-        paid for.
-
-        The commands the source needs are declared with it, so a machine
-        without them is refused by the same preflight and nobody has to
-        remember that one implies the other.
+        The source's own ``needs`` are registered as executables alongside it.
         """
         existing = self._datasources.get(source.name)
         if existing is not None:
@@ -607,12 +535,7 @@ class Pipeline:
         return tuple(seen.values())
 
     def all_mcp_servers(self) -> tuple[McpServer, ...]:
-        """This pipeline's servers and those of every stage it contains.
-
-        A stage is compiled as its own workflow with its own runtime block, but
-        preflight is about the environment the whole launch needs — so the
-        requirement of a nested stage is the caller's problem too.
-        """
+        """This pipeline's servers and those of every stage it contains."""
         seen: dict[str, McpServer] = {s.name: s for s in self._mcp.values()}
         for child in self._children.values():
             for server in child.all_mcp_servers():
@@ -622,15 +545,8 @@ class Pipeline:
     def before_start_gate[N: Node](self, node: N) -> N:
         """Run ``node`` first, ahead of the confirmation gate.
 
-        The start gate is placed at the entry point when a pipeline is loaded,
-        which means nothing can ordinarily precede it — and the one thing most
-        worth saying out loud is that a run has parked on it and is waiting for
-        somebody. A pipeline whose job is to report had no way to report that.
-
-        Wire nothing: the node is placed by whoever applies the start policy, so
-        it is correct whether the gate is on or off. Its outputs are readable
-        like any other node's, which is how an announcement that opens a thread
-        can have the rest of the run reply underneath it.
+        Wire nothing: placement is done by whoever applies the start policy, so
+        it holds whether the gate is on or off. One node per pipeline.
         """
         if self._before_start is not None:
             raise CompositionError(
@@ -651,18 +567,9 @@ class Pipeline:
     ) -> Integration:
         """Declare a third-party service this pipeline talks to.
 
-        ``thread`` says the conversation is already open and names the input it
-        arrives in — a run started *by* a message reports under that message
-        rather than beside it. Without one a run opens its own.
-
-        Put these at the top of a pipeline. A reader should see what a run will
-        reach outside the machine before they read what it does, and whoever
-        approves the run is shown the same list at the start gate.
-
-        Declaring is not attaching. Nothing is inserted until the pipeline is
-        loaded, and what gets inserted is decided by the signals the integration
-        names — so adding a destination is one line here and removing it is
-        deleting that line, rather than unpicking nodes and data edges by hand.
+        ``thread`` names the input an already-open conversation arrives in;
+        without one a run opens its own. Declaring is not attaching — nodes are
+        inserted when the pipeline is loaded, from the signals the service names.
         """
         existing = self._integrations.get(service.name)
         if existing is not None:
@@ -688,14 +595,9 @@ class Pipeline:
     def listen_on(self, service: Integration, *, prefix: str, into: WorkflowInput) -> Listener:
         """Declare that a message on ``service`` starts this pipeline.
 
-        ``prefix`` is what marks a message as a request; whatever follows it
-        becomes ``into``. The conversation comes from the same service's
-        ``integrate(thread=...)``, so the run reports under the message that
-        started it without the two being named separately and drifting apart.
-
-        Put it beside ``integrate``. A reader should see what wakes a run in
-        the same place they see what it talks to, and a listener should not
-        need flags that repeat what the pipeline already knows.
+        ``prefix`` marks a message as a request; whatever follows it becomes
+        ``into``. The conversation comes from the same service's
+        ``integrate(thread=...)``. The service must be integrated first.
         """
         if service.name not in self._integrations:
             raise CompositionError(
@@ -755,11 +657,7 @@ class Pipeline:
         return tuple(self._integrations.values())
 
     def all_integrations(self) -> tuple[Integration, ...]:
-        """This pipeline's services and those of every stage it contains.
-
-        A stage reports onto its caller's conversation — one run, one thread — so
-        a nested declaration is the caller's problem too.
-        """
+        """This pipeline's services and those of every stage it contains."""
         seen: dict[str, Integration] = dict(self._integrations)
         for child in self._children.values():
             for service in child.all_integrations():
@@ -769,14 +667,7 @@ class Pipeline:
     def insert_before[N: Node](self, existing: Node, inserted: N) -> N:
         """Put ``inserted`` in front of ``existing``, taking over its inbound edges.
 
-        Every route that pointed at ``existing`` now points at ``inserted``, and
-        ``inserted`` routes on to ``existing``. The entry point moves too when
-        ``existing`` was it.
-
-        This is what lets an announcement be attached to a graph somebody else
-        wrote. Doing it by hand means knowing every edge that arrives — including
-        the gate branches, which name their target by choice — and getting one
-        wrong is a step that silently never runs.
+        The entry point moves too when ``existing`` was it.
         """
         self._require_member(existing, "insertion point")
         self.add(inserted)
@@ -794,9 +685,7 @@ class Pipeline:
     def insert_before_end[N: Node](self, inserted: N) -> N:
         """Put ``inserted`` on every way this graph reaches the end of the run.
 
-        The ``END`` counterpart of ``insert_before``: each edge that finished the
-        run now runs ``inserted`` instead, and ``inserted`` finishes it. A gate's
-        branch keeps its case, so "no" still means no.
+        Each edge keeps its case, so a gate branch still means what it meant.
         """
         finishing = [edge for edge in self._edges if edge.is_end]
         if not finishing:
@@ -817,9 +706,7 @@ class Pipeline:
     def prepend[N: Node](self, node: N) -> N:
         """Run ``node`` before whatever this graph currently starts with.
 
-        Unlike ``insert_before``, the old entry keeps every edge that arrives at
-        it later: a loop that returns to the first step returns there, not to
-        ``node``, which runs once.
+        The old entry keeps its inbound edges, so ``node`` runs once.
         """
         first = self.entry()
         self.add(node)
@@ -827,19 +714,12 @@ class Pipeline:
         self.set_entry(node)
         return node
 
-    def widen_subworkflow(self, host: SubGraphNode, port: InputPort) -> None:
+    def widen_subgraph(self, host: SubGraphNode, port: InputPort) -> None:
         """Give a stage already placed here one more parameter.
 
-        For what is attached after a stage was placed — an integration threading
-        its conversation into the stage's own gates — rather than for authoring;
-        a stage's contract is otherwise fixed when it is instantiated.
-
-        The node is changed in place, which a frozen node is not supposed to
-        allow. Replacing it was the alternative and is worse: every edge, data
-        dependency and typed reference holds the node itself, and a replacement
-        would leave all of them pointing at one that is no longer in the graph.
-        Only an optional port is accepted, so every other placement of the same
-        stage, and every caller that does not supply it, stays valid.
+        For attachment after placement, not for authoring. Mutates the frozen
+        node in place, since edges and refs hold the node itself. Optional
+        ports only, so other placements of the same stage stay valid.
         """
         self._require_member(host, "stage")
         if host.node_id not in self._children:
@@ -871,9 +751,8 @@ class Pipeline:
     ) -> WorkflowInput:
         """Declare a pipeline-level parameter.
 
-        ``prose`` marks the one input an input file's body feeds. At most one
-        per pipeline: the body is a single run of text, so two claims on it is
-        an ambiguity nothing downstream can resolve.
+        ``prose`` marks the one input an input file's body feeds; at most one
+        per pipeline, and it must be a string.
         """
         if name in self._inputs:
             raise CompositionError(f"workflow input {name!r} is already declared")
@@ -903,8 +782,7 @@ class Pipeline:
     def set_entry(self, start: RouteEnd) -> None:
         """Pin the entry point rather than letting it fall out of insertion order.
 
-        A parallel group is a legal entry point: Conductor resolves
-        ``entry_point`` against groups as well as agents.
+        A parallel group is a legal entry point.
         """
         self._require_routable(start, "entry point")
         self._entry = start
@@ -949,7 +827,6 @@ class Pipeline:
         return edge
 
     def connect_input(self, param: WorkflowInput, target: Node, to_port: str) -> None:
-        """Feed a pipeline parameter into a node's input port."""
         if self._inputs.get(param.name) is not param:
             raise CompositionError(
                 f"workflow input {param.name!r} was not declared on pipeline {self.pipeline_id!r}"
@@ -975,20 +852,10 @@ class Pipeline:
     ) -> DataDep:
         """Declare that ``target`` reads a value from ``source``, with no control edge.
 
-        Needed whenever data and control diverge — most often across a gate. The
-        gate decides *where* execution goes; the node it routes to still has to
-        read the value produced before the gate, and Conductor will not infer
-        that under ``context.mode: explicit``.
+        For wherever data and control diverge, most often across a gate.
 
-        ``previous_pass`` is how one member of a parallel group reads another.
-        Ordinarily that is refused, because the two run at once and the
-        reference resolves to nothing. Inside a loop it resolves to something
-        useful instead: the engine keys a group's result by the group's name and
-        overwrites it only when the group next *finishes*, so a member running
-        its second pass still sees its siblings' first. Saying so explicitly is
-        the point — the value is a round behind, and a caller that did not mean
-        that has written a subtle bug. The lint refuses the flag on a graph with
-        no loop, where there is no previous pass to read.
+        ``previous_pass`` lets one member of a parallel group read another, and
+        is only valid inside a loop: the value is a round behind.
         """
         self._require_routable(source, "data source")
         self._require_member(target, "data target")
@@ -1032,12 +899,7 @@ class Pipeline:
     def route(
         self, source: RouteEnd, target: EdgeTarget, *, when: str | Template | None = None
     ) -> Edge:
-        """Add a control-only edge carrying no data.
-
-        Use this when the target needs nothing from the source. It is a distinct
-        method rather than an optional-port variant of ``connect`` so that "no
-        data flows here" is a decision in the source, not an omission.
-        """
+        """Add a control-only edge carrying no data."""
         self._require_routable(source, "edge source")
         if not isinstance(target, _End):
             self._require_routable(target, "edge target")
@@ -1054,9 +916,7 @@ class Pipeline:
     def branch(self, gate: GateNode, routes: Mapping[str, EdgeTarget]) -> None:
         """Route each of a gate's choices to a target.
 
-        Every declared choice must be routed and no unknown value may appear:
-        an unrouted choice is a dead button in the dashboard, and an unknown one
-        is a route the human can never reach.
+        Every declared choice must be routed, and no unknown value may appear.
         """
         self._require_member(gate, "branch source")
         declared = {c.value for c in gate.choices}
@@ -1084,10 +944,7 @@ class Pipeline:
     def branch_on_outcome(self, node: ScopeNode, routes: Mapping[str, EdgeTarget]) -> None:
         """Route each of a scope's outcomes to a target.
 
-        The scope's vocabulary is closed and every exit reports a member of it,
-        so a complete mapping needs no fallback route — which is the whole point
-        of banning outcome names that JSON-parse into non-strings. Leave one out
-        and the run reaches the scope, returns, and stops with nowhere to go.
+        The outcome vocabulary is closed, so the mapping must be complete.
         """
         self._require_member(node, "branch source")
         declared = set(node.outcomes)
@@ -1109,9 +966,8 @@ class Pipeline:
             target = routes[outcome]
             if isinstance(target, Node):
                 self._require_member(target, "branch target")
-            # `case` records which outcome this edge covers. It is not emitted —
-            # the `when` is what Conductor evaluates — but it is what lets the
-            # "only conditional routes" lint see that the fan-out is complete.
+            # `case` is not emitted; `when` is what Conductor evaluates. It is
+            # how the lint sees that the fan-out is complete.
             self._edges.append(
                 Edge(
                     source=node,
@@ -1124,11 +980,7 @@ class Pipeline:
     ABORT_CASE = "__abort__"
 
     def abort_route(self, node: QuestionsNode, target: EdgeTarget) -> Edge:
-        """Where a person goes if they abandon a set of questions.
-
-        A real edge, not a footnote: without it in the graph, whatever handles
-        an abandoned run looks unreachable and the lint says so.
-        """
+        """Where a person goes if they abandon a set of questions."""
         self._require_member(node, "abort source")
         if not isinstance(target, _End):
             self._require_routable(target, "abort target")
@@ -1143,20 +995,15 @@ class Pipeline:
     ) -> None:
         """Publish a node output as part of the pipeline's final result.
 
-        The port type is retained even though Conductor's top-level ``output:``
-        is ``dict[str, str]`` — a rendered template with JSON coercion, not a
-        typed contract. Keeping the type here is what lets a stage be wired into
-        a parent with the same checking as any other edge.
+        The port type is kept so a stage can be wired into a parent and checked
+        like any other edge, though Conductor's ``output:`` is ``dict[str, str]``.
         """
         self._require_routable(node, "output source")
         port = node.get_output(from_port)
         if name in self._outputs:
             raise CompositionError(f"pipeline output {name!r} is already exposed")
-        # The source and the port, not a rendered string. How Conductor spells a
-        # reference is the backend's business, and building it here got a group
-        # member's address wrong — `member.output.field` is a name the engine
-        # never binds, so the output rendered empty and the guard was always
-        # false. `output_path` already knows the rule; the graph should not.
+        # Source and port, not a rendered string: how a reference is spelled is
+        # the backend's business, and `output_path` already knows the rule.
         self._outputs[name] = ExposedOutput(source=node, port=port, default=default)
 
     # -- guards ----------------------------------------------------------
@@ -1266,12 +1113,8 @@ class Pipeline:
     def output_contract_names(self) -> frozenset[str]:
         """Every key a parent can rely on reading back from this workflow.
 
-        A terminal's ``result`` is emitted as ``output_template``, which
-        *replaces* the workflow-level ``output:`` on the path that reaches it —
-        so the two are alternatives, not layers. A key only counts if every way
-        the run can end produces it: one resultless terminal is enough to make
-        an ``output:`` key the fallback again, and one terminal that omits a key
-        the others carry makes that key absent on a branch nobody tested.
+        A terminal's ``result`` replaces the workflow ``output:`` on its path,
+        so a key counts only if every way the run can end produces it.
         """
         exposed = frozenset(self._outputs)
         terminals = [n for n in self._nodes if isinstance(n, TerminateNode)]
@@ -1294,7 +1137,6 @@ class Pipeline:
         return tuple(self._deps)
 
     def deps_into(self, node: Node) -> list[DataDep]:
-        """Data dependencies that ``node`` reads."""
         return [d for d in self._deps if d.target is node]
 
     def outgoing(self, node: RouteEnd) -> list[Edge]:
@@ -1308,9 +1150,8 @@ class Pipeline:
     def entry(self) -> RouteEnd:
         """Resolve the entry point.
 
-        An explicit ``set_entry`` wins. Otherwise the unique node with no
-        inbound edge is used; if that is ambiguous the caller is told to pin it
-        rather than having insertion order decide silently.
+        ``set_entry`` wins; otherwise the unique node with no inbound edge.
+        Ambiguity is an error rather than a silent choice.
         """
         if self._entry is not None:
             return self._entry
@@ -1340,11 +1181,7 @@ class Pipeline:
         )
 
     def _successors(self, end: RouteEnd) -> Iterable[RouteEnd]:
-        """What runs after ``end``.
-
-        Entering a group reaches its members: they have no inbound edge of their
-        own, so without this they would look unreachable.
-        """
+        """What runs after ``end``. Entering a group reaches its members."""
         if isinstance(end, ParallelGroup):
             yield from end.members
         if isinstance(end, MapGroup):
@@ -1355,13 +1192,12 @@ class Pipeline:
         if isinstance(end, Node):
             enclosing: RouteEnd | None = self.group_of(end) or self.map_of(end)
             if enclosing is not None:
-                # A member's continuation is whatever the group routes to.
+                # A member continues wherever the group routes.
                 for edge in self._edges:
                     if edge.source is enclosing and not isinstance(edge.target, _End):
                         yield edge.target
 
     def reaches(self, start: RouteEnd, goal: RouteEnd) -> bool:
-        """Whether ``goal`` is reachable from ``start`` by following edges."""
         seen: set[str] = set()
         stack: list[RouteEnd] = [start]
         while stack:
@@ -1376,7 +1212,6 @@ class Pipeline:
         return False
 
     def reachable_from_entry(self) -> set[str]:
-        """Node ids reachable from the entry point."""
         start = self.entry()
         seen: set[str] = {start.node_id}
         stack: list[RouteEnd] = [start]
@@ -1388,20 +1223,14 @@ class Pipeline:
         return seen
 
     def back_edges(self) -> list[Edge]:
-        """Control edges that close a cycle, by depth-first search.
-
-        Detected as edges into a node still on the DFS stack. The cheaper test
-        "target can reach source" is wrong: in a two-node loop both edges pass
-        it, so the forward edge gets reported as a back edge too.
-        """
+        """Control edges that close a cycle: edges into a node still on the DFS stack."""
         state: dict[str, int] = {}
         found: list[Edge] = []
 
         def visit(node: RouteEnd) -> None:
             state[node.node_id] = 1
             for edge in self.outgoing(node):
-                # A group is a routing endpoint like a node: an edge back into
-                # one closes a cycle exactly as an edge back into a node does.
+                # A group is a routing endpoint like a node.
                 if isinstance(edge.target, _End):
                     continue
                 mark = state.get(edge.target.node_id, 0)
@@ -1420,9 +1249,8 @@ class Pipeline:
     def may_be_unresolved(self, source: RouteEnd, target: RouteEnd) -> bool:
         """Whether ``target`` can run before ``source`` has produced anything.
 
-        True when ``target`` is reachable from the entry point without passing
-        through ``source`` — which is exactly when a reference to a
-        ``source`` output has to be emitted optional.
+        True when ``target`` is reachable from the entry without passing through
+        ``source``, which is when a reference to it must be emitted optional.
         """
         start = self.entry()
         if start is source:
@@ -1430,20 +1258,15 @@ class Pipeline:
         if start is target:
             return True
 
-        # Passing a group means every one of its members has run: the group does
-        # not route onward until they finish. So a member is a barrier, and so is
-        # the group that contains it — without the second, the group's outward
-        # edge looks like a way to reach the target with the member skipped, and
-        # a perfectly available value gets emitted as optional.
+        # A group does not route onward until its members finish, so both the
+        # member and its group are barriers.
         barriers = {source.node_id}
         if isinstance(source, Node):
             group = self.group_of(source)
             if group is not None:
                 barriers.add(group.group_id)
 
-        # The entry can itself be the barrier — a pipeline whose first step is
-        # the group. Expanding it would walk straight past the very thing that
-        # has to run first.
+        # The entry can itself be the barrier; expanding it would walk past it.
         if start.node_id in barriers:
             return False
 
@@ -1460,7 +1283,6 @@ class Pipeline:
         return False
 
     def has_cycle(self) -> bool:
-        """Whether the graph loops."""
         return bool(self.back_edges())
 
     def has_gate(self) -> bool:
@@ -1468,12 +1290,7 @@ class Pipeline:
         return any(isinstance(n, GateNode) for n in self._nodes)
 
     def require_loop_bound(self) -> None:
-        """Refuse a cyclic graph that never says how many times it may go round.
-
-        Generic, not engine-specific: every executor needs a bound, and an
-        unbounded loop is an authoring omission rather than a target's problem.
-        How the bound is spent is the backend's arithmetic.
-        """
+        """Refuse a cyclic graph that never says how many times it may go round."""
         if self.has_cycle() and self.loop_passes is None and self.max_iterations is None:
             raise CompositionError(
                 f"pipeline {self.pipeline_id!r} contains a loop but sets no loop_passes; "
@@ -1484,11 +1301,8 @@ class Pipeline:
     def total_cost(self) -> int:
         """Every step in this graph, run once.
 
-        Executions, not nodes: a parallel group costs one per member and a map
-        group up to one per item, because the engine charges a group's whole
-        fan-out against the same budget as a single step. ``len(nodes)`` is the
-        number that reads like a step count and is not one — it prices a
-        four-node fan-out over ten items at four.
+        Executions, not nodes: a parallel group costs one per member, a map
+        group one per item.
         """
         grouped = {m.node_id for g in self._groups.values() for m in g.members}
         grouped |= {m.body.node_id for m in self._maps.values()}
@@ -1499,14 +1313,8 @@ class Pipeline:
     def budget_cost(self) -> int:
         """Step executions this graph can reach, loops included.
 
-        What a run has to be allowed to spend, as opposed to what it usually
-        will. Derived here rather than in a backend so the number a person is
-        shown before starting and the number compiled into the workflow's own
-        limit come from one place and cannot drift apart.
-
-        Callers that need the bound to be a decision rather than a default
-        should call ``require_loop_bound`` first; this treats an unbounded loop
-        as a single pass.
+        Treats an unbounded loop as a single pass; call ``require_loop_bound``
+        first to make the bound a decision.
         """
         if not self.has_cycle():
             return max(1, self.total_cost())
@@ -1515,25 +1323,14 @@ class Pipeline:
     def loop_cost(self, passes: int) -> int:
         """Extra step executions the graph's loops buy beyond one pass each.
 
-        Every cycle is priced, not just the costliest: two independent loops each
-        run their own passes, and budgeting for one of them force-stops the run
-        partway through the other. Nesting multiplies rather than adds — an inner
-        loop runs its full count on *every* outer pass — so a cycle contained
-        inside ``d`` others is priced at ``passes ** (d + 1)``.
-
-        This can over-price a graph whose loops cannot actually both run to their
-        bound. That is the safe direction: an over-estimate above the engine's
-        ceiling is refused loudly by ``_within_ceiling``, while an under-estimate
-        kills a run mid-pass with nothing to point at.
+        Every cycle is priced. Nesting multiplies: a cycle inside ``d`` others
+        costs ``passes ** (d + 1)``. Over-prices rather than under-prices.
         """
         loops = self._loops()
         extra = 0
         for header, (cost, _span) in loops.items():
-            # Nesting is about headers, not spans. Two back edges reaching the
-            # same header are alternative ways round *one* loop — you take one
-            # per pass, so their costs do not add. A loop is inside another only
-            # when its header sits within the other's body, and only then does
-            # it run its full count on every one of the outer's passes.
+            # Nesting is by header, not span: a loop is inside another only
+            # when its header sits within the other's body.
             depth = sum(1 for h, (_, span) in loops.items() if h != header and header in span)
             extra += cost * (passes ** (depth + 1) - 1)
         return extra
@@ -1541,9 +1338,7 @@ class Pipeline:
     def _loops(self) -> dict[str, tuple[int, frozenset[str]]]:
         """One entry per loop header: its costliest pass, and every step on it.
 
-        Back edges are grouped by target because that target is the loop header —
-        several latches into one header are one loop with several routes round
-        it, which is the shape a retry loop with an escalation branch produces.
+        Back edges are grouped by target, which is the loop header.
         """
         loops: dict[str, tuple[int, frozenset[str]]] = {}
         for edge in self.back_edges():
@@ -1557,16 +1352,7 @@ class Pipeline:
         return loops
 
     def longest_cycle_length(self) -> int:
-        """Step executions on the costliest cycle, or 0 when the graph is acyclic.
-
-        Executions, not nodes: entering a parallel group costs one per member
-        and a map group up to one per item, because Conductor charges a group's
-        whole fan-out against the same budget as a single step. Counting hops
-        instead under-prices every loop that contains a group, and the run dies
-        mid-pass on a number nobody chose.
-
-        Exposed so a backend can price a loop in whatever unit it counts.
-        """
+        """Step executions on the costliest cycle, or 0 when the graph is acyclic."""
         return max((self._cycle_span(e)[0] for e in self.back_edges()), default=0)
 
     def step_cost(self, end: RouteEnd) -> int:
@@ -1577,18 +1363,12 @@ class Pipeline:
             return end.expect_items
         return 1
 
-    # Enough to exhaust any real graph; past it the estimate falls back to the
-    # whole graph's cost, which over-prices rather than silently under-pricing.
+    # Past this the estimate falls back to the whole graph's cost, which
+    # over-prices rather than under-prices.
     _PATH_BUDGET = 20_000
 
     def _cycle_span(self, back_edge: Edge) -> tuple[int, frozenset[str]]:
-        """The costliest simple cycle closed by ``back_edge``: its cost and its steps.
-
-        The costliest rather than the shortest: a budget derived from the cheap
-        way round a branching loop is a budget the expensive way round breaks.
-        The step set comes back too, because whether one loop sits inside another
-        is what decides if their costs add or multiply.
-        """
+        """The costliest simple cycle closed by ``back_edge``: its cost and its steps."""
         if isinstance(back_edge.target, _End):
             return self.step_cost(back_edge.source), frozenset({back_edge.source.node_id})
         start, goal = back_edge.target, back_edge.source
@@ -1619,9 +1399,7 @@ class Pipeline:
     def _route_successors(self, end: RouteEnd) -> Iterable[RouteEnd]:
         """What runs after ``end``, following routes only.
 
-        Unlike ``_successors`` this does not descend into a group's members. A
-        member has no routes of its own, so it is never a step *on* a cycle —
-        the group is, and its cost already covers everyone inside it.
+        Does not descend into a group's members; the group's own cost covers them.
         """
         source = self.group_of(end) or self.map_of(end) if isinstance(end, Node) else None
         for edge in self._edges:

@@ -70,18 +70,69 @@ twice each here:
 
 ## Layers, and what each may know
 
+ictus builds Conductor pipelines. That is the whole job: compose a typed graph,
+check it, compile it, and run what it compiled. Anything that is not that is
+either an adapter (data a pipeline declares) or not ictus at all.
+
 - `graph/` models pipelines and knows **no engine**: nodes, typed ports, typed
   references, scopes, map groups.
 - `interfaces/` is the boundary — `Backend`, `Capabilities`, engine-neutral
   environment checks.
 - `interfaces/conductor/` is the **only** package permitted to know Conductor's
-  spelling: field names, template dialect, iteration accounting, CLI.
-- `stdlib/` holds ready-made nodes and stages built on the graph layer.
+  spelling: field names, template dialect, iteration accounting, CLI. Inside it,
+  `emit/` is a pure function of a pipeline — no environment read, no process
+  started, so `ictus emit` works on a laptop with no credentials and no engine —
+  `control/` only ever acts on a run that already exists, and `preflight.py`
+  answers questions about this machine. Nothing in `emit/` imports `control/`.
+- `stdlib/` holds ready-made nodes, stages and scopes built on the graph layer,
+  in folders named for `graph.NodeKind`'s vocabulary rather than the engine's.
+- `runspec/` is the running contract as code: what `config.yaml` and `input.md`
+  say, and what `ictus init` writes. `assemble/` turns those answers into graph
+  structure — the start gate, the announcements — at load, so that what is
+  emitted is what runs. `runs/` acts on a run that already exists: read the
+  manifests, launch one, answer a gate on one. All three are service-neutral.
+- `net/` is protocol with no ictus in it. It has two callers in different
+  concerns, which is why it is not filed under either.
+- `notify/` and `sources/` are the **adapter** boundaries — who hears about a
+  run, and where it reads from. A concrete service lives in one folder under
+  one of them and is pure data: a constructor returning an `Integration` or
+  `Datasource` whose `program` nothing above ever reads.
+- `bridge/` is **not ictus**. It is the chat daemon — a socket held open to a
+  vendor, button presses, forms — which ships in the same wheel under its own
+  `ictus-bridge` console script. It may import anything in `ictus`; nothing in
+  `ictus` may import it.
+- `cli/` is one module per group of verbs — `building`, `running`, `watching` —
+  each registering on the `app` in `cli/app.py`. A module that is not imported
+  from `cli/__init__.py` contributes no commands, which is the modern shape of
+  a bug that used to come from an `if __name__` guard; `TestEveryCommandIsReachable`
+  catches both.
 - `demo_work/pipelines/` holds real pipelines, one folder each. Nothing in
   `src/` imports from it.
 
-A Conductor field name appearing above the `interfaces/conductor/` line is a
-defect with a name, not a style preference.
+Only `__init__.py` and `errors.py` sit loose at the top of `src/ictus`. The
+second is there because all twelve packages import it — filing it under any one
+of them would point a dependency the wrong way — and because `__init__.py`
+re-exports it, which makes the two of them the package's own root vocabulary
+rather than a module that never found a home.
+
+Three rules, all three enforced by `tests/test_boundaries.py` rather than by
+this file:
+
+1. A Conductor field name above the `interfaces/conductor/` line is a defect
+   with a name, not a style preference — as is a function above it that returns
+   `YamlDict`, since assembling the engine's document shape *is* lowering. Both
+   are checked over `graph/`, `stdlib/`, `lint/`, `runspec/` and `assemble/`.
+2. A service's spelling anywhere but its own adapter folder or `bridge/` is the
+   same defect one axis over. The check tokenises, so prose naming the thing
+   being excluded is fine; an identifier is not.
+3. `ictus` never imports `ictus.bridge`, and never imports a concrete adapter
+   constructor by name. A *pipeline* names its service — that is the point of a
+   pipeline. The library that compiles it does not.
+
+Each of those had been written down somewhere and held by nothing, which is how
+the CLI grew a Slack bot, `answer.py` came to be typed on a Slack dataclass, and
+the one module in the audience boundary that knew the engine ended up filed
+under a vendor's name.
 
 ## Three tiers
 
@@ -114,6 +165,7 @@ uv run ictus emit      demo_work/pipelines   # after ANY change that reaches YAM
 uv run ictus validate  demo_work/pipelines   # Conductor's own loader
 uv run ictus preflight demo_work/pipelines   # can this machine run it?
 uv run ictus trace     <pipeline>            # what each step actually did
+uv run ictus-bridge listen demo_work/pipelines   # the chat daemon, separately
 ```
 
 `build/` is committed, so a change to a prompt, a baseline or a constructor
@@ -121,6 +173,16 @@ leaves the tree stale until you re-emit — `test_committed_yaml_matches_a_fresh
 is what catches it. Run `lint` **and** `validate`; neither is sufficient alone.
 
 Conventions that are enforced rather than suggested:
+
+- **A module with prompt text is a folder.** The code is its `__init__.py`, the
+  prose sits beside it as `<name>.md`, and the import path does not change:
+  `stdlib/llm/voice/__init__.py` reads `stdlib/llm/voice/stance.md` with
+  `prompt(__name__, "stance")` from `ictus.prompting`. In prompt
+  position — an argument to `tpl`, or `prompt=`/`system_prompt=` — a string
+  literal is a connective, not a sentence, and over 60 characters
+  `test_prompt_layout.py` refuses it. Typed refs stay in code:
+  `tpl(prompt(__name__, "charge"), node.ref("x"))`. Putting `{x}` in the text
+  and resolving it by name is the string-matching `Ref` exists to replace.
 
 - **Tests assert behaviour at the public boundary.** A test that would still
   pass with the implementation deleted is not a test. Reproduce a bug with a

@@ -17,21 +17,14 @@ from ictus import (
     RunSignal,
     WorkflowInput,
 )
+from ictus.assemble.announcements import OPENER_ID, apply_integrations
+from ictus.bridge.slack.listen import asked, events
 from ictus.errors import CompositionError
-from ictus.integrate import OPENER_ID, apply_integrations
 from ictus.interfaces.conductor import conductor, launch_command, launch_env
-from ictus.interfaces.conductor.runs import LiveRun
+from ictus.interfaces.conductor.control.live import LiveRun
 from ictus.notify.slack import slack_channel, slack_webhook
-from ictus.notify.slack.listen import events
-from ictus.notify.slack.trigger import (
-    DEFAULT_PREFIX,
-    Asked,
-    Need,
-    Trigger,
-    asked,
-    start,
-    triggers_in,
-)
+from ictus.runs.launch import Asked, start
+from ictus.runs.triggers import DEFAULT_PREFIX, Need, Trigger, triggers_in
 from ictus.stdlib import approval_gate, succeed
 
 STR = PortType.STRING
@@ -109,8 +102,7 @@ def test_a_press_is_not_an_ask() -> None:
 def test_whitespace_in_the_prefix_matches_whitespace_in_the_message() -> None:
     """A long `--prefix` copied out of a wrapped terminal carries the break.
 
-    It escapes to a literal newline no single-line message can match, and
-    nothing says so: the listener starts, prints the prefix, and sits there.
+    It escapes to a literal newline no single-line message can match.
     """
     wrapped = Trigger(workflow=Path("x.yaml"), prefix="New DB ticket\n  raised:")
     (ask,) = asked(_envelope("New DB ticket raised: DB-8790"), wrapped)
@@ -126,8 +118,7 @@ def test_the_typist_s_spacing_does_not_decide_it() -> None:
 def test_a_prefix_typed_in_bold_still_starts_a_run() -> None:
     """Slack composes for a reader: emphasis is in the text an app receives.
 
-    Captured from the wire. The leading ``*`` alone defeats a prefix anchored
-    at the start, and nothing in the channel shows why.
+    The leading ``*`` alone defeats a prefix anchored at the start.
     """
     bold = Trigger(workflow=Path("x.yaml"), prefix="New DB ticket raised:")
     (ask,) = asked(
@@ -168,7 +159,7 @@ def test_a_missing_conductor_is_reported_not_raised(monkeypatch: pytest.MonkeyPa
     def _absent() -> str:
         raise FileNotFoundError("'conductor' is not on PATH")
 
-    monkeypatch.setattr("ictus.notify.slack.trigger.binary", _absent)
+    monkeypatch.setattr("ictus.runs.launch.binary", _absent)
     assert "not on PATH" in start(_ask(), TRIGGER).why
 
 
@@ -263,7 +254,7 @@ def test_the_dashboard_comes_from_the_run_s_own_record(monkeypatch: pytest.Monke
     run = LiveRun(run_id="new1", workflow="asked", port=5123, pid=1, started_at="2026")
     calls = iter([[], [run]])
 
-    monkeypatch.setattr("ictus.notify.slack.trigger.live_runs", lambda *_, **__: next(calls))
+    monkeypatch.setattr("ictus.runs.launch.live_runs", lambda *_, **__: next(calls))
     monkeypatch.setattr(
         subprocess, "run", lambda c, **__: subprocess.CompletedProcess(c, 0, "", "")
     )
@@ -281,7 +272,7 @@ def test_two_launches_at_once_report_no_address_rather_than_the_wrong_one(
         LiveRun(run_id="b", workflow="asked", port=2, pid=2, started_at="2026"),
     ]
     calls = iter([[], pair])
-    monkeypatch.setattr("ictus.notify.slack.trigger.live_runs", lambda *_, **__: next(calls))
+    monkeypatch.setattr("ictus.runs.launch.live_runs", lambda *_, **__: next(calls))
     monkeypatch.setattr(
         subprocess, "run", lambda c, **__: subprocess.CompletedProcess(c, 0, "", "")
     )
@@ -540,7 +531,7 @@ def test_the_launch_passes_the_filtered_environment(monkeypatch: pytest.MonkeyPa
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", _record)
-    monkeypatch.setattr("ictus.notify.slack.trigger.live_runs", lambda *_, **__: [])
+    monkeypatch.setattr("ictus.runs.launch.live_runs", lambda *_, **__: [])
     for name, value in SECRETS.items():
         monkeypatch.setenv(name, value)
     trigger = Trigger(
@@ -555,10 +546,9 @@ def test_the_launch_passes_the_filtered_environment(monkeypatch: pytest.MonkeyPa
 
 
 def test_a_pipeline_can_refuse_what_its_directory_says_about_itself() -> None:
-    """`--workspace-instructions` walks to the git root and prepends AGENTS.md to
-    every prompt. Right for a pipeline that works *on* a repository; for one
-    working on a tracker ticket it arrived as several hundred words about lints
-    and layers in front of a question about trading hours."""
+    """`--workspace-instructions` walks to the git root and prepends AGENTS.md
+    to every prompt. Right for a pipeline that works on a repository, wrong
+    for one working on a tracker ticket."""
     pipeline = Pipeline(pipeline_id="asks")
     question = pipeline.declare_input("question", STR)
     service = slack_channel(token=EnvVar("T", "t"), channel=EnvVar("C", "c"))

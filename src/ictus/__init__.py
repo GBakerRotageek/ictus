@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 from ictus.errors import CompositionError, EmitError, LintError, PortTypeError, UnknownPortError
 from ictus.graph.node import (
     AgentNode,
@@ -49,6 +51,11 @@ from ictus.graph.scope import Scope, ScopeNode, outcome_scope
 from ictus.graph.signals import RunSignal
 from ictus.graph.stage import Stage
 
+try:
+    __version__ = version("ictus")
+except PackageNotFoundError:  # pragma: no cover - running from a source tree
+    __version__ = "0.0.0+unknown"
+
 __all__ = [
     "END",
     "AgentNode",
@@ -92,6 +99,7 @@ __all__ = [
     "Validator",
     "WaitNode",
     "WorkflowInput",
+    "__version__",
     "at_least",
     "equals",
     "every",

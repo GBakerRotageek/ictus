@@ -8,6 +8,13 @@
 soundcheck:
 > uv run ruff check .
 > uv run ruff format --check .
+# `ruff check .` above honours .gitignore, and .gitignore keeps every demo folder
+# but `smoke-events` out of the repo — so the line above lints one of the five.
+# These are the files somebody copies to write their first pipeline, so they are
+# named explicitly, for the same reason the mypy loop below names them: an
+# example carrying an unused import teaches that the import is needed.
+> uv run ruff check --no-respect-gitignore demo_work
+> uv run ruff format --check --no-respect-gitignore demo_work
 # `smoke/` is named explicitly because it is not under src or tests. It holds the
 # harness that drives a live engine, which `pytest` cannot run and `soundcheck`
 # therefore never executes — so type checking is the only gate it has, and

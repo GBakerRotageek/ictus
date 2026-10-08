@@ -1,15 +1,12 @@
 """Composition lints.
 
-Two tiers, deliberately separate:
+Two tiers:
 
-* the rules in ``rules.py`` are true of any graph — an unreachable node, a
+* ``rules.py`` holds what is true of any graph — an unreachable node, a
   required input nothing feeds, a stage whose contract has drifted;
-* engine-specific rules come from the backend, because "this raises at run time"
-  is a claim about one runtime, not about graphs.
+* engine-specific rules come from the backend.
 
-Both tiers exist because the executor's own validator cannot see them. For
-Conductor, each rule here was checked against the installed validator and
-confirmed to pass it.
+Neither is visible to the executor's own validator.
 """
 
 from __future__ import annotations
@@ -45,9 +42,8 @@ def lint_pipeline(
 ) -> list[str]:
     """Every violation in ``pipeline`` and its nested stages.
 
-    Pass ``backend`` to add that engine's own rules. Without one you get the
-    graph-level rules only, which is the right default for a unit test that has
-    no opinion about where the pipeline will run.
+    Pass ``backend`` to add that engine's own rules; without one, graph-level
+    rules only.
     """
     seen = _seen if _seen is not None else set()
     if pipeline.pipeline_id in seen:

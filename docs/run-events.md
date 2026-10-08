@@ -152,7 +152,7 @@ and the run record archived.
   env var, deduplicated by name.
 - `requires` exists because preflight is a command, not an artifact: nothing in
   the workflow YAML records a declared executable or env var.
-- `ictus listen [FOLDER]` reads manifests under `FOLDER` recursively. No folder
+- `ictus-bridge listen [FOLDER]` reads manifests under `FOLDER` recursively. No folder
   answers gates only.
 - The listener runs `conductor run <workflow> -i ...`, never `ictus run`. It
   needs the built artifact, not the pipeline source, its config, or the compiler.

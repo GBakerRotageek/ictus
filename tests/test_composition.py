@@ -1,7 +1,6 @@
 """Composition-time rejections.
 
-Each test asserts that an invalid graph is refused at the call that introduces
-it, not at emission and not at run time.
+Each asserts that an invalid graph is refused at the call that introduces it.
 """
 
 from __future__ import annotations

@@ -160,7 +160,7 @@ about itself.
 What you cannot recover: **Claude Code's own system prompt.** Conductor types
 `AgentDef.system_prompt` as `str | None`, and naming the SDK's `claude_code`
 preset needs a mapping — so a plain string *replaces* the preset rather than
-appending to it. `ictus.baseline.AGENT_BASELINE` is the stand-in. Put working
+appending to it. `ictus.stdlib.baseline.AGENT_BASELINE` is the stand-in. Put working
 discipline there or in `instructions:`, not in the hope that the model brings it.
 
 `AgentNode` exposes `working_dir`, `skills` and `plugins` — the three fields
