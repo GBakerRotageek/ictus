@@ -581,3 +581,79 @@ def test_send_never_puts_a_credential_in_its_reason(url: str) -> None:
     why = send(_hook(), "x", env={"HOOK_URL": url})
     assert why
     assert SECRET not in why
+
+
+def test_a_report_that_slack_declines_to_thread_says_so(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """Asking to reply under a deleted message does not fail: Slack accepts it
+    and puts it at the top of the channel. Several runs then read as one stream
+    of unattributed updates, and nothing says why — which is how this was found,
+    by somebody noticing the bot had stopped replying.
+    """
+    url, _ = collector
+    _Collector.reply = {
+        "ok": True,
+        "ts": "1700000000.000100",
+        "message": {"ts": "1700000000.000100"},
+    }
+    done = _run(
+        _channel(),
+        "under a message that is gone",
+        "1699999999.000001",
+        "",
+        TEST_TOKEN="xoxb-pretend",
+        TEST_CHANNEL="C0TEST",
+        SLACK_API_URL=url,
+    )
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["posted"] == "true", "the message did land"
+    assert "put this in the channel instead" in done.stderr
+    assert "1699999999.000001" in done.stderr, "name the parent it wanted"
+
+
+def test_a_report_that_threads_cleanly_says_nothing(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """The warning has to be rare enough to mean something."""
+    url, _ = collector
+    _Collector.reply = {
+        "ok": True,
+        "ts": "1700000000.000100",
+        "message": {"ts": "1700000000.000100", "thread_ts": "1699999999.000001"},
+    }
+    done = _run(
+        _channel(),
+        "under here",
+        "1699999999.000001",
+        "",
+        TEST_TOKEN="xoxb-pretend",
+        TEST_CHANNEL="C0TEST",
+        SLACK_API_URL=url,
+    )
+    assert done.returncode == 0
+    assert done.stderr.strip() == ""
+
+
+def test_a_report_with_no_parent_is_not_warned_about(
+    collector: tuple[str, list[tuple[str, dict[str, object]]]],
+) -> None:
+    """A run started by hand has no conversation to reply into, and the top of
+    the channel is where it belongs."""
+    url, _ = collector
+    _Collector.reply = {
+        "ok": True,
+        "ts": "1700000000.000100",
+        "message": {"ts": "1700000000.000100"},
+    }
+    done = _run(
+        _channel(),
+        "no parent",
+        "",
+        "",
+        TEST_TOKEN="xoxb-pretend",
+        TEST_CHANNEL="C0TEST",
+        SLACK_API_URL=url,
+    )
+    assert done.returncode == 0
+    assert done.stderr.strip() == ""

@@ -302,17 +302,26 @@ def emit(
     if not pipelines:
         _fail(f"no pipelines found in {where} (nothing was emitted)")
 
-    seen: dict[str, str] = {}
+    # Keyed by where a file would land, not by its name. Two pipelines in their
+    # own folders may both place `read.yaml` in their own `build/`, and that is
+    # the ordinary consequence of reusing a stage — refusing it would make a
+    # stdlib stage usable in one pipeline per repository. Only `--out`, which
+    # gathers everything into one directory, can make two names actually
+    # collide, and there the clash is real.
+    seen: dict[tuple[Path, str], str] = {}
     problems: list[str] = []
-    for pipeline in pipelines:
-        for document in BACKEND.compile(pipeline):
-            owner = seen.get(document.filename)
-            if owner is not None:
-                problems.append(
-                    f"{document.filename} is claimed by both {owner!r} and {pipeline.pipeline_id!r}"
-                )
-            seen[document.filename] = pipeline.pipeline_id
-        problems.extend(lint_pipeline(pipeline, backend=BACKEND))
+    for destination, group in targets:
+        for pipeline in group:
+            for document in BACKEND.compile(pipeline):
+                where_it_lands = (destination, document.filename)
+                owner = seen.get(where_it_lands)
+                if owner is not None:
+                    problems.append(
+                        f"{destination / document.filename} is claimed by both {owner!r} "
+                        f"and {pipeline.pipeline_id!r}"
+                    )
+                seen[where_it_lands] = pipeline.pipeline_id
+            problems.extend(lint_pipeline(pipeline, backend=BACKEND))
     _refuse_problems(problems, consequence="nothing was written")
 
     written: list[_Written] = []

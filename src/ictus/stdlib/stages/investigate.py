@@ -41,6 +41,7 @@ from ictus.stdlib.steps.query import query
 
 if TYPE_CHECKING:
     from ictus.graph.node import ReasoningEffort
+    from ictus.graph.ref import Ref, Template
     from ictus.graph.requirements import Datasource
 
 __all__ = ["ANSWERED", "EXHAUSTED", "investigate"]
@@ -73,6 +74,8 @@ def investigate(
     limit: int = 50,
     timeout: int = 30,
     remember: bool = True,
+    may_read_files: bool = False,
+    environment: str | Ref | Template = "",
     subject: str = "a database",
     description: str = "",
     brief: str = "What to find out",
@@ -88,6 +91,19 @@ def investigate(
     Outcomes are ``answered`` and ``exhausted``. Both carry ``answer``, the
     number of ``looks`` spent and the ``last_sql``, so a caller can act on a
     partial result instead of only learning that there wasn't a whole one.
+
+    ``environment`` picks which of a fleet source's environments every
+    statement goes to — one choice for the whole investigation, made by whoever
+    read the ticket, rather than one the thinking step can change mid-loop.
+
+    ``may_read_files`` gives the thinking step the provider's built-in tools —
+    filesystem, shell, web — *inside this stage only*. A stage carries its own
+    ``runtime:``, so the grant stops at its edge and every step outside it keeps
+    the secure default. Two things follow and neither is small. The preset is
+    granted with permissions auto-approved, so nothing prompts. And a step with
+    a shell can reach the connection directly, around the query node — so with
+    this on, "read-only" rests on the credential (a user with no write grants,
+    or a file nobody can write) rather than on the shape of the graph.
 
     ``reasoning`` and ``model`` set what the thinking costs. They are per-stage
     rather than per-pipeline because this is usually the step that needs more
@@ -112,6 +128,15 @@ def investigate(
         loop_passes=looks + 1,
     )
     body = scope.body
+    # Declared on this body, so the credential is required by this file and not
+    # by its caller. A step outside the stage built against the same source is
+    # refused unless the pipeline announces it there too — which is what makes
+    # "only this may reach the database" a composition error rather than a note.
+    body.require_datasource(against)
+    if may_read_files:
+        # Scoped to this file. A stage emits its own runtime block, so this is
+        # the narrowest place a tool grant can be drawn today.
+        body.native_tools = "claude_code"
     question = body.declare_input("question", STR, description=brief)
     known = body.declare_input(
         "known", STR, required=False, description="What the caller already worked out"
@@ -128,16 +153,22 @@ def investigate(
                 InputPort("why", STR, optional=True),
                 InputPort("tally", PortType.NUMBER, optional=True),
             ),
-            # Deliberately no tools. The only way out of this step is a request
-            # for a statement, which is a node, which cannot write.
+            # `None` takes whatever the stage grants: nothing by default, and
+            # the provider's preset when `may_read_files` is on. An empty tuple
+            # would be a denial the provider refuses once anything is attached.
             tools=None,
             session_key=f"{stage_id}-{THINK}" if remember else None,
             reasoning=reasoning,
             model=model,
             max_turns=max_turns,
             prompt=tpl(
-                f"You are investigating {subject} and can see it only through the "
-                "statements you ask for.\n\n"
+                f"You are investigating {subject}.\n"
+                + (
+                    "You may read files and run commands to understand the code, and "
+                    "you reach the data by asking for a statement.\n\n"
+                    if may_read_files
+                    else "You can see it only through the statements you ask for.\n\n"
+                ),
                 "Set `need` to `query` and put one read in `sql` to look. Set `need` "
                 "to `answer` when you can answer.\n"
                 "Keep `answer` filled with the best answer you have at every pass — "
@@ -171,6 +202,7 @@ def investigate(
             node_id=RUN,
             description=f"Runs what {THINK} asked for, against a connection that cannot write",
             against=against,
+            environment=environment,
             inputs=(InputPort(THINK, STR),),
             sql=think.ref("sql"),
             limit=limit,

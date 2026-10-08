@@ -16,12 +16,13 @@ from ictus.integrate import apply_integrations
 from ictus.lint import lint_pipeline
 from ictus.notify.jira import jira_cloud
 from ictus.notify.slack import slack_channel
-from ictus.stdlib import announce, approval_gate, comment, succeed
+from ictus.sources import readonly_jira
+from ictus.stdlib import MISSING, READ, announce, approval_gate, comment, read_ticket, succeed
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ictus import Integration
+    from ictus import Datasource, Integration
 
 SITE = "https://example.atlassian.net"
 
@@ -246,3 +247,91 @@ def test_a_stage_inherits_what_its_caller_announced() -> None:
     parent.route(node, END)
     apply_integrations(parent)
     assert not [p for p in lint_pipeline(parent) if "does not declare" in p]
+
+
+# --- reading a ticket, which is the other direction and another credential ----
+
+
+def _jira_read() -> Datasource:
+    return readonly_jira(
+        email=EnvVar("JIRA_READ_EMAIL", "an account that only reads"),
+        token=EnvVar("JIRA_READ_TOKEN", "its API token"),
+        site=EnvVar("JIRA_SITE", "the site URL"),
+    )
+
+
+def _read_prelude() -> dict[str, object]:
+    source = _jira_read().program
+    namespace: dict[str, object] = {}
+    exec(source[: source.index("def main(")], namespace)
+    return namespace
+
+
+def test_reading_and_commenting_hold_separate_credentials_by_default() -> None:
+    """So a pipeline that only needs to read can be given an account that only
+    reads, and a reader sees two credentials rather than assuming one account."""
+    assert _jira_read().name != _jira().name
+    assert "JIRA_READ_TOKEN" in _jira_read().program
+    assert "JIRA_READ_TOKEN" not in _jira().program
+
+
+def test_the_reading_program_promises_read_only_and_has_no_way_to_write() -> None:
+    source = _jira_read()
+    assert source.read_only
+    assert 'method="GET"' in source.program
+    assert '"POST"' not in source.program and '"PUT"' not in source.program
+
+
+def test_a_description_arrives_as_prose_not_a_document_tree() -> None:
+    """Atlassian sends a tree of nodes; a step reading it wants text."""
+    flatten = _read_prelude()["flatten"]
+    document = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Remove the dupes."}]},
+            {"type": "codeBlock", "content": [{"type": "text", "text": "SELECT 1"}]},
+        ],
+    }
+    out = flatten(document)  # type: ignore[operator]
+    assert "Remove the dupes." in out
+    assert "SELECT 1" in out
+
+
+def test_reading_refuses_a_link_to_another_host_too() -> None:
+    """The same reason as commenting: the link usually comes from a message
+    somebody else wrote, and the request carries a token."""
+    issue, why = _read_prelude()["issue_of"]("https://evil.invalid/browse/DB-1", SITE)  # type: ignore[operator]
+    assert issue is None
+    assert "evil.invalid" in why
+
+
+def test_a_missing_credential_is_reported_not_raised_when_reading() -> None:
+    done = subprocess.run(
+        [sys.executable, "-c", _jira_read().program, "DB-1", "5"],
+        capture_output=True,
+        text=True,
+        input="",
+        env={"PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert done.returncode == 0, "a ticket that could not be read is not a failed run"
+    assert json.loads(done.stdout)["got"] == "false"
+
+
+def test_the_stage_keeps_the_reading_credential_to_itself() -> None:
+    """A stage compiles to its own file with its own runtime, so what is
+    declared inside it is declared only inside it."""
+    stage = read_ticket(stage_id="read", against=_jira_read())
+    assert [s.name for s in stage.body.datasources] == ["jira-read"]
+    assert set(stage.outcomes) == {READ, MISSING}
+    assert {p.name for p in stage.output_ports} >= {"ticket", "why"}
+
+
+def test_a_ticket_that_could_not_be_read_is_an_outcome_not_a_failure() -> None:
+    """A deleted ticket, or a token that expired overnight, is something the
+    rest of the run should decide about."""
+    stage = read_ticket(against=_jira_read())
+    ask = next(n for n in stage.body.nodes if n.node_id == "ask")
+    routes = stage.body.outgoing(ask)
+    assert [e.describe_target for e in routes] == [READ, MISSING]
+    assert routes[1].when is None, "missing is the fall-through, so it cannot be skipped"

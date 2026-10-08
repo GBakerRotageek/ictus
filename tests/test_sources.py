@@ -13,7 +13,7 @@ import pytest
 from ictus import Datasource, EnvVar, InputPort, Pipeline, PortType, tpl
 from ictus.errors import CompositionError
 from ictus.lint import lint_pipeline
-from ictus.sources import readonly_postgres, readonly_sqlite
+from ictus.sources import readonly_postgres, readonly_postgres_fleet, readonly_sqlite
 from ictus.stdlib import query, succeed
 
 if TYPE_CHECKING:
@@ -246,3 +246,82 @@ def test_declaring_it_is_what_preflight_reads() -> None:
     declared = _reading(declared=True)
     assert [source.name for source in declared.all_datasources()] == ["sqlite"]
     assert _reading(declared=False).all_datasources() == ()
+
+
+# --- several environments, one declaration ------------------------------------
+
+FLEET = {
+    "atlantis": EnvVar("ATLANTIS_DSN", "read-only connection for atlantis"),
+    "babylon": EnvVar("BABYLON_DSN", "read-only connection for babylon"),
+    "original": EnvVar("ORIGINAL_DSN", "read-only connection for original"),
+}
+
+
+def _fleet_says(environment: str, sql: str, present: dict[str, str]) -> dict[str, str]:
+    program = readonly_postgres_fleet(environments=FLEET).program
+    done = subprocess.run(
+        [sys.executable, "-c", program, "50", "5", environment],
+        input=sql,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", **present},
+        check=False,
+    )
+    assert done.returncode == 0, "a query that cannot run is not a run that cannot finish"
+    answer: dict[str, str] = json.loads(done.stdout)
+    return answer
+
+
+def test_every_environment_is_declared_so_preflight_checks_them_all() -> None:
+    assert [v.name for v in readonly_postgres_fleet(environments=FLEET).env] == [
+        "ATLANTIS_DSN",
+        "BABYLON_DSN",
+        "ORIGINAL_DSN",
+    ]
+
+
+def test_naming_no_environments_is_refused() -> None:
+    with pytest.raises(CompositionError, match="names no environments"):
+        readonly_postgres_fleet(environments={})
+
+
+def test_an_environment_nobody_declared_is_refused_with_the_list() -> None:
+    """The name arrives in text somebody else wrote, so the lookup is a table of
+    declared names and never a pattern — otherwise a ticket naming
+    `prod_primary` would resolve against whatever happened to be exported."""
+    answer = _fleet_says("prod_primary", "SELECT 1", {"ATLANTIS_DSN": "x"})
+    assert answer["ran"] == "false"
+    assert "is not an environment this reads" in answer["why"]
+    assert "atlantis, babylon, original" in answer["why"]
+
+
+def test_naming_nothing_is_refused_too() -> None:
+    assert "no environment was named" in _fleet_says("", "SELECT 1", {})["why"]
+
+
+def test_a_declared_environment_with_no_connection_says_which_variable() -> None:
+    answer = _fleet_says("babylon", "SELECT 1", {"ATLANTIS_DSN": "x"})
+    assert "$BABYLON_DSN is not set" in answer["why"]
+
+
+def test_read_only_holds_across_every_environment() -> None:
+    """More environments is more credentials, not more capability."""
+    for where in FLEET:
+        answer = _fleet_says(where, "DELETE FROM timesheets", {f"{where.upper()}_DSN": "x"})
+        assert answer["ran"] == "false"
+        assert "refused" in answer["why"]
+
+
+def test_the_environment_travels_as_data_on_the_step() -> None:
+    """A ticket says where a change is going, so the choice is a value."""
+    step = query(
+        node_id="ask",
+        sql="SELECT 1",
+        against=readonly_postgres_fleet(environments=FLEET),
+        environment="atlantis",
+    )
+    assert "atlantis" in step.args
+
+
+def test_a_fleet_still_promises_read_only_to_the_step() -> None:
+    assert readonly_postgres_fleet(environments=FLEET).read_only

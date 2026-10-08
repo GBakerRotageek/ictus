@@ -53,6 +53,7 @@ def render(pipeline: Pipeline) -> str:
         "pipeline": pipeline.pipeline_id,
         "workflow": f"{pipeline.pipeline_id}.yaml",
         "description": pipeline.description,
+        "workspace_instructions": pipeline.workspace_instructions,
         "listeners": [_listener(one) for one in pipeline.listeners],
         "requires": _requires(pipeline),
     }

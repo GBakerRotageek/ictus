@@ -73,7 +73,13 @@ class PipelineConfig:
     """Whether a person confirms before anything runs. See ``ictus.gate``."""
 
     budget_usd: float | None = None
-    budget_mode: str = "audit"
+    budget_mode: str | None = None
+    """Whether the budget stops a run or only records it.
+
+    ``None`` means this file did not say, and the pipeline's own value stands.
+    Defaulting it to ``"audit"`` here instead made every pipeline that asked for
+    ``enforce`` in composition emit ``audit``, silently — the one policy field
+    that overwrote rather than conflicted, so nothing ever reported it."""
     max_iterations: int | None = None
     timeout_seconds: int | None = None
     """A wall-clock ceiling on the whole run, in seconds.
@@ -172,7 +178,21 @@ class PipelineConfig:
                     "Policy belongs in config.yaml; take it out of the composition."
                 )
             setattr(pipeline, field, value)
-        pipeline.budget_mode = self.budget_mode  # type: ignore[assignment]
+        # Apart from the loop, because this is the one policy field whose
+        # composition-side default is a value rather than `None`: a pipeline
+        # reading `audit` has not chosen it, so taking that for disagreement
+        # would refuse every config that set a mode. Overwriting unconditionally
+        # is what this used to do, and it meant every pipeline asking for
+        # `enforce` emitted `audit` with nothing said.
+        if self.budget_mode is not None:
+            if pipeline.budget_mode not in ("audit", self.budget_mode):
+                raise ConfigError(
+                    f"{where}: budget_mode is {self.budget_mode!r} here but "
+                    f"{pipeline.budget_mode!r} in the pipeline. Policy belongs in "
+                    "config.yaml; take it out of the composition."
+                )
+            pipeline.budget_mode = self.budget_mode  # type: ignore[assignment]
+        pipeline.workspace_instructions = self.workspace_instructions
         if self.instructions and not pipeline.instructions:
             pipeline.instructions = list(self.instructions)
         if pipeline.system_prompt is None:
@@ -182,15 +202,33 @@ class PipelineConfig:
 
 
 def _native_tools(loaded: dict[str, object], where: str) -> NativeTools:
-    """``native_tools``, which only takes the two values the engine knows."""
+    """``native_tools``: nothing, everything, or exactly what is listed.
+
+    The list is the one worth reaching for. ``claude_code`` grants a shell
+    along with the reading, and a step with a shell is bounded by its own
+    judgement rather than by anything here — one started a database container
+    to try its own SQL against, which was a reasonable thing to do and not a
+    thing anybody had agreed to. ``[Read, Grep, Glob]`` is a step that may look
+    at a repository and may not run it.
+    """
     value = loaded.get("native_tools", "none")
     if value == "claude_code":
         return "claude_code"
+    if isinstance(value, list):
+        named = [str(item).strip() for item in value]
+        if not named or not all(named):
+            raise ConfigError(
+                f"{where}: native_tools is an empty list, or has an entry with no "
+                "name. Write 'none' to grant nothing — an empty list reads as "
+                "something half-written rather than a decision."
+            )
+        return tuple(named)
     if value != "none":
         raise ConfigError(
-            f"{where}: native_tools is {value!r}; it is 'none' or 'claude_code'. "
-            "'claude_code' lets a step that names no tools read files, run "
-            "commands and fetch, which is what the bare `claude` CLI gives you."
+            f"{where}: native_tools is {value!r}; it is 'none', 'claude_code', or a "
+            "list of tool ids such as [Read, Grep, Glob]. 'claude_code' lets a step "
+            "that names no tools read files, run commands and fetch, which is what "
+            "the bare `claude` CLI gives you."
         )
     return "none"
 
@@ -227,8 +265,8 @@ def read_config(path: Path) -> PipelineConfig:
             "own is copilot, and inheriting it silently is how a pipeline ends up running "
             "somewhere nobody chose."
         )
-    mode = loaded.get("budget_mode", "audit")
-    if mode not in _BUDGET_MODES:
+    mode = loaded.get("budget_mode")
+    if mode is not None and mode not in _BUDGET_MODES:
         raise ConfigError(f"{where}: budget_mode must be one of {sorted(_BUDGET_MODES)}")
     timeout_seconds = _optional_int(loaded, "timeout_seconds", where)
     if timeout_seconds is not None and timeout_seconds < 1:

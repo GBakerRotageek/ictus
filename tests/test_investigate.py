@@ -150,3 +150,39 @@ def test_it_emits_its_own_workflow_file() -> None:
     """A stage is a sibling `type: workflow`, not an inlined graph."""
     names = {document.filename for document in conductor.compile(_staged())}
     assert names == {"asks.yaml", "looking.yaml"}
+
+
+# --- a stage is where a permission can be drawn -------------------------------
+
+
+def test_the_connection_is_declared_on_the_stage_not_its_caller() -> None:
+    """So a step outside is refused unless the pipeline announces it there too,
+    which is what makes "only this may reach the database" a composition error
+    rather than a note in a docstring."""
+    stage = investigate(against=_source())
+    assert [s.name for s in stage.body.datasources] == ["sqlite"]
+
+
+def test_by_default_the_stage_grants_no_tools() -> None:
+    assert investigate(against=_source()).body.native_tools is None
+
+
+def test_reading_files_is_granted_inside_the_stage_and_stops_at_its_edge() -> None:
+    """A stage emits its own runtime block, which is the narrowest scope a tool
+    grant can be drawn in today."""
+    stage = investigate(stage_id="looking", against=_source(), may_read_files=True)
+    assert stage.body.native_tools == "claude_code"
+
+    pipeline = Pipeline(pipeline_id="outer")
+    question = pipeline.declare_input("question", STR)
+    placed = stage.instantiate(pipeline, node_id="look")
+    done = pipeline.add(succeed(node_id="done", reason="done"))
+    pipeline.set_entry(placed)
+    pipeline.connect_input(question, placed, "question")
+    pipeline.route(placed, done)
+    PipelineConfig(provider="claude-agent-sdk").apply(pipeline, where="test")
+    assert pipeline.native_tools == "none", "the caller keeps the secure default"
+
+    rendered = {d.filename: d.content for d in conductor.compile(pipeline)}
+    assert "claude_code" in rendered["looking.yaml"]
+    assert "claude_code" not in rendered["outer.yaml"]

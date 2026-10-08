@@ -12,6 +12,7 @@ from ictus.stdlib.steps.bindings import bindings
 from ictus.stdlib.steps.comment import comment
 from ictus.stdlib.steps.constant import constant
 from ictus.stdlib.steps.counter import counter
+from ictus.stdlib.steps.fetch import fetch
 from ictus.stdlib.steps.query import query
 from ictus.stdlib.steps.save_text import save_text
 from ictus.stdlib.steps.shell import shell
@@ -23,6 +24,7 @@ __all__ = [
     "comment",
     "constant",
     "counter",
+    "fetch",
     "query",
     "save_text",
     "shell",

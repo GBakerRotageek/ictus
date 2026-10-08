@@ -61,6 +61,7 @@ def query(
     node_id: str,
     sql: str | Ref | Template,
     against: Datasource,
+    environment: str | Ref | Template = "",
     description: str = "",
     inputs: Sequence[InputPort] = (),
     limit: int = DEFAULT_LIMIT,
@@ -72,6 +73,11 @@ def query(
     earlier step — so the statement is data flowing along an edge like anything
     else, and is visible in the dashboard and in ``ictus trace`` as the text the
     step was actually given.
+
+    ``environment`` picks which of a fleet source's environments to read, and
+    is usually a reference: a ticket says where a change is going. A source
+    holding one connection ignores it, and one holding several refuses a name
+    it was never built with.
 
     Refuses a source that does not promise ``read_only``. There is no flag to
     override that: a step that may write is a different step, and spelling the
@@ -104,6 +110,9 @@ def query(
             # seconds later. The gap is what keeps a slow query from being a
             # failed step.
             str(timeout),
+            # Which environment to read, when the source holds several. Empty
+            # for a source that holds one, which ignores it.
+            as_template(environment),
         ),
         uses=(against.name,),
         stdin=as_template(sql),

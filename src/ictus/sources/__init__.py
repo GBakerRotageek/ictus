@@ -27,7 +27,14 @@ against an attack, and the setup hint on every constructor here says so.
 
 from __future__ import annotations
 
+from ictus.sources.fleet import readonly_postgres_fleet
+from ictus.sources.jira import readonly_jira
 from ictus.sources.postgres import readonly_postgres
 from ictus.sources.sqlite import readonly_sqlite
 
-__all__ = ["readonly_postgres", "readonly_sqlite"]
+__all__ = [
+    "readonly_jira",
+    "readonly_postgres",
+    "readonly_postgres_fleet",
+    "readonly_sqlite",
+]

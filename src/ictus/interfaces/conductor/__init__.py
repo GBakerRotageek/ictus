@@ -13,6 +13,7 @@ with a name.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from typing import TYPE_CHECKING
@@ -37,13 +38,13 @@ from ictus.interfaces.environment import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.values import YamlDict, YamlValue
 
-__all__ = ["ConductorBackend", "binary", "conductor", "launch_command"]
+__all__ = ["ConductorBackend", "binary", "conductor", "launch_command", "launch_env"]
 
 BINARY = "conductor"
 
@@ -57,6 +58,80 @@ def binary() -> str:
             "what it compiles without it"
         )
     return found
+
+
+#: Variables about the *machine*, which a run cannot work without and which are
+#: nobody's pipeline secret: where to find commands, where the home directory
+#: is, where temporary files go, how to decode bytes, which certificates to
+#: trust.
+MACHINE_ENV: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "SYSTEMROOT",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+    }
+)
+
+#: Prefixes for the engine's own settings and for model-provider credentials.
+#: Matched by prefix rather than listed, because a provider added upstream
+#: brings its own variable names and a run that cannot authenticate is a
+#: confusing failure, not a safe one. These are machine credentials — the right
+#: to call a model — and not the pipeline secrets this filtering is about.
+MACHINE_PREFIXES: tuple[str, ...] = (
+    "CONDUCTOR_",
+    "CLAUDE_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "AZURE_",
+    "COPILOT_",
+    "GITHUB_",
+    "ACA_",
+    "OTEL_",
+)
+
+
+def launch_env(declared: Iterable[str], source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a run should receive: what it declared, and nothing else.
+
+    A workflow is spawned as its own process, which is the one place an
+    environment can actually be cut — a stage is a file, not a process, and the
+    provider hands a model session a copy of whatever the run inherited. So a
+    step with a shell sees every variable the run was given, and the only way to
+    keep a credential away from it is not to give the *run* that credential.
+
+    ``declared`` is what the pipeline announced: its integrations' variables,
+    its datasources', its MCP servers'. Everything outside that and the machine
+    baseline is dropped, which is what turns the declaration from something a
+    reviewer reads into something the run is actually bounded by. The listener's
+    own app-level token is the clearest case — no pipeline declares it, so no
+    run receives it, and a run cannot open a socket as the app that started it.
+
+    Missing variables are simply absent rather than empty: a program testing
+    ``os.environ.get(NAME)`` should see the same nothing it would see on a
+    machine where nobody set it.
+    """
+    present = os.environ if source is None else source
+    wanted = set(declared) | MACHINE_ENV
+    return {
+        name: value
+        for name, value in present.items()
+        if name in wanted or name.startswith(MACHINE_PREFIXES)
+    }
 
 
 def launch_command(

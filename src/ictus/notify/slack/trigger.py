@@ -36,7 +36,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ictus.interfaces.conductor import binary, launch_command
+from ictus.interfaces.conductor import binary, launch_command, launch_env
 from ictus.interfaces.conductor.manifest import SUFFIX, VERSION
 from ictus.interfaces.conductor.runs import live_runs
 
@@ -131,6 +131,12 @@ class Trigger:
 
     pipeline: str = ""
     description: str = ""
+    workspace_instructions: bool = True
+    """Whether to hand the run what its working directory says about itself.
+
+    Off for a pipeline whose work is not about that directory: a tracker ticket
+    does not want a contributor guide prepended to every prompt, and on a
+    reasoning step that is both a cost and a distraction."""
 
     @property
     def pattern(self) -> re.Pattern[str]:
@@ -234,6 +240,7 @@ def _read(path: Path) -> Iterator[Trigger]:
             env=_needs(requires.get("env")),
             pipeline=str(document.get("pipeline", "")),
             description=str(document.get("description", "")),
+            workspace_instructions=document.get("workspace_instructions") is not False,
         )
 
 
@@ -297,7 +304,12 @@ def start(request: Asked, trigger: Trigger) -> Started:
     inputs = {trigger.question_input: request.question, trigger.thread_input: request.thread}
     try:
         command = launch_command(
-            binary(), trigger.workflow, inputs=inputs, dashboard=True, background=True
+            binary(),
+            trigger.workflow,
+            inputs=inputs,
+            dashboard=True,
+            background=True,
+            workspace_instructions=trigger.workspace_instructions,
         )
     except FileNotFoundError as exc:
         return Started(str(exc))
@@ -305,10 +317,26 @@ def start(request: Asked, trigger: Trigger) -> Started:
     # terminal, so a subprocess sees nothing of it — the run's own record is
     # where the port actually lives, and the new id is whatever was not there a
     # moment ago.
+    # What the pipeline announced, and nothing else. A run is its own process,
+    # which is the only place an environment can be cut: a stage is a file, and
+    # the provider hands a model session a copy of whatever the run inherited.
+    # This listener's own app-level token is declared by no pipeline, so no run
+    # it starts can open a socket as the app that started it.
+    passing = launch_env(need.name for need in trigger.env)
+    held_back = len(os.environ) - len(passing)
+    if held_back > 0:
+        logger.debug(
+            "%s: passing %d variables, holding back %d", trigger.pipeline, len(passing), held_back
+        )
     before = {run.run_id for run in live_runs()}
     try:
         done = subprocess.run(
-            command, capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_SECONDS, check=False
+            command,
+            capture_output=True,
+            text=True,
+            timeout=LAUNCH_TIMEOUT_SECONDS,
+            env=passing,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return Started("the run did not finish starting in time")

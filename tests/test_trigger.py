@@ -19,7 +19,7 @@ from ictus import (
 )
 from ictus.errors import CompositionError
 from ictus.integrate import OPENER_ID, apply_integrations
-from ictus.interfaces.conductor import conductor
+from ictus.interfaces.conductor import conductor, launch_command, launch_env
 from ictus.interfaces.conductor.runs import LiveRun
 from ictus.notify.slack import slack_channel, slack_webhook
 from ictus.notify.slack.listen import events
@@ -476,3 +476,131 @@ def test_one_message_starts_one_run(tmp_path: Path) -> None:
     assert len(found) == 1
     assert isinstance(found[0], Asked)
     assert found[0].trigger is first, "the order manifests were found in, which is sorted"
+
+
+# --- a run is handed what it declared, and nothing else -----------------------
+
+MACHINE = {"PATH": "/usr/bin", "HOME": "/home/someone", "TMPDIR": "/tmp"}
+SECRETS = {
+    "SLACK_APP_TOKEN": "xapp-opens-a-socket",
+    "SLACK_BOT_TOKEN": "xoxb-posts",
+    "ATLANTIS_DSN": "postgres://atlantis",
+    "BABYLON_DSN": "postgres://babylon",
+    "AWS_SECRET_ACCESS_KEY": "nothing-to-do-with-this",
+}
+
+
+def test_an_undeclared_credential_never_reaches_the_run() -> None:
+    """The declaration stops being something a reviewer reads and becomes the
+    environment the run actually has."""
+    passing = launch_env(["SLACK_BOT_TOKEN", "ATLANTIS_DSN"], MACHINE | SECRETS)
+    assert passing["SLACK_BOT_TOKEN"] == "xoxb-posts"
+    assert passing["ATLANTIS_DSN"] == "postgres://atlantis"
+    assert "BABYLON_DSN" not in passing, "one environment declared is one environment reachable"
+    assert "AWS_SECRET_ACCESS_KEY" not in passing
+
+
+def test_the_listener_s_own_token_reaches_no_run() -> None:
+    """No pipeline declares it, so no run it starts can open a socket as the app
+    that started it."""
+    passing = launch_env(["SLACK_BOT_TOKEN"], MACHINE | SECRETS)
+    assert "SLACK_APP_TOKEN" not in passing
+
+
+def test_the_machine_baseline_survives() -> None:
+    """A run that cannot find its own commands is a confusing failure, not a
+    safe one."""
+    passing = launch_env([], MACHINE | SECRETS)
+    assert set(MACHINE) <= set(passing)
+
+
+def test_model_credentials_are_matched_by_prefix_not_listed() -> None:
+    """A provider added upstream brings its own variable names, and a run that
+    cannot authenticate fails in a way nobody connects to this."""
+    passing = launch_env([], {**MACHINE, "ANTHROPIC_API_KEY": "k", "CONDUCTOR_HOME": "/c"})
+    assert passing["ANTHROPIC_API_KEY"] == "k"
+    assert passing["CONDUCTOR_HOME"] == "/c"
+
+
+def test_what_was_never_set_stays_absent_rather_than_empty() -> None:
+    """A program testing `os.environ.get(NAME)` should see the same nothing it
+    would see on a machine where nobody set it."""
+    passing = launch_env(["NEVER_SET_ANYWHERE"], MACHINE)
+    assert "NEVER_SET_ANYWHERE" not in passing
+
+
+def test_the_launch_passes_the_filtered_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not merely computed — handed to the subprocess."""
+    seen: dict[str, dict[str, str]] = {}
+
+    def _record(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        handed = kwargs["env"]
+        assert isinstance(handed, dict)
+        seen["env"] = handed
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", _record)
+    monkeypatch.setattr("ictus.notify.slack.trigger.live_runs", lambda *_, **__: [])
+    for name, value in SECRETS.items():
+        monkeypatch.setenv(name, value)
+    trigger = Trigger(
+        workflow=Path("x.yaml"),
+        env=(Need("SLACK_BOT_TOKEN", "to post"),),
+        commands=(),
+    )
+    assert start(_ask(), trigger).ok
+    assert seen["env"]["SLACK_BOT_TOKEN"] == "xoxb-posts"
+    assert "SLACK_APP_TOKEN" not in seen["env"]
+    assert "ATLANTIS_DSN" not in seen["env"]
+
+
+def test_a_pipeline_can_refuse_what_its_directory_says_about_itself() -> None:
+    """`--workspace-instructions` walks to the git root and prepends AGENTS.md to
+    every prompt. Right for a pipeline that works *on* a repository; for one
+    working on a tracker ticket it arrived as several hundred words about lints
+    and layers in front of a question about trading hours."""
+    pipeline = Pipeline(pipeline_id="asks")
+    question = pipeline.declare_input("question", STR)
+    service = slack_channel(token=EnvVar("T", "t"), channel=EnvVar("C", "c"))
+    pipeline.integrate(service)
+    pipeline.listen_on(service, prefix="go:", into=question)
+    pipeline.add(succeed(node_id="done", reason="done"))
+    pipeline.set_entry(pipeline.nodes[0])
+
+    pipeline.workspace_instructions = False
+    rendered = next(d for d in conductor.compile(pipeline) if d.filename.endswith(".listen.json"))
+    assert json.loads(rendered.content)["workspace_instructions"] is False
+
+
+def test_the_flag_reaches_the_launch(tmp_path: Path) -> None:
+    """Carried in the manifest because the process that starts a run is the one
+    that has to pass it."""
+    (tmp_path / "asks.yaml").write_text("workflow: {}", encoding="utf-8")
+    (tmp_path / "asks.listen.json").write_text(
+        json.dumps(
+            {
+                "manifest": 1,
+                "workflow": "asks.yaml",
+                "workspace_instructions": False,
+                "listeners": [{"prefix": "go:", "inputs": {"question": "q"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (trigger,) = triggers_in(tmp_path)
+    assert trigger.workspace_instructions is False
+    argv = launch_command(
+        "conductor",
+        trigger.workflow,
+        inputs={},
+        dashboard=True,
+        background=True,
+        workspace_instructions=trigger.workspace_instructions,
+    )
+    assert "--workspace-instructions" not in argv
+
+
+def test_a_manifest_that_says_nothing_still_gets_it() -> None:
+    """On by default: a step otherwise arrives knowing nothing a project says
+    about how it wants to be worked in."""
+    assert Trigger(workflow=Path("x.yaml")).workspace_instructions is True

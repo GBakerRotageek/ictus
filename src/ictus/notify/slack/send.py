@@ -174,6 +174,14 @@ def scrub(text):
     return text
 
 
+def note(why):
+    # Said alongside the report rather than instead of it: the message landed,
+    # so `posted` is still true, and this is the part a reader needs to know.
+    # `say` writes once and is spoken for by the outcome.
+    sys.stderr.write(scrub(why) + "\n")
+    sys.stderr.flush()
+
+
 def say(thread, posted, why=""):
     # Once, from whichever of the send and the deadline gets here first.
     with lock:
@@ -257,6 +265,18 @@ def send(text, parent, asks, timeout):
         code = str(answer.get("error"))
         hint = HINTS.get(code, "")
         return None, "slack refused the message: " + code + ((" - " + hint) if hint else "")
+    # Asking to reply under a message that is no longer there does not fail: the
+    # message is accepted and placed at the top of the channel instead. Several
+    # runs then read as one stream of unattributed updates, and nothing says why
+    # — which is how it was found, by someone noticing it had stopped replying.
+    if parent:
+        placed = answer.get("message")
+        landed = str(placed.get("thread_ts", "")) if isinstance(placed, dict) else ""
+        if landed != parent:
+            note(
+                "asked to reply under " + parent + " and slack put this in the channel "
+                "instead; that message was probably deleted"
+            )
     # Slack calls it ts; the graph calls it a thread.
     return str(answer.get("ts", "")), ""
 

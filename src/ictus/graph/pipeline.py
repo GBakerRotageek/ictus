@@ -43,7 +43,10 @@ _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
 _GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
 
 ContextMode = Literal["accumulate", "last_only", "explicit"]
-NativeTools = Literal["none", "claude_code"]
+#: What built-in tools a step that names none of its own is given. ``none``,
+#: everything the CLI can do, or exactly the tool ids listed — which is the one
+#: that lets a step read a repository without also being handed a shell.
+NativeTools = Literal["none", "claude_code"] | tuple[str, ...]
 BudgetMode = Literal["audit", "enforce"]
 
 
@@ -344,6 +347,15 @@ class Pipeline:
         self._threads: dict[str, WorkflowInput] = {}
         self._listeners: dict[str, Listener] = {}
         self._datasources: dict[str, Datasource] = {}
+        self.workspace_instructions = True
+        """Whether a run is given what the working directory says about itself.
+
+        Policy, set from ``config.yaml``, and it travels in the listen manifest
+        because the process that starts a run is the one that has to pass the
+        flag. On by default: a step otherwise arrives knowing nothing a project
+        says about how it wants to be worked in. Off for a pipeline whose work
+        is not *about* the directory it runs in — a tracker ticket does not want
+        a contributor guide prepended to every prompt."""
         self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
