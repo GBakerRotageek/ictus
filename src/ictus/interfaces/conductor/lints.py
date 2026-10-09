@@ -80,7 +80,8 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
         problems.extend(
             f"{where}: stage {host_id!r} can exit through {node.node_id!r}, a failed terminal. "
             "A child engine converts that into SubworkflowTerminatedError before the parent's "
-            "routes are evaluated (engine/workflow.py:3108), so it kills the caller instead of "
+            "routes are evaluated (engine/workflow.py, `_run_child_engine`), so it "
+            "kills the caller instead of "
             "routing. End with a success terminal carrying the outcome as a value."
             for node in child.nodes
             if isinstance(node, TerminateNode) and node.status == "failed"
@@ -104,7 +105,8 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
 HONOURED_BY: dict[str, frozenset[str]] = {
     # claude-agent-sdk's own matches are all `is_retryable=False`.
     "retry": frozenset({"claude", "openai", "hermes", "aca", "copilot"}),
-    # The schema says Copilot-only and is stale; aca forwards it (providers/aca.py:769).
+    # The schema says Copilot-only and is stale; aca forwards it (providers/aca.py,
+    # in `_build_request`).
     "context_tier": frozenset({"copilot", "aca"}),
     # CAPABILITIES.working_dir.
     "working_dir": frozenset({"claude-agent-sdk", "claude", "openai", "copilot"}),
@@ -114,7 +116,7 @@ HONOURED_BY: dict[str, frozenset[str]] = {
     # together, and only these two host all three.
     "plugins": frozenset({"claude-agent-sdk", "copilot"}),
     # No capability flag. Read only via `AgentDef.effective_output_schema()`,
-    # whose sole caller is providers/copilot.py:1194.
+    # whose sole caller is providers/copilot.py.
     "output_mode": frozenset({"copilot"}),
 }
 
@@ -135,7 +137,8 @@ VALIDATED_UPSTREAM: frozenset[str] = frozenset(
 #: Fields every provider honours. Recorded so they are not re-derived.
 HONOURED_EVERYWHERE: frozenset[str] = frozenset(
     {
-        # engine/workflow.py:1516 — `asyncio.wait_for` around the whole call.
+        # engine/workflow.py, `_execute_with_agent_timeout` — `asyncio.wait_for`
+        # around the whole call.
         "timeout_seconds",
         # engine/validator.py — a second model call the engine makes itself.
         "validator",
@@ -176,7 +179,8 @@ def _relative_path_problems(node: Node, where: str) -> list[str]:
     """Refuse a relative path on an agent, which resolves somewhere useless.
 
     ``working_dir``, ``skills`` and ``plugins`` resolve a relative entry against
-    the workflow file's directory (engine/workflow.py:620-622) — the pipeline's
+    the workflow file's directory (engine/workflow.py,
+    ``_resolve_agent_working_dir``) — the pipeline's
     ``build/``, which ``ictus emit`` rewrites and prunes.
 
     ``AgentNode`` only: a script's ``working_dir`` goes straight to the
@@ -441,7 +445,7 @@ def _listed(ports: set[str]) -> str:
 def _undeclared_member_field_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """A parallel group's fields are projected one at a time, not as a whole object.
 
-    ``_add_parallel_group_input`` (engine/context.py:99-101) copies exactly the
+    ``_add_parallel_group_input`` (engine/context.py) copies exactly the
     field each ``input:`` entry names.
     """
     wanted: dict[str, Ref] = {}

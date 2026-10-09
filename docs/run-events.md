@@ -10,7 +10,8 @@ end to end against two live runs. Version-specific. Fixtures:
 
 - `/ws` on the run's dashboard. Bidirectional.
 - `WebDashboard` subscribes to the engine's `WorkflowEventEmitter` and
-  rebroadcasts every event (`web/server.py:188`). Same feed the dashboard renders.
+  rebroadcasts every event (`web/server.py`, `WebDashboard.__init__`). Same feed
+  the dashboard renders.
 - An event is `{type, timestamp, data}`.
 - A run-scoped `RunRedactor` scrubs payloads before dispatch. Secrets do not
   reach subscribers.
@@ -57,8 +58,9 @@ Also `script_*`, `set_*`, `wait_*`, `mcp_*`, `subworkflow_*`, `parallel_*`,
 `agents`, `routes`, `entry_point`, `run_id`, `yaml_source`.
 
 A human gate's `gate_presented` carries **no `prompt_id`** — that field is on the
-questions variant only (`engine/workflow.py:4153` vs `:5755`), and
-`/api/gate-status` reports `prompt_id: null` for a waiting gate.
+questions variant only. Both are emitted from `engine/workflow.py`; the one that
+sets `step_type: questions` is the one that carries it. `/api/gate-status`
+reports `prompt_id: null` for a waiting gate.
 
 ## Messages sent
 
@@ -82,7 +84,7 @@ have one, so a response that omits it is accepted against any prompt
 ## Reaping
 
 A `--web-bg` process exits only when all four hold
-(`_maybe_start_grace_timer`, `web/server.py:1437`):
+(`_maybe_start_grace_timer`, in `web/server.py`):
 
 1. the run is `--web-bg`
 2. `_workflow_completed` — root-level `workflow_completed` / `workflow_failed` seen
@@ -126,7 +128,8 @@ and the run record archived.
 ## Rules
 
 - A node has no `hooks=` field. The engine executes no side effect at a step
-  boundary and rejects `workflow.hooks:` outright (`config/schema.py:3094`).
+  boundary and rejects `workflow.hooks:` outright (`config/schema.py`,
+  `_REMOVED_WORKFLOW_FIELDS`).
 - A side effect that belongs in the graph is a node: costed against
   `max_iterations`, routed, visible in the dashboard and in `ictus trace`.
 - A side effect that cannot be a node is a subscriber, and never enters the

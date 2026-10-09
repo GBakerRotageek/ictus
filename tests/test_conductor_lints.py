@@ -371,7 +371,8 @@ class TestRelativePathsOnAnAgent:
     """A relative path on an agent resolves against `build/`, which is output.
 
     ``working_dir``, ``skills`` and ``plugins`` all resolve against the emitted
-    workflow's own directory (engine/workflow.py:620-622), which ``ictus emit``
+    workflow's own directory (engine/workflow.py, ``_resolve_agent_working_dir``),
+    which ``ictus emit``
     rewrites and prunes.
     """
 

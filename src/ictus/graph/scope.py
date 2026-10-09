@@ -2,7 +2,7 @@
 
 A sub-workflow ending in a failed terminal does not hand control back: the
 child engine raises ``SubworkflowTerminatedError`` before any parent route is
-evaluated (``engine/workflow.py:2131``).
+evaluated (``engine/workflow.py``, in ``_run_child_engine``).
 
 Every exit of a scope is therefore a success terminal carrying a
 closed-vocabulary ``outcome``. The vocabulary is checked on both sides:
@@ -45,7 +45,7 @@ _EMPTY: dict[PortType, str] = {
     PortType.BOOLEAN: "false",
 }
 
-# Exactly what `_maybe_parse_json` (engine/workflow.py:7076-7095) turns into a
+# Exactly what `_maybe_parse_json` (engine/workflow.py) turns into a
 # non-string, together with the numeric and container checks below.
 _COERCED = frozenset({"True", "False", "None", "true", "false", "null"})
 

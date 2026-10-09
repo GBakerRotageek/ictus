@@ -167,7 +167,8 @@ class ConductorBackend:
             # ProviderError on a non-empty list.
             tool_allowlists=False,
             # `capabilities.session_continuity` is true for this one alone;
-            # config/validator.py:2458 rejects a session_key on any other.
+            # config/validator.py `_check_agent_capabilities` rejects a session_key
+            # on any other.
             remembering_providers=frozenset({"claude-agent-sdk"}),
             conditional_routes=True,
             cycles=True,

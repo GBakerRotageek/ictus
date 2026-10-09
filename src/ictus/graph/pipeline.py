@@ -52,7 +52,8 @@ __all__ = [
 
 _STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
 
-# Conductor permits only these inside a parallel group (config/validator.py:748-785).
+# Conductor permits only these inside a parallel group
+# (config/validator.py, in `_validate_parallel_groups`).
 _GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
 
 ContextMode = Literal["accumulate", "last_only", "explicit"]
