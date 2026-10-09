@@ -102,3 +102,38 @@ def test_the_launch_passes_the_filtered_environment(monkeypatch: pytest.MonkeyPa
     assert seen["env"]["SLACK_BOT_TOKEN"] == "xoxb-posts"
     assert "SLACK_APP_TOKEN" not in seen["env"]
     assert "ATLANTIS_DSN" not in seen["env"]
+
+
+def test_a_run_works_in_its_pipeline_folder_not_the_listener_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployed pipeline's relative paths are its own. Inheriting the
+    listener's directory put a run's files one level above the deployment."""
+    seen: dict[str, object] = {}
+
+    def _record(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen["cwd"] = kwargs["cwd"]
+        seen["command"] = command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    folder = tmp_path / "deployed" / "smoke"
+    (folder / "build").mkdir(parents=True)
+    (folder / "build" / "smoke.yaml").write_text("workflow: {}\n", encoding="utf-8")
+    elsewhere = tmp_path / "listener"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(subprocess, "run", _record)
+    monkeypatch.setattr("ictus.runs.launch.live_runs", lambda *_, **__: [])
+    relative = Path("..") / "deployed" / "smoke" / "build" / "smoke.yaml"
+    assert start(_ask(), Trigger(workflow=relative)).ok
+    assert seen["cwd"] == folder.resolve()
+    command = seen["command"]
+    assert isinstance(command, list)
+    assert str((folder / "build" / "smoke.yaml").resolve()) in command, (
+        "a relative workflow path would name nothing from the run's own directory"
+    )
+
+
+def test_a_workflow_built_outside_a_pipeline_folder_works_where_it_sits(tmp_path: Path) -> None:
+    """No `build/` to step out of, so nothing above it is presumed to be ours."""
+    assert Trigger(workflow=tmp_path / "loose.yaml").folder == tmp_path.resolve()

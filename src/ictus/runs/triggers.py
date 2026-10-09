@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ictus.interfaces.conductor.emit.manifest import SUFFIX, VERSION
+from ictus.runspec.inputs import BUILD_DIR
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -67,6 +68,19 @@ class Trigger:
     """Whether to hand the run what its working directory says about itself.
 
     Off for a pipeline whose work is not about that directory."""
+
+    @property
+    def folder(self) -> Path:
+        """Where a run started by this works: the pipeline's own folder.
+
+        Read from where the workflow sits, so it moves with a deployment rather
+        than following whoever started the listener — a run's relative paths
+        landed in the listener's working directory, one level above anything
+        that was deployed. The folder holding ``build/``, or the workflow's own
+        directory when it was built somewhere else.
+        """
+        built = self.workflow.resolve().parent
+        return built.parent if built.name == BUILD_DIR else built
 
     @property
     def pattern(self) -> re.Pattern[str]:

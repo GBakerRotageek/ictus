@@ -35,7 +35,14 @@ if TYPE_CHECKING:
 
     from ictus.graph.pipeline import Pipeline
 
-__all__ = ["REPO_KEY", "PipelineFolder", "RunSpec", "read_input_file", "split_frontmatter"]
+__all__ = [
+    "BUILD_DIR",
+    "REPO_KEY",
+    "PipelineFolder",
+    "RunSpec",
+    "read_input_file",
+    "split_frontmatter",
+]
 
 PIPELINE_FILE = "pipeline.py"
 INPUT_FILE = "input.md"

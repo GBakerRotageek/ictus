@@ -134,6 +134,11 @@ Three ways, in precedence order:
 3. `cd ~/work/the-project && ictus run ~/…/pipelines/<name>` — the default is
    the directory you launched from.
 
+A run started from a channel (`ictus-bridge listen` or `overhear`) has none of
+these: it works in **its own pipeline folder**, the one holding `build/`, never
+in the directory the listener was started from. A deployed pipeline's relative
+paths therefore stay inside the deployment.
+
 Agents then read and write inside that directory. Two traps:
 
 - `save_text` writes relative to the **run's** working directory (the target

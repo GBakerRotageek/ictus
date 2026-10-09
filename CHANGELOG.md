@@ -49,6 +49,17 @@ means: **the stdlib's constructors are the API and they still move.** Until
 
 ### Changed
 
+- **A run started from a channel works in its own pipeline folder.** It used
+  to inherit the listener's working directory, so a relative path written by
+  a step landed wherever `ictus-bridge` happened to be started — one level
+  above a deployed pipeline. It is now the folder holding `build/` (or the
+  workflow's own directory when it was built elsewhere), whatever directory the
+  listener runs in, and the workflow path is resolved first so it still names
+  the file from there. Workspace instructions are read walking up from that
+  folder too.
+- **`smoke_stop` says back what it heard instead of writing a file.** Its one
+  step prints the text the run was handed, so the dashboard shows the
+  channel's message as that step's output. It writes nothing to disk.
 - **`listen_on`'s service argument is now optional, and omitting it is the
   ordinary case.** A pipeline that only needs *starting* no longer has to name
   a service, integrate it, and so declare a credential it never uses — which

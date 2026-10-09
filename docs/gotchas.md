@@ -17,7 +17,8 @@ Recognise the message; you do not have to memorise the rule.
 - **A relative path on an agent** — `working_dir`, or a path in `skills` or
   `plugins`. It resolves against the emitted `build/`, which ictus rewrites. A
   `shell` step is the exception: its `working_dir` goes to the subprocess and
-  resolves against the directory you launched from.
+  resolves against the directory you launched from — or, for a run started
+  from a channel, against the pipeline's own folder.
 - **`${VAR}` in text a model reads.** Conductor expands it at load: unset
   refuses the workflow, set puts the *value* in the prompt. Tokens belong in an
   MCP header.

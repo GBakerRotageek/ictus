@@ -72,7 +72,9 @@ def start(request: Asked, trigger: Trigger) -> Started:
     try:
         command = launch_command(
             binary(),
-            trigger.workflow,
+            # Resolved: the run works in another directory, where a path
+            # relative to this one would name nothing.
+            trigger.workflow.resolve(),
             inputs=inputs,
             dashboard=True,
             background=True,
@@ -104,6 +106,9 @@ def start(request: Asked, trigger: Trigger) -> Started:
             text=True,
             timeout=LAUNCH_TIMEOUT_SECONDS,
             env=passing,
+            # Never this listener's own directory: a deployed pipeline's
+            # relative paths belong to it, not to wherever it was listened for.
+            cwd=trigger.folder,
             check=False,
         )
     except subprocess.TimeoutExpired:
