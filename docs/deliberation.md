@@ -1,8 +1,10 @@
 # Choosing and tuning a deliberation scope
 
-Read this when a `council` or a `roundtable` is in the graph and you are
-deciding which, how many rounds, and what to pay for verification.
-`STDLIB.md` lists them; `ictus stdlib council` has every parameter.
+Read this when a `council` or a `roundtable` is in the graph: which to reach
+for, how many rounds, and — for a council — what to pay for verification. A
+roundtable takes no verification options at all; the knobs below it does not
+have are marked. `STDLIB.md` lists both; `ictus stdlib council` has every
+parameter.
 
 **`council` polls, `roundtable` talks.** A council's voices run at once, so none
 has heard the others when it speaks and a synthesis step has to write each round
@@ -18,6 +20,12 @@ Order is part of the design — whoever speaks last has heard everyone.
 `study=` adds a read-alone phase before anybody speaks. It defaults to `""`,
 which skips the phase, so a roundtable does *not* read alone unless you say
 what to read.
+
+## Tuning a council
+
+These four are `council` parameters. A `roundtable` raises `TypeError` on each:
+its speakers hear each other by taking turns, which is what it has instead of
+`deliberate`, and it has no verification step.
 
 `deliberate=` (on by default) hands every voice the others' positions and
 concerns from the last round, verbatim and attributed, and asks it to answer
@@ -39,6 +47,8 @@ of yours did not hold" and can only nod at one aimed at the synthesis.
 thing it describes, and gates agreement on the result. Without it the exit
 condition is "all voices satisfied", which measures convergence between them and
 nothing else — four models given the same wrong material agree sooner, not later.
+
+## Deciding, which is `converge`'s job
 
 `judge=` belongs to `converge`, not to a council or a roundtable. It picks who
 decides: `"model"` (an agent emits `approved` + `notes`), `"human"` (an

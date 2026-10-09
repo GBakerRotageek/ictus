@@ -326,3 +326,36 @@ def test_no_page_carries_a_copy_of_another() -> None:
         if (run := _longest_shared_run(words[a], words[b])) > SHARED_RUN_CEILING
     ]
     assert not copied, f"{copied}. Decide which page owns it; the other links there."
+
+
+#: Installing this name from an index gets you somebody else's package. The
+#: distribution really is called `conductor-cli`, but that name on PyPI belongs
+#: to an unrelated research orchestrator whose command is `cond` — it installs
+#: cleanly, provides no `conductor`, and `smoke/README.md` records the afternoon
+#: it cost. Naming it is fine; telling somebody to install it is not.
+INSTALL_FROM_AN_INDEX = re.compile(
+    r"(?:pip|uv(?:\s+tool|\s+pip)?)\s+install\s+(?:[-\w]+\s+)*conductor-cli"
+)
+
+#: A span in single backticks on one line. Stripping these is the use-mention
+#: distinction again — `smoke/README.md` quotes the command in order to warn
+#: against it. `_used_not_mentioned` is the wrong tool here because it also
+#: strips fenced blocks, and the defect this found was inside one: a
+#: `setup_hint=` in a Python example.
+INLINE_CODE = re.compile(r"(?<!`)`[^`\n]+`(?!`)")
+
+
+@pytest.mark.parametrize("page", _pages(), ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_nothing_tells_anyone_to_install_conductor_from_an_index(page: Path) -> None:
+    """A guard for this existed and covered only `demo_work/pipelines/*/*.md`.
+
+    `docs/reaching-the-project.md` carried `uv tool install conductor-cli` as a
+    `setup_hint` — the text ictus prints to somebody whose preflight just failed,
+    which is exactly the moment they will run what it says.
+    """
+    said = INLINE_CODE.sub(" ", page.read_text(encoding="utf-8"))
+    found = INSTALL_FROM_AN_INDEX.findall(said)
+    assert not found, (
+        f"{page.relative_to(ROOT)} says {found}; that name on an index is a different "
+        "package. Conductor installs from its repository."
+    )

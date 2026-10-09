@@ -101,8 +101,9 @@ See [deliberation.md](deliberation.md) for choosing between `council` and
 `roundtable`.
 
 - **`voice` has no tools by default.** Four voices with tools is four agents
-  hunting the same file. `tools=None` takes the workflow default — and then
-  `max_turns` too, which `voice` refuses to be given tools without.
+  hunting the same file. `tools=None` takes the workflow default, and that is
+  the one case `voice` refuses without `max_turns`: it cannot see how wide the
+  default set is. A named list composes without one, so bound it yourself.
 - **A voice reports what it could not check in `unchecked`, not `concerns`.** A
   failed lookup is not evidence about the thing looked for, and a blocked voice
   with nowhere to say so writes a confident recommendation instead. The report

@@ -107,7 +107,7 @@ question it answers, so you load the one you are asking.
 | --- | --- |
 | [docs/wiring.md](docs/wiring.md) | connecting nodes — `connect` vs `route` vs `feed`, and conditions that are true at run time |
 | [docs/scopes.md](docs/scopes.md) | the outcomes, spec types and rules shared by every scope |
-| [docs/deliberation.md](docs/deliberation.md) | choosing between `council` and `roundtable`, and what `verify` and `judge` buy |
+| [docs/deliberation.md](docs/deliberation.md) | choosing between `council` and `roundtable`, and what a council's `verify` buys |
 | [docs/reporting.md](docs/reporting.md) | a run has to tell somebody what it is doing |
 | [docs/configuration.md](docs/configuration.md) | `config.yaml` — provider, budget, gates |
 | [docs/preflight.md](docs/preflight.md) | what is checked before anything is spent |

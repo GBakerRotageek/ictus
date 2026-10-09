@@ -156,7 +156,7 @@ pipeline.require_executable(
         name="conductor",
         purpose="the schema every claim about the engine is checked against",
         probe=("--version",),
-        setup_hint="uv tool install conductor-cli",
+        setup_hint="curl -sSfL https://aka.ms/conductor/install.sh | sh",
     )
 )
 ```
