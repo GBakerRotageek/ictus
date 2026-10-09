@@ -16,8 +16,10 @@ looks like once you are on it.
 
 from __future__ import annotations
 
+import ast
 import itertools
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -359,3 +361,22 @@ def test_nothing_tells_anyone_to_install_conductor_from_an_index(page: Path) -> 
         f"{page.relative_to(ROOT)} says {found}; that name on an index is a different "
         "package. Conductor installs from its repository."
     )
+
+
+@pytest.mark.parametrize("page", _pages(), ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_every_python_example_parses(page: Path) -> None:
+    """An example that does not parse is worse than no example.
+
+    Most blocks here are fragments, so this checks syntax and not whether they
+    run. The two complete pipelines — in `README.md` and the pipeline skill's
+    `building-the-graph.md` — were executed by hand during the page-by-page
+    sweep: both compose, lint clean against the Conductor backend, and emit.
+    """
+    broken: list[str] = []
+    text = page.read_text(encoding="utf-8")
+    for block in re.findall(r"^```python\n(.*?)^```", text, re.S | re.M):
+        try:
+            ast.parse(textwrap.dedent(block))
+        except SyntaxError as exc:
+            broken.append(f"line {exc.lineno}: {exc.msg}")
+    assert not broken, f"{page.relative_to(ROOT)} has python that does not parse: {broken}"

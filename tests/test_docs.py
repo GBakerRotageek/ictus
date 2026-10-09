@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import re
 from dataclasses import fields
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -291,3 +292,31 @@ def test_every_config_setting_is_in_the_table() -> None:
     documented = set(re.findall(r"`([a-z_]+)`", page))
     missing = sorted(f.name for f in fields(PipelineConfig) if f.name not in documented)
     assert not missing, f"docs/configuration.md does not document {missing}"
+
+
+def test_the_stdlib_group_table_lists_what_each_folder_holds() -> None:
+    """`docs/source-layout.md` names every constructor, folder by folder.
+
+    `STDLIB.md` is pinned to the library by `test_every_stdlib_constructor_is
+    _catalogued`; this table is a second list of the same names, and nothing
+    held it. Adding a constructor and forgetting one of the two is the way a
+    reader is told a folder holds less than it does.
+    """
+    page = (CATALOGUE.parent / "docs" / "source-layout.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\| `(\w+)/` \| [^|]+ \| ([^|]+) \|$", page, re.M)
+    assert len(rows) >= 6, f"only {len(rows)} group rows found; the table moved"
+
+    wrong: list[str] = []
+    for folder, listed in rows:
+        named = set(re.findall(r"`(\w+)`", listed))
+        module = import_module(f"ictus.stdlib.{folder}")
+        real = {
+            name
+            for name in dir(module)
+            if not name.startswith("_") and name[0].islower() and callable(getattr(module, name))
+        }
+        if absent := sorted(named - real):
+            wrong.append(f"{folder}/ is documented as holding {absent}, which it does not")
+        if unlisted := sorted(real - named):
+            wrong.append(f"{folder}/ holds {unlisted}, which the table does not name")
+    assert not wrong, wrong

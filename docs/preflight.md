@@ -13,8 +13,8 @@ a launch. `ictus preflight` prints every one it found, then only the problems.
 | --- | --- | --- |
 | `require_mcp` | the command exists, its env vars are set | opens the connection |
 | `require_executable` | the command is on `PATH` | runs the tool's own `probe` |
-| an `Integration` | its env vars are set | — |
-| a `DataSource` | its env vars are set, and a writable one is declared writable | — |
+| an `Integration` | its command is on `PATH`, its env vars are set, and something announces what it asked to hear | — |
+| a `DataSource` | its env vars are set; its own commands are folded in as executables | — |
 
 The rest of this page is the MCP case, which is the one with a remedy loop
 inside the run as well as a check before it.

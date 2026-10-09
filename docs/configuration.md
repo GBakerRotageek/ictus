@@ -61,7 +61,7 @@ ictus trace pipelines/my-thing # what each step of the last run actually did
 ictus lint pipelines/          # composition problems
 ictus emit pipelines/          # each folder's build/
 ictus validate pipelines/      # Conductor's own validator
-ictus preflight pipelines/     # MCP servers, env vars, tokens
+ictus preflight pipelines/     # can THIS machine supply what is declared?
 ```
 
 
