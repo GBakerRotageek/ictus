@@ -253,7 +253,7 @@ scripts, waits, gates, sub-workflows and terminals are all rejected as members.
 
 The gate offers three ways out, not two:
 
-```
+```text
 Help me fix it                → a helper that talks you through it
 I have fixed it — check again → straight back to the checks
 Abort the run                 → terminate, status: failed
