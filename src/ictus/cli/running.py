@@ -24,6 +24,7 @@ from ictus.cli.app import (
     app,
 )
 from ictus.errors import IctusError
+from ictus.graph.ports import PortType
 from ictus.interfaces.conductor.control.trace import find_logs, read_trace
 from ictus.lint import lint_pipeline
 from ictus.runspec.inputs import PipelineFolder, read_input_file
@@ -202,6 +203,12 @@ def run(
         code = BACKEND.run(
             path,
             inputs=supplied,
+            # What the pipeline declared a string stays the text that was
+            # typed; the engine still coerces the rest, which is how an int
+            # input gets an int.
+            verbatim=tuple(
+                name for name, port in declared.items() if port.port_type is PortType.STRING
+            ),
             dashboard=web,
             background=background,
             workspace_instructions=reads_project,

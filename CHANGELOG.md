@@ -60,6 +60,16 @@ means: **the stdlib's constructors are the API and they still move.** Until
   answers. Without a service there is no thread, because there is nothing to
   answer under. `Listener.service` is now `Integration | None`, and the
   manifest records `""`.
+- **A string input reaches a run as the text it was.** `conductor run -i` runs
+  every value through a type-guessing heuristic, so a Slack conversation id of
+  `1700000000.000200` arrived as a float and came back `1700000000.0002` — a
+  timestamp no message has. Roughly one in ten ends in a zero, and the symptom
+  was a run reporting at the top of the channel instead of in its thread, while
+  the sending program blamed a deleted message. `launch_command` and
+  `ConductorBackend.run` take `verbatim=`, naming the inputs that must not be
+  guessed at; those go over Conductor's typed input transport. The listener
+  passes both of its own, and `ictus run` passes whichever the pipeline
+  declared `STRING`, so an `int` input still gets an int.
 - **`Trigger.thread_input` defaults to `""`, not `"reply_to"`.** A manifest
   names the thread input exactly when one was declared, so the old default
   invented one: every run launched from a chat service was handed a value under

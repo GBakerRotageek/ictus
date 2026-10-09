@@ -44,6 +44,23 @@ Attaching to a run that already exists is [run-events.md](run-events.md).
   needs the built artifact, not the pipeline source, its config, or the compiler.
 - `launch_command` in `interfaces/conductor/` builds that argv for both the CLI
   and the listener. `--web-bg` detaches and serves the dashboard.
+- **A string input is handed over on `--input-json`, not `-i`.** `-i` runs a
+  value through `coerce_value`, which guesses a type — wanted for a number and
+  ruinous for a string that looks like one. A Slack `ts` of `1700000000.000200`
+  arrived as a float and came back `1700000000.0002`, which matches no message,
+  so a run's reports landed at the top of the channel while the sending program
+  blamed a deleted message. About one timestamp in ten ends in a zero.
+- `launch_command(verbatim=...)` names the inputs that must arrive as the text
+  they were given. The listener passes both of its own, since `listen_on`
+  refuses an `into` or a thread that is not a string; `ictus run` passes
+  whichever the pipeline declared `STRING`, so the engine still coerces the
+  rest and an `int` input still gets an int.
+- Conductor marks `--input-json` hidden and internal while calling
+  `coerce_value` a public contract that must not change, so it is used only
+  where the public one would corrupt the value.
+  `test_conformance.py::test_a_string_input_survives_the_engine_verbatim` runs
+  the installed engine to check it is still honoured — the failure is otherwise
+  silent, and reports simply go to the wrong conversation.
 - A manifest whose version differs, whose JSON is unreadable, or whose workflow
   is not beside it is skipped with a warning; the other pipelines still serve.
 - First matching trigger wins, in sorted-path order. One message, one run.

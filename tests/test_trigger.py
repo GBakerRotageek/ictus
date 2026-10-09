@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 from pathlib import Path
@@ -20,7 +21,12 @@ from ictus import (
 from ictus.assemble.announcements import OPENER_ID, apply_integrations
 from ictus.bridge.slack.listen import asked, events
 from ictus.errors import CompositionError
-from ictus.interfaces.conductor import conductor, launch_command, launch_env
+from ictus.interfaces.conductor import (
+    TYPED_INPUT_FLAG,
+    conductor,
+    launch_command,
+    launch_env,
+)
 from ictus.interfaces.conductor.control.live import LiveRun
 from ictus.notify.slack import slack_channel, slack_webhook
 from ictus.runs.launch import Asked, start
@@ -177,10 +183,27 @@ def test_a_refusal_comes_back_as_its_last_line(monkeypatch: pytest.MonkeyPatch) 
     assert start(_ask(), TRIGGER).why == "error: $SLACK_BOT_TOKEN is not set"
 
 
-def test_the_question_and_the_thread_are_passed_as_inputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Through argv, so an apostrophe in a question is only an apostrophe."""
+def _handed_over(command: list[str]) -> dict[str, object]:
+    """The inputs in an argv, whichever flag carried them.
+
+    By meaning rather than spelling: which flag is right depends on whether the
+    engine would retype the value, and a test that pins the flag would have to
+    change every time that answer does.
+    """
+    found: dict[str, object] = {}
+    for flag, pair in itertools.pairwise(command):
+        name, sep, value = pair.partition("=")
+        if not sep:
+            continue
+        if flag == "-i":
+            found[name] = value
+        elif flag == TYPED_INPUT_FLAG:
+            found[name] = json.loads(value)
+    return found
+
+
+def _ran(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Capture the argv `start` would have run, running nothing."""
     seen: list[list[str]] = []
 
     def _record(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
@@ -188,9 +211,33 @@ def test_the_question_and_the_thread_are_passed_as_inputs(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", _record)
+    return seen
+
+
+def test_the_question_and_the_thread_are_passed_as_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through argv, so an apostrophe in a question is only an apostrophe."""
+    seen = _ran(monkeypatch)
     assert start(_ask(), TRIGGER).ok
-    assert "question=why's it failing?" in seen[0]
-    assert "reply_to=1.5" in seen[0]
+    assert _handed_over(seen[0]) == {"question": "why's it failing?", "reply_to": "1.5"}
+
+
+def test_a_conversation_reaches_the_run_as_the_text_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`conductor run -i` guesses a type, and a Slack ts is a string that looks
+    like a number. Coerced, `1700000000.000200` comes back `1700000000.0002` —
+    which matches no message, so a run's reports land at the top of the channel
+    and the sending program blames a deleted message. One ts in ten ends in a
+    zero.
+    """
+    seen = _ran(monkeypatch)
+    asked = Asked(question="why's it failing?", thread="1700000000.000200", channel="C", who="U")
+    assert start(asked, TRIGGER).ok
+    handed = _handed_over(seen[0])
+    assert handed["reply_to"] == "1700000000.000200"
+    assert isinstance(handed["reply_to"], str), "a timestamp is not a number"
 
 
 def test_a_pipeline_that_reports_nowhere_is_handed_no_conversation(
@@ -208,8 +255,7 @@ def test_a_pipeline_that_reports_nowhere_is_handed_no_conversation(
     quiet = Trigger(workflow=Path("demo_work/pipelines/asked/build/asked.yaml"))
     assert quiet.thread_input == "", "nothing was declared, so nothing is named"
     assert start(_ask(), quiet).ok
-    assert "question=why's it failing?" in seen[0]
-    assert not [arg for arg in seen[0] if arg.startswith("reply_to=")]
+    assert _handed_over(seen[0]) == {"question": "why's it failing?"}
 
 
 # --- a run that reports into somebody else's conversation --------------------

@@ -11,6 +11,7 @@ dialect, iteration accounting, CLI.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -36,13 +37,20 @@ from ictus.interfaces.environment import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Mapping, Sequence
     from pathlib import Path
 
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.values import YamlDict, YamlValue
 
-__all__ = ["ConductorBackend", "binary", "conductor", "launch_command", "launch_env"]
+__all__ = [
+    "TYPED_INPUT_FLAG",
+    "ConductorBackend",
+    "binary",
+    "conductor",
+    "launch_command",
+    "launch_env",
+]
 
 BINARY = "conductor"
 
@@ -115,6 +123,24 @@ def launch_env(declared: Iterable[str], source: Mapping[str, str] | None = None)
     }
 
 
+#: Conductor's typed input transport: ``name=<json>``, decoded strictly.
+#:
+#: ``-i`` runs a value through ``coerce_value``, which guesses a type. That is
+#: wanted for a number and ruinous for a string that looks like one: a Slack
+#: timestamp of ``1700000000.000200`` arrives as a float and comes back
+#: ``1700000000.0002``, which matches no message — so a run's reports land at
+#: the top of the channel, and the sending program blames a deleted message.
+#: About one timestamp in ten ends in a zero.
+#:
+#: Conductor marks this flag hidden and internal (``cli/run.py``,
+#: ``parse_input_json_flags``) while calling ``coerce_value`` a public contract
+#: that must not change. So it is used only where the public one would corrupt
+#: the value, never as the general way in, and
+#: ``test_conformance.py::test_a_string_input_survives_the_engine_verbatim``
+#: runs the installed engine to check it is still honoured.
+TYPED_INPUT_FLAG = "--input-json"
+
+
 def launch_command(
     executable: str,
     path: Path,
@@ -124,14 +150,22 @@ def launch_command(
     background: bool = False,
     workspace_instructions: bool = True,
     log_file: str | None = None,
+    verbatim: Collection[str] = (),
 ) -> list[str]:
     """The argv that runs one compiled workflow.
 
     One place, so the CLI and the listener spell the flags the same way.
+
+    ``verbatim`` names the inputs that must arrive as the text they were given,
+    whatever they look like. Everything else is coerced by the engine, which is
+    how an ``int`` input gets an int.
     """
     command = [executable, "run", str(path.resolve())]
     for name, value in inputs.items():
-        command += ["-i", f"{name}={value}"]
+        if name in verbatim:
+            command += [TYPED_INPUT_FLAG, f"{name}={json.dumps(value)}"]
+        else:
+            command += ["-i", f"{name}={value}"]
     if log_file is not None:
         # Verbatim: `auto` is Conductor's spelling for a generated temp path.
         command += ["--log-file", log_file]
@@ -268,6 +302,7 @@ class ConductorBackend:
         workspace_instructions: bool = True,
         working_dir: Path | None = None,
         log_file: str | None = None,
+        verbatim: Collection[str] = (),
     ) -> int:
         """Run a compiled workflow, serving the dashboard by default.
 
@@ -293,6 +328,7 @@ class ConductorBackend:
             background=background,
             workspace_instructions=workspace_instructions,
             log_file=log_file,
+            verbatim=verbatim,
         )
         return subprocess.run(command, check=False, cwd=working_dir).returncode
 

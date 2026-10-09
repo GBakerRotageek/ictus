@@ -77,6 +77,11 @@ def start(request: Asked, trigger: Trigger) -> Started:
             dashboard=True,
             background=True,
             workspace_instructions=trigger.workspace_instructions,
+            # Both of these: `listen_on` refuses an `into` or a thread that is
+            # not a string, so neither was ever meant to be read as a number.
+            # A conversation's id is the one that suffers — Slack's are
+            # timestamps, and a coerced one matches no message.
+            verbatim=tuple(inputs),
         )
     except FileNotFoundError as exc:
         return Started(str(exc))
