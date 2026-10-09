@@ -143,7 +143,13 @@ class WorkflowInput:
 class Listener:
     """What wakes a pipeline. Compiled into a manifest beside the workflow."""
 
-    service: Integration
+    service: Integration | None
+    """Where it reports back, when it reports anywhere.
+
+    ``None`` is the ordinary case for a pipeline that only needs starting: the
+    credential for a channel belongs to whoever reads it, and a run that says
+    nothing there has no use for one."""
+
     prefix: str
     """What marks a message as a request rather than conversation."""
 
@@ -593,35 +599,56 @@ class Pipeline:
         self._integrations[service.name] = service
         return service
 
-    def listen_on(self, service: Integration, *, prefix: str, into: WorkflowInput) -> Listener:
-        """Declare that a message on ``service`` starts this pipeline.
+    def listen_on(
+        self,
+        service: Integration | None = None,
+        *,
+        prefix: str,
+        into: WorkflowInput,
+    ) -> Listener:
+        """Declare that a message starts this pipeline.
 
         ``prefix`` marks a message as a request; whatever follows it becomes
-        ``into``. The conversation comes from the same service's
-        ``integrate(thread=...)``. The service must be integrated first.
+        ``into``.
+
+        ``service`` is where the run reports back, and must be integrated
+        first; the conversation then comes from that same
+        ``integrate(thread=...)``, never from a second argument here, so the
+        two can never disagree about where a run answers.
+
+        **Omit it when the pipeline reports nowhere.** Being startable is not a
+        reason to hold a credential: the listener reads the channel with its
+        own, and a run that says nothing there needs none of its own. Naming a
+        service in order to be started was how a pipeline came to declare a
+        token it never used, which `ictus preflight` and the listener then both
+        refused to proceed without.
         """
-        if service.name not in self._integrations:
+        if service is not None and service.name not in self._integrations:
             raise CompositionError(
                 f"pipeline {self.pipeline_id!r} listens on {service.name!r} without "
                 "integrating it; integrate() it first so one declaration says both "
-                "what starts a run and where it reports"
+                "what starts a run and where it reports — or drop the argument, if "
+                "it reports nowhere and only needs starting"
             )
-        if not service.listens:
+        if service is not None and not service.listens:
             raise CompositionError(
                 f"integration {service.name!r} cannot be listened on — it can only be "
                 "written to. Use a constructor that holds a credential for waiting, "
                 "or start this pipeline some other way"
             )
+        # "" keys the serviceless one, of which there is likewise only ever one:
+        # a pipeline answers to one way of being asked for.
+        key = service.name if service is not None else ""
+        where = f"on {service.name!r}" if service is not None else "for a message"
         if not prefix.strip():
             raise CompositionError(
-                f"pipeline {self.pipeline_id!r} listens on {service.name!r} with a blank "
-                "prefix, which every message matches"
+                f"pipeline {self.pipeline_id!r} listens {where} with a blank prefix, "
+                "which every message matches"
             )
-        existing = self._listeners.get(service.name)
+        existing = self._listeners.get(key)
         if existing is not None:
             raise CompositionError(
-                f"pipeline {self.pipeline_id!r} already listens on {service.name!r}; "
-                "one service starts it one way"
+                f"pipeline {self.pipeline_id!r} already listens {where}; one prefix starts it"
             )
         if self._inputs.get(into.name) is not into:
             raise CompositionError(
@@ -633,14 +660,14 @@ class Pipeline:
                 f"pipeline {self.pipeline_id!r} listens into {into.name!r}, which is "
                 f"{into.port_type.value}; what somebody types is a string"
             )
-        thread = self._threads.get(service.name)
+        thread = self._threads.get(service.name) if service is not None else None
         if thread is not None and thread.name == into.name:
             raise CompositionError(
                 f"pipeline {self.pipeline_id!r} would put the question and the "
                 f"conversation both in {into.name!r}; they are two values"
             )
         listener = Listener(service=service, prefix=prefix, into=into, thread=thread)
-        self._listeners[service.name] = listener
+        self._listeners[key] = listener
         return listener
 
     @property

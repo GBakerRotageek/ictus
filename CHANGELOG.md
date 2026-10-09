@@ -10,6 +10,72 @@ means: **the stdlib's constructors are the API and they still move.** Until
 
 `ictus.__version__` says which version is installed.
 
+## [Unreleased]
+
+### Added
+
+- **`ictus-bridge overhear FOLDER --channel C0ABC123`** — starts runs from a
+  channel read with your own credentials (`$SLACK_USER_TOKEN`, a user token
+  with `channels:history`) rather than an app's. Nothing is installed in the
+  workspace and nothing is invited to the channel, which is the reason it
+  exists: a channel you cannot get a bot into can still start a run.
+  **It cannot answer a gate** — an interaction reaches the app that posted the
+  button, down a connection only an app-level token opens, so `overheard`
+  returns `Asked` and nothing else. A run started this way waits at its gates
+  for its dashboard, or for an `ictus-bridge listen` alongside. Listening
+  starts at the newest message and a restart replays nothing; top-level
+  messages only. A second command rather than a flag on `listen`, so no
+  option is inert in half of its own command.
+- **`ictus.bridge.slack.watch`** — `overheard`, `since`, `latest` and `Heard`,
+  the polling half of the bridge.
+- **`--pipeline <id>`** on `ictus-bridge overhear` and `listen` — point a
+  listener at one of the manifests it found instead of all of them;
+  repeatable. A name nothing claims stops it at startup and says what *was*
+  found, rather than leaving it watching for a prefix nothing will send. It is
+  also how two pipelines claiming one prefix is settled: on prefix alone the
+  first in sorted-path order wins and the other never fires, silently.
+- **`ictus.bridge.slack.request_in`** — the one recogniser both ways in call,
+  so a prefix that starts a run over the socket starts the same one when the
+  channel is read directly. `asked` is now a thin unwrapper over it.
+- **`tests/test_doc_examples.py`** — every name a documented example imports
+  from `ictus` has to exist. `test_every_python_example_parses` checks syntax
+  and says so; `test_docs.py` checks `STDLIB.md`'s table. `from ictus import
+  STR` is neither: it parses, is in no table, and is not a thing.
+- **`tests/test_stand_ins.py`** — the production reader is run against
+  `smoke/fake_channel.py`. `smoke/` was taken to be unrunnable by `pytest`
+  because most of it drives a live engine; the stand-in for Slack is not that,
+  and while nothing compared it with the service it stands in for it drifted
+  into answering a shape ictus could parse and never act on.
+
+### Changed
+
+- **`listen_on`'s service argument is now optional, and omitting it is the
+  ordinary case.** A pipeline that only needs *starting* no longer has to name
+  a service, integrate it, and so declare a credential it never uses — which
+  `ictus preflight` and `trigger.missing()` then both refused to proceed
+  without. Being startable is not a reason to hold a credential: the listener
+  reads the channel with its own. Naming a service still works unchanged, and
+  the conversation still comes from that service's `integrate(thread=)` rather
+  than a second argument, so the two can never disagree about where a run
+  answers. Without a service there is no thread, because there is nothing to
+  answer under. `Listener.service` is now `Integration | None`, and the
+  manifest records `""`.
+- **`Trigger.thread_input` defaults to `""`, not `"reply_to"`.** A manifest
+  names the thread input exactly when one was declared, so the old default
+  invented one: every run launched from a chat service was handed a value under
+  a name it had never chosen. `start` now passes the thread only when the
+  pipeline asked for one.
+- The manifest shape and `slack_channel` are otherwise untouched: the manifest
+  never named a transport, and `slack_channel`'s `token=` was already the name
+  of a variable, so a pipeline can post with a user token without a new
+  constructor.
+- `ictus.bridge.slack.listen.presses` is unchanged; `ictus-bridge listen` keeps
+  its argument optional, and `overhear` requires a folder — with no manifests
+  `listen` still answers gates and `overhear` would have nothing left to do.
+- `ictus.notify.slack.send.TIMEOUT_SECONDS` is now declared in `__all__`; the
+  bridge reads it, and asks the same host the same questions in the other
+  direction.
+
 ## [0.1.0] — 2026-10-08
 
 The first version with a number. Everything before this was `0.0.0`, so this

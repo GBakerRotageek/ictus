@@ -15,10 +15,14 @@ soundcheck:
 # example carrying an unused import teaches that the import is needed.
 > uv run ruff check --no-respect-gitignore demo_work
 > uv run ruff format --check --no-respect-gitignore demo_work
-# `smoke/` is named explicitly because it is not under src or tests. It holds the
-# harness that drives a live engine, which `pytest` cannot run and `soundcheck`
-# therefore never executes — so type checking is the only gate it has, and
-# leaving it off one meant six errors sat in it unnoticed.
+# `smoke/` is named explicitly because it is not under src or tests. Most of it
+# drives a live engine, which `pytest` cannot run and `soundcheck` therefore
+# never executes — so type checking is the only gate those files have, and
+# leaving it off one meant six errors sat in it unnoticed. `fake_channel.py` is
+# the exception and is not exempt: it stands in for Slack rather than driving an
+# engine, so `tests/test_stand_ins.py` runs the production reader against it.
+# Taking it to be covered by the sentence above is how it came to answer a shape
+# ictus could parse and never act on.
 > uv run mypy src tests smoke
 # Each pipeline folder holds a file called pipeline.py, so mypy sees four modules
 # with one name. Checking them a folder at a time keeps the folder names readable

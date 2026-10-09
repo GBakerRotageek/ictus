@@ -55,12 +55,17 @@ def render(pipeline: Pipeline) -> str:
 
 
 def _listener(one: Listener) -> dict[str, object]:
-    """One way in: what to match, and which inputs the match fills."""
+    """One way in: what to match, and which inputs the match fills.
+
+    ``service`` is where the run reports back, and ``""`` when it reports
+    nowhere. No listener reads it — a prefix is what claims a message — so it
+    is here to be read by a person looking at the file.
+    """
     inputs = {"question": one.into.name}
     if one.thread is not None:
         inputs["thread"] = one.thread.name
     return {
-        "service": one.service.name,
+        "service": one.service.name if one.service is not None else "",
         "prefix": one.prefix,
         "inputs": inputs,
     }

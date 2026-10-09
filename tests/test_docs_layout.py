@@ -371,6 +371,10 @@ def test_every_python_example_parses(page: Path) -> None:
     run. The two complete pipelines — in `README.md` and the pipeline skill's
     `building-the-graph.md` — were executed by hand during the page-by-page
     sweep: both compose, lint clean against the Conductor backend, and emit.
+
+    What a by-hand sweep misses is in `test_doc_examples.py`, which resolves
+    every name an example imports from `ictus`: `from ictus import STR` parses
+    and is not a thing.
     """
     broken: list[str] = []
     text = page.read_text(encoding="utf-8")

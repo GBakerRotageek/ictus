@@ -82,6 +82,10 @@ Read these only when the situation calls for one:
   `docs/gotchas.md` points at the same material and two copies drift.
 - **[reference/building-the-graph.md](reference/building-the-graph.md)** —
   wiring: `connect` vs `route` vs `feed`, stages, scopes, `branch_on_outcome`.
+- **`docs/starting-from-a-channel.md`** — the pipeline should be startable by
+  somebody who is not at a terminal. `listen_on`'s service argument is optional
+  and usually omitted: naming one makes the *run* report back, which makes it
+  declare a credential that `preflight` then refuses to proceed without.
 - **`STDLIB.md`, the Gotchas section** — a run behaved in a way the graph did
   not predict. Each one has cost a real run. It is in the
   repository rather than in here so there is one list, not two that disagree.

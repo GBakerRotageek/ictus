@@ -28,7 +28,9 @@ from ictus.runs.triggers import DEFAULT_PREFIX, Need, Trigger, triggers_in
 from ictus.stdlib import approval_gate, succeed
 
 STR = PortType.STRING
-TRIGGER = Trigger(workflow=Path("demo_work/pipelines/asked/build/asked.yaml"))
+TRIGGER = Trigger(
+    workflow=Path("demo_work/pipelines/asked/build/asked.yaml"), thread_input="reply_to"
+)
 
 
 def _envelope(text: str, **over: object) -> dict[str, object]:
@@ -191,6 +193,25 @@ def test_the_question_and_the_thread_are_passed_as_inputs(
     assert "reply_to=1.5" in seen[0]
 
 
+def test_a_pipeline_that_reports_nowhere_is_handed_no_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manifest names the thread input exactly when one was declared, so a
+    default here would hand every run a value under a name it never chose."""
+    seen: list[list[str]] = []
+
+    def _record(command: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", _record)
+    quiet = Trigger(workflow=Path("demo_work/pipelines/asked/build/asked.yaml"))
+    assert quiet.thread_input == "", "nothing was declared, so nothing is named"
+    assert start(_ask(), quiet).ok
+    assert "question=why's it failing?" in seen[0]
+    assert not [arg for arg in seen[0] if arg.startswith("reply_to=")]
+
+
 # --- a run that reports into somebody else's conversation --------------------
 
 
@@ -309,6 +330,59 @@ def test_the_conversation_comes_from_the_integration_not_a_second_argument() -> 
     assert listener.into.name == "ticket"
     assert listener.thread is not None, "integrate() already said where it reports"
     assert listener.thread.name == "reply_to"
+
+
+def test_a_pipeline_can_be_startable_without_holding_a_credential() -> None:
+    """Being startable is not a reason to hold one.
+
+    The listener reads the channel with its own credential; a run that says
+    nothing there needs none. Naming a service in order to be started was how a
+    pipeline came to declare a token it never used — which `trigger.missing()`
+    then refused to launch without.
+    """
+    p = Pipeline(pipeline_id="asked")
+    question = p.declare_input("question", STR)
+    listener = p.listen_on(prefix="Alert:", into=question)
+    assert listener.service is None
+    assert listener.thread is None, "it reports nowhere, so there is nothing to answer under"
+    assert p.integrations == (), "and nothing to configure"
+
+
+def test_a_credential_free_listener_asks_the_environment_for_nothing(tmp_path: Path) -> None:
+    """The whole point, read back off the artifact a listener actually reads."""
+    p = Pipeline(pipeline_id="asked")
+    question = p.declare_input("question", STR)
+    p.set_entry(p.add(succeed(node_id="done", reason="done")))
+    p.listen_on(prefix="Alert:", into=question)
+    built = _built(tmp_path, p)
+
+    document = json.loads((built / "asked.listen.json").read_text(encoding="utf-8"))
+    assert document["requires"]["env"] == []
+    assert document["listeners"] == [
+        {"service": "", "prefix": "Alert:", "inputs": {"question": "question"}}
+    ]
+
+    (trigger,) = triggers_in(built)
+    assert trigger.missing() == [], "nothing to go and set before it may run"
+    assert trigger.thread_input == "", "it reports nowhere, so there is nothing to answer under"
+
+
+def test_a_second_serviceless_listener_is_refused() -> None:
+    """One prefix starts it, the same rule one service has always had."""
+    p = Pipeline(pipeline_id="asked")
+    question = p.declare_input("question", STR)
+    spare = p.declare_input("spare", STR)
+    p.listen_on(prefix="Alert:", into=question)
+    with pytest.raises(CompositionError, match="already listens for a message"):
+        p.listen_on(prefix="Warning:", into=spare)
+
+
+def test_naming_a_service_still_takes_its_conversation_from_the_integration() -> None:
+    """The optional argument changes nothing for a pipeline that does report."""
+    p, ticket, service = _listening()
+    listener = p.listen_on(service, prefix="New DB ticket raised:", into=ticket)
+    assert listener.service is service
+    assert listener.thread is not None and listener.thread.name == "reply_to"
 
 
 def test_listening_on_a_service_that_is_not_integrated_is_refused() -> None:

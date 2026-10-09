@@ -49,8 +49,11 @@ class Trigger:
     workflow: Path
     prefix: str = DEFAULT_PREFIX
     question_input: str = "question"
-    thread_input: str = "reply_to"
-    """Not ``thread``: that name collides with what an announcement publishes,
+    thread_input: str = ""
+    """Which input the conversation arrives in, and ``""`` when the pipeline
+    declared none — a run that reports nowhere has nothing to answer under.
+
+    Never ``thread``: that name collides with what an announcement publishes,
     so no pipeline can declare an input called it."""
 
     commands: tuple[Need, ...] = ()
@@ -143,7 +146,10 @@ def _read(path: Path) -> Iterator[Trigger]:
             workflow=workflow,
             prefix=str(one.get("prefix", DEFAULT_PREFIX)),
             question_input=str(inputs.get("question", "question")),
-            thread_input=str(inputs.get("thread", "reply_to")),
+            # No default. The manifest names this exactly when there is one, so
+            # guessing a name here would hand every run an input it never
+            # declared, under a name it never chose.
+            thread_input=str(inputs.get("thread", "")),
             commands=_needs(requires.get("commands")),
             env=_needs(requires.get("env")),
             pipeline=str(document.get("pipeline", "")),

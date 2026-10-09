@@ -8,6 +8,12 @@ Answers both shapes ictus posts in:
 * **chat.postMessage** — returns `{"ok": true, "ts": ..., "message": {...}}`,
   so a run can learn its own thread and reply under it.
 
+and the one shape `ictus-bridge overhear` reads:
+
+* **conversations.history** — whatever you have typed at this program, newest
+  first, honouring `oldest` and `limit`. Type a line here and `overhear` starts
+  a run from it, the same way a channel would.
+
     python3 smoke/fake_channel.py
     export SLACK_BOT_TOKEN=xoxb-pretend
     export SLACK_CHANNEL=C0PRETEND
@@ -15,16 +21,57 @@ Answers both shapes ictus posts in:
 
 The transcript is indented by thread, so several runs at once read as
 separate conversations.
+
+What a run posts is *not* added to the history. A real `overhear` posts as the
+person listening, so its line is an ordinary message — it starts nothing only
+because its wording never begins with a prefix, and reproducing that subtlety
+in a stand-in would teach the wrong lesson about where the guard is.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar
 
 PORT = 8723
+
+#: What has been typed at this program, oldest first, as Slack would hold it.
+SAID: list[dict[str, object]] = []
+_SAID_LOCK = threading.Lock()
+
+
+def _typing() -> None:
+    """Turn every line typed here into a message in the channel.
+
+    Stamped from the clock, because Slack's `ts` is epoch seconds and a
+    listener starting on an empty channel has nothing else to start after. A
+    counter from 2000.0 sorts before every such cursor, so nothing typed here
+    was ever read — which is how this was found.
+    """
+    for line in sys.stdin:
+        text = line.rstrip("\n")
+        if not text:
+            continue
+        said_at = f"{time.time():.6f}"
+        with _SAID_LOCK:
+            SAID.append(
+                {
+                    "type": "message",
+                    "user": "U0YOU",
+                    "ts": said_at,
+                    "text": text,
+                }
+            )
+        # A thread of its own, so what a listener says about it nests under it
+        # rather than landing at the top of the channel.
+        Slack.roots[said_at] = said_at
+        print(f"  (you said) {text}")
+        sys.stdout.flush()
 
 
 class Slack(BaseHTTPRequestHandler):
@@ -32,6 +79,21 @@ class Slack(BaseHTTPRequestHandler):
 
     roots: ClassVar[dict[str, str]] = {}
     next_ts: ClassVar[float] = 1000.0
+
+    def do_GET(self) -> None:
+        if not self.path.split("?")[0].endswith("conversations.history"):
+            self._reply(404, b'{"ok": false, "error": "unknown_method"}')
+            return
+        query = urllib.parse.urlparse(self.path).query
+        params = {key: value[0] for key, value in urllib.parse.parse_qs(query).items()}
+        oldest = float(params.get("oldest") or 0)
+        limit = int(params.get("limit") or 100)
+        with _SAID_LOCK:
+            window = [one for one in SAID if float(str(one["ts"])) > oldest]
+        # Newest first, which is the order Slack answers in and the reason
+        # `since` sorts what it collects rather than trusting the order.
+        page = list(reversed(window))[:limit]
+        self._reply(200, json.dumps({"ok": True, "messages": page}).encode())
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -90,4 +152,6 @@ class Slack(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"listening on http://127.0.0.1:{PORT} — ctrl-c to stop")
+    print("type a line to say it in the channel, e.g. 'Start test run: why is the bus failing?'")
+    threading.Thread(target=_typing, daemon=True).start()
     HTTPServer(("127.0.0.1", PORT), Slack).serve_forever()

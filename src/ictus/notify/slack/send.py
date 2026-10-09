@@ -34,6 +34,7 @@ __all__ = [
     "API",
     "API_ENV",
     "SECTION_LIMIT",
+    "TIMEOUT_SECONDS",
     "api_call",
     "endpoint",
     "reply",
@@ -47,6 +48,8 @@ API = "https://slack.com/api/chat.postMessage"
 API_ENV = "SLACK_API_URL"
 
 TIMEOUT_SECONDS = 15
+"""How long one Web API call may take. Read by the bridge too, which asks the
+same host the same questions in the other direction."""
 
 #: Below the step's own timeout, which the engine treats as a failure.
 DEADLINE_SECONDS = 20
@@ -72,8 +75,11 @@ def slack_channel(
 
     Threads, so several runs at once stay legible. Needs a bot token.
 
-    Listens too: `ictus-bridge listen` holds a socket open to the same
-    workspace, which needs an app-level token read by the listener, not a run.
+    Listens too, either way round, and neither credential reaches a run:
+    `ictus-bridge listen` holds a socket open as the app, which needs an
+    app-level token and the app in the channel; `ictus-bridge overhear` reads
+    the channel as a person, which needs only a user token and that person's
+    membership — and cannot answer a gate, since no user token hears a press.
     """
     return Integration(
         name=name,

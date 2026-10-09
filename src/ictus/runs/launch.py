@@ -66,7 +66,9 @@ def start(request: Asked, trigger: Trigger) -> Started:
     gaps = trigger.missing()
     if gaps:
         return Started("; ".join(gaps))
-    inputs = {trigger.question_input: request.question, trigger.thread_input: request.thread}
+    inputs = {trigger.question_input: request.question}
+    if trigger.thread_input:
+        inputs[trigger.thread_input] = request.thread
     try:
         command = launch_command(
             binary(),

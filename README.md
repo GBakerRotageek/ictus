@@ -181,6 +181,7 @@ to read it.
 | [preflight.md](docs/preflight.md) | what is checked before anything is spent |
 | [reporting.md](docs/reporting.md) | getting a run's progress out to people |
 | [run-events.md](docs/run-events.md) | attaching to a live run |
+| [starting-from-a-channel.md](docs/starting-from-a-channel.md) | a message in a channel starting one |
 | [reaching-the-project.md](docs/reaching-the-project.md) | what a step can see, and how to widen it |
 | [gotchas.md](docs/gotchas.md) | behaviour the graph did not predict |
 | [source-layout.md](docs/source-layout.md) | where everything is, for working on ictus |

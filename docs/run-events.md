@@ -143,30 +143,6 @@ and the run record archived.
 
 ## Starting a run from a message
 
-- Declared with `pipeline.listen_on(service, prefix=..., into=...)`, beside
-  `integrate`. The conversation comes from that service's `integrate(thread=)`.
-- Refused at composition: a service not integrated, one with `listens=False`,
-  a blank prefix, an `into` the pipeline does not declare or that is not a
-  string, an `into` that is also the thread, a second listener on one service.
-- `slack_channel` sets `listens=True`; `slack_webhook` does not.
-- Compiles to `build/<pipeline_id>.listen.json`, version `1`. Root pipelines
-  only — a stage has no run of its own to start.
-- Manifest holds: `workflow` (sibling filename), `pipeline`, `description`,
-  `workspace_instructions`, `listeners[]` (`service`, `prefix`,
-  `inputs.question`, `inputs.thread`), and `requires` (`commands`, `env`) —
-  every declared executable, and every env var an integration, MCP server or
-  datasource declares, deduplicated by name.
-- `requires` exists because preflight is a command, not an artifact: the workflow
-  YAML records no declared executable, and names an env var only where an MCP
-  server passes one through.
-- `ictus-bridge listen [FOLDER]` reads manifests under `FOLDER` recursively. No folder
-  answers gates only.
-- The listener runs `conductor run <workflow> -i ...`, never `ictus run`. It
-  needs the built artifact, not the pipeline source, its config, or the compiler.
-- `launch_command` in `interfaces/conductor/` builds that argv for both the CLI
-  and the listener. `--web-bg` detaches and serves the dashboard.
-- A manifest whose version differs, whose JSON is unreadable, or whose workflow
-  is not beside it is skipped with a warning; the other pipelines still serve.
-- First matching trigger wins, in sorted-path order. One message, one run.
-- Prefix matching skips `*`, `_`, `~` and backticks wherever whitespace is
-  allowed: Slack sends `*Bold:*`, and emphasis is in the text an app receives.
+Its own page, because it answers a different question from the rest of this one:
+this page is about attaching to a run that exists, that one about what brings a
+run into being. See [starting-from-a-channel.md](starting-from-a-channel.md).
