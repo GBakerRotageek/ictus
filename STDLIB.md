@@ -90,8 +90,8 @@ A run that has to tell somebody what it is doing is
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `converged`, `exhausted` |
 | `read_ticket` | Read one ticket through a read-only source, holding its credential inside the stage | `read`, `missing` |
 | `investigate` | Bounded look/ask loop against a read-only datasource; the thinking step has no tools by default and can only request a statement | `answered`, `exhausted` |
-| `roundtable` | Several people taking turns, in order, until they agree | `agreed`, `unresolved`, `halted` |
-| `council` | Several standpoints deliberating until they agree on a report | `agreed`, `unresolved`, `halted` |
+| `roundtable` | Several people taking turns, in order, until they agree | `agreed`, `unresolved` |
+| `council` | Several standpoints deliberating until they agree on a report | `agreed`, `unresolved` |
 
 `halted` exists on `council` and `roundtable` only with `interject=True`; without
 it the scope has two endings, and `branch_on_outcome` refuses a route to one it

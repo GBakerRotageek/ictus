@@ -70,8 +70,8 @@ used to. `ictus stdlib` prints the same list from the installed library, and
 |---|---|
 | a person to approve, choose, or answer questions | `approval_gate`, `choice_gate`, `ask_human`, `ask_human_for` |
 | a step that calls no model | `constant`, `bindings`, `counter`, `wait`, `shell`, `save_text` |
-| to report to a channel, or comment on a ticket | `announce`, `comment` — through an `Integration` from `ictus.notify` |
-| to read a database or a ticket | `query`, `fetch` — through a `Datasource` from `ictus.sources` |
+| to report to a channel, or comment on a ticket | `announce`, `comment` — through an `Integration` built under `ictus.notify` |
+| to read a database or a ticket | `query`, `fetch` — through a `Datasource` built under `ictus.sources` |
 | to end the run, distinguishably | `succeed`, `fail` |
 | a command whose failure you route on | `try_shell` |
 | to try until something is good enough | `converge` |

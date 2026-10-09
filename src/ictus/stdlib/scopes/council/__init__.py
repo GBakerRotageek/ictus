@@ -57,8 +57,9 @@ class Voice:
     tools: tuple[str, ...] | None = ()
     """What this voice may call.
 
-    ``()`` denies tools; ``None`` gives the engine's default. Naming individual
-    tools is refused at composition.
+    ``()`` denies tools; ``None`` gives the workflow's default set. Naming
+    individual tools is emitted as written, and the conductor lint refuses it on
+    a provider that cannot translate the names.
     """
 
     max_turns: int | None = None

@@ -9,7 +9,6 @@ than any engine's:
 * ``exits``   — the run ends, distinguishably (``EXIT``)
 * ``stages``  — a reusable sub-graph (``SUB_GRAPH``)
 * ``scopes``  — a sub-graph whose every ending is a value the caller routes on
-* ``prompts`` — prompt text ictus ships; not a node group, and not re-exported
 
 One primitive per module. ``llm`` is not re-exported here: those exist for the
 stages, and reaching for one directly names ``ictus.stdlib.llm``.

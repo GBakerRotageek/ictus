@@ -73,7 +73,7 @@ because a stage here needed it, so reaching for one directly names
   writes each round up for the next. Its voices never hear each other directly —
   they run concurrently — so they converge on a *record*, and the round-lag is
   the best a parallel group can do.
-- `roundtable` **talks.** Everyone reads alone first, once, then `speaker` nodes
+- `roundtable` **talks.** With `study=`, everyone reads alone first, once; then `speaker` nodes
   take turns: the second has heard the first *this* round, the last has heard
   everyone, and the minutes are written once at the end rather than once a
   round. No lag inside a round at all.

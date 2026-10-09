@@ -12,9 +12,8 @@ Recognise the message; you do not have to memorise the rule.
 
 - **A field the chosen provider ignores.** The lint names who would honour it;
   `lints.HONOURED_BY` is the table, in code, so it cannot drift from the check.
-- **A skill not reached through `plugins`** on `claude-agent-sdk`. Not linted:
-  the provider raises as the step starts, after everything before it has been
-  paid for.
+- **A skill not reached through `plugins`** on `claude-agent-sdk`. Caught by
+  `ictus validate`, so before the launch rather than at the step.
 - **A relative path on an agent** — `working_dir`, or a path in `skills` or
   `plugins`. It resolves against the emitted `build/`, which ictus rewrites. A
   `shell` step is the exception: its `working_dir` goes to the subprocess and

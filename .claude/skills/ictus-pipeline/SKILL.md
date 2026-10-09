@@ -83,7 +83,7 @@ Read these only when the situation calls for one:
 - **[reference/building-the-graph.md](reference/building-the-graph.md)** —
   wiring: `connect` vs `route` vs `feed`, stages, scopes, `branch_on_outcome`.
 - **`STDLIB.md`, the Gotchas section** — a run behaved in a way the graph did
-  not predict. Twenty of them, each one having cost a real run. It is in the
+  not predict. Each one has cost a real run. It is in the
   repository rather than in here so there is one list, not two that disagree.
 
 `STDLIB.md` at the repo root is the full catalogue. `AGENTS.md` is for changing

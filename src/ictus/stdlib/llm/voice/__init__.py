@@ -69,7 +69,8 @@ def voice(
     * ``()`` — no tools, the default: a voice already has the material.
     * ``None`` — the engine's default set. What a voice assessing a repository
       wants, since the repository does not fit in a prompt.
-    * a list — refused at composition.
+    * a list — emitted as written; the conductor lint refuses it on a provider
+      that cannot translate the names.
 
     ``max_turns`` matters only with ``tools=None``. The engine's default of
     fifty is a kill, not a throttle; a voice reading a repository needs a few

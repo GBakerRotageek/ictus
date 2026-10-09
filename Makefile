@@ -39,7 +39,7 @@ lint:
 validate:
 > uv run ictus validate ./demo_work/pipelines
 
-# WF is the folder name, e.g. `make run WF=smoke-test`. The run works in the
+# WF is the folder name, e.g. `make run WF=smoke-events`. The run works in the
 # directory you invoke it from unless the folder's input.md pins a `repo:`.
 run:
 > uv run ictus run ./demo_work/pipelines/$(WF)

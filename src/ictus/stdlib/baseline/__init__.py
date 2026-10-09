@@ -36,4 +36,4 @@ from ictus.prompting import prompt
 __all__ = ["AGENT_BASELINE"]
 
 AGENT_BASELINE = prompt(__name__, "text")
-"""The default, read from ``prompts/baseline.text.md``."""
+"""The default, read from ``text.md``."""

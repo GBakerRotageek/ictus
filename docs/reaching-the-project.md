@@ -10,15 +10,16 @@ independent settings, and both must be right.
 ## Tools — three states, not shades of one thing
 
 ```python
-AgentNode(node_id="survey", prompt=..., tools=None)  # full Claude Code session
+AgentNode(node_id="survey", prompt=..., tools=None)  # the workflow default
 AgentNode(node_id="judge", prompt=..., tools=())  # no tools at all
 AgentNode(node_id="x", prompt=..., tools=["Read"])  # REFUSED at composition
 ```
 
-- **`tools=None`** — the engine's default. On `claude-agent-sdk` that is a full
-  Claude Code session: filesystem, bash, web, permissions bypassed. **This is
-  what a node needs to read a real project.** Note `AgentNode.tools` already
-  defaults to `None`, so a plain node has full power unless you take it away.
+- **`tools=None`** — the workflow's default set, which `config.yaml` decides.
+  `native_tools` defaults to `none`, so a plain node has **no filesystem and no
+  shell**: set `native_tools: claude_code` for a node that must read a real
+  project. `AgentNode.tools` already defaults to `None`, so the thing to set is
+  the workflow, not the node.
 - **`tools=()`** — denied. Correct for a node whose entire input is in its
   prompt: a council of four judging a diff should not be four agents opening the
   same file. `voice()` defaults to this deliberately.

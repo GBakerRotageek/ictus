@@ -56,6 +56,14 @@ BOT_TOKEN_ENV = "SLACK_BOT_TOKEN"
 LISTEN_WORKERS = 4
 
 
+@app.callback()
+def main() -> None:
+    """Typer collapses a single-command app into a bare one, which made
+    `ictus-bridge listen` parse `listen` as the folder to watch rather than as a
+    verb — identical output to `ictus-bridge` with no arguments, and six places
+    in the documentation saying otherwise. A callback keeps the subcommand."""
+
+
 @app.command()
 def listen(
     where: Annotated[

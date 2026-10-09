@@ -11,11 +11,15 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 import ictus.stdlib as stdlib
 import ictus.stdlib.llm as stdlib_llm
+
+if TYPE_CHECKING:
+    from ictus.graph.scope import Scope
 
 CATALOGUE = Path(__file__).resolve().parent.parent / "STDLIB.md"
 DOC = CATALOGUE.read_text(encoding="utf-8")
@@ -121,6 +125,18 @@ def test_every_documented_outcome_is_a_real_one(name: str) -> None:
     unknown = sorted(claimed - real)
     assert not unknown, f"STDLIB.md gives {name} outcome(s) {unknown}; real ones are {sorted(real)}"
 
+    # ...and that this scope actually produces them. Checking only that a name
+    # is *some* outcome let `halted` pass for a default council, which declares
+    # two. `branch_on_outcome` refuses a route to an outcome a scope cannot
+    # reach, so a row that lists one sends the reader into a CompositionError.
+    built = _a_scope(name)
+    if built is not None:
+        cannot = sorted(claimed - set(built.outcomes))
+        assert not cannot, (
+            f"STDLIB.md gives {name} outcome(s) {cannot}, which it does not declare: "
+            f"{sorted(built.outcomes)}"
+        )
+
 
 def test_the_outcome_vocabularies_are_stated_correctly() -> None:
     """A caller must route every outcome, so the catalogue naming them wrongly is a trap."""
@@ -136,6 +152,39 @@ def test_the_outcome_vocabularies_are_stated_correctly() -> None:
     assert stdlib.MISSING == "missing"
     for constant in ("converged", "exhausted", "agreed", "unresolved", "halted", "ok", "failed"):
         assert f"`{constant}`" in DOC, f"outcome {constant!r} is not named in STDLIB.md"
+
+
+def _a_scope(name: str) -> Scope | None:
+    """One instance of a scope with its defaults, or ``None`` if it needs more.
+
+    Built rather than introspected because a scope's outcome vocabulary is
+    decided at construction — `halted` exists on a council only with
+    `interject=True`.
+    """
+    from ictus.stdlib.scopes import Speaker, Voice
+
+    pair = (
+        Voice(node_id="a", persona="p", focus="f"),
+        Voice(node_id="b", persona="p", focus="f"),
+    )
+    speakers = (
+        Speaker(node_id="a", persona="p", focus="f"),
+        Speaker(node_id="b", persona="p", focus="f"),
+    )
+    try:
+        match name:
+            case "council":
+                return stdlib.council(stage_id="s", voices=pair)
+            case "roundtable":
+                return stdlib.roundtable(stage_id="s", speakers=speakers)
+            case "try_shell":
+                return stdlib.try_shell(stage_id="s", command="true")
+            case "read_ticket":
+                return stdlib.read_ticket(stage_id="s", against=None)  # type: ignore[arg-type]
+            case _:
+                return None
+    except Exception:
+        return None
 
 
 README = CATALOGUE.parent / "README.md"

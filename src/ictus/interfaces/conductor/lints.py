@@ -80,7 +80,7 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
         problems.extend(
             f"{where}: stage {host_id!r} can exit through {node.node_id!r}, a failed terminal. "
             "A child engine converts that into SubworkflowTerminatedError before the parent's "
-            "routes are evaluated (engine/workflow.py:2131), so it kills the caller instead of "
+            "routes are evaluated (engine/workflow.py:3108), so it kills the caller instead of "
             "routing. End with a success terminal carrying the outcome as a value."
             for node in child.nodes
             if isinstance(node, TerminateNode) and node.status == "failed"
@@ -262,7 +262,7 @@ def _tool_allowlist_problems(node: Node, where: str) -> list[str]:
         f"{where}: agent {node.node_id!r} names the tools {sorted(tools)}, which conductor "
         "cannot translate — its `tools:` are workflow tool names, not the CLI's, and the "
         "provider raises rather than grant the wrong ones. Use tools=() for none, or leave "
-        "it unset for the default set (filesystem, bash, web)."
+        "it unset, which grants nothing unless the pipeline asks for native_tools."
     ]
 
 

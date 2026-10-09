@@ -106,7 +106,8 @@ instruments.
 `council` **polls** — voices run at once, so none has heard the others when it
 speaks, and a synthesis step writes each round up for the next: breadth, at a
 round of lag nothing can remove from a parallel group. `roundtable` **talks** —
-everyone reads alone, then speakers take turns, so the last has heard everyone.
+speakers take turns, so the last has heard everyone, and `study=` adds a
+read-alone phase before anybody speaks.
 Order is part of its design, and the cost of arguing is wall-clock.
 
 ## Conventions nothing enforces
