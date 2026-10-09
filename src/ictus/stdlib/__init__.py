@@ -3,7 +3,7 @@
 Organised by what each thing is, in ``graph.NodeKind``'s vocabulary rather
 than any engine's:
 
-* ``gates``   — a run stops and waits for a person (``HUMAN_DECISION``)
+* ``gates``   — a run stops and waits for a person (``HUMAN_DECISION``, ``ASK``)
 * ``llm``     — a model is asked something (``LLM_CALL``)
 * ``steps``   — no model is called (``COMPUTATION``, ``SUBPROCESS``, ``DELAY``)
 * ``exits``   — the run ends, distinguishably (``EXIT``)

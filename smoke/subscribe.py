@@ -5,9 +5,9 @@ The harness behind ``docs/run-events.md``, and what recorded the fixtures in
 ``tests/fixtures/``. Uses the library — ``live_runs``, ``WebSocket``,
 ``history`` — plus the gate answering it does not cover yet.
 
-    python3 smoke/subscribe.py                       # take the first option
-    python3 smoke/subscribe.py smoke_gate=rejected:no thanks
-    python3 smoke/subscribe.py --run a1b2c3d4 ship_it=approved
+    uv run python3 smoke/subscribe.py                       # take the first option
+    uv run python3 smoke/subscribe.py 'smoke_gate=rejected:no thanks'
+    uv run python3 smoke/subscribe.py --run a1b2c3d4 ship_it=approved
 
 Without ``--run`` it takes the most recently started run, which is wrong the
 moment two are live.

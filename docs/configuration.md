@@ -5,15 +5,9 @@ provider answers the model calls, what it may spend, whether a person confirms
 first. `pipeline.py` changes when the work changes; this file changes when the
 budget or the provider does.
 
-A pipeline is a folder. Three files, three questions.
-
-```text
-pipelines/needs-council/
-  pipeline.py     what the graph is
-  config.yaml     how it runs
-  input.md        what to run it on
-  build/          emitted YAML, committed
-```
+A pipeline is a folder of three files, drawn in
+[running-a-pipeline.md](running-a-pipeline.md). This page is about the second of
+them.
 
 `config.yaml` is required; the minimal one is a line. `provider` has no default
 because Conductor's is `copilot`, and inheriting that silently is a real bug this
@@ -26,6 +20,7 @@ project has already shipped once.
 | `system_prompt` | ictus's baseline | what every model call is told about how to work; a path, literal text, or `none` |
 | `instructions` | none | project context prepended to every prompt; paths relative to the folder |
 | `native_tools` | `none` | whether a step that names no tools may read files, run commands or fetch: `none`, `claude_code`, or a list such as `[Read, Grep, Glob]`. Denied, a step answers from memory rather than failing |
+| `workspace_instructions` | `true` | whether a run reads the target project's own `AGENTS.md`, `CLAUDE.md` and copilot instructions, walking up to the git root. The provider pins `setting_sources=[]`, so this flag is the only route |
 | `start_gate` | `true` | hold at a confirmation gate before anything runs |
 | `budget_usd` / `budget_mode` | none / `audit` | what the run may spend; `audit` records the spend, `enforce` stops the run. `budget_mode` without `budget_usd` never reaches the YAML |
 | `timeout_seconds` | none — unlimited | wall-clock ceiling on the whole run; the only setting that bounds elapsed time |
@@ -69,7 +64,6 @@ ictus validate pipelines/      # Conductor's own validator
 ictus preflight pipelines/     # MCP servers, env vars, tokens
 ```
 
-Run both `lint` and `validate` — neither is sufficient alone.
 
 `trace` reads the engine's event log and reports, per step, how many tool calls
 it made that were not just emitting its answer. A step that assessed something

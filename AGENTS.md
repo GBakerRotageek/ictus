@@ -79,10 +79,11 @@ second copy here. What is not in any one of them is the direction:
 
 ```text
 errors ← graph ← stdlib ← assemble      interfaces/conductor/
-              ← runspec                   emit/      a pure function of a pipeline
+   prompting ← stdlib  ← runspec           emit/      a pure function of a pipeline
               ← lint ← interfaces         control/   acts on a run that exists
                      ← runs ← bridge      preflight  asks about this machine
-notify, sources   adapters, pure data   net  protocol with no ictus in it
+notify, sources, plugins   adapters, pure data   net  protocol with no ictus in it
+                      everything ← cli   which nothing imports back
 ```
 
 Three rules hold it, and `tests/test_boundaries.py` states each precisely and
@@ -97,18 +98,6 @@ somewhere and held by nothing — which is how the CLI grew a Slack bot, how
 audience boundary that knew the engine ended up filed under a vendor's name.
 `notify` and `interfaces` are different axes: who hears about a run, and what
 executes it. A run on any engine can report to any audience.
-
-## Council and roundtable are not interchangeable
-
-`STDLIB.md` defines Node, Stage and Scope, and `ictus stdlib` lists what exists
-in each. What it does not say is why the two deliberating scopes are different
-instruments.
-`council` **polls** — voices run at once, so none has heard the others when it
-speaks, and a synthesis step writes each round up for the next: breadth, at a
-round of lag nothing can remove from a parallel group. `roundtable` **talks** —
-speakers take turns, so the last has heard everyone, and `study=` adds a
-read-alone phase before anybody speaks.
-Order is part of its design, and the cost of arguing is wall-clock.
 
 ## Conventions nothing enforces
 
@@ -128,7 +117,8 @@ Order is part of its design, and the cost of arguing is wall-clock.
 
 ## Reference
 
-`README.md` the architecture · `STDLIB.md` the catalogue, or `ictus stdlib` for
+`README.md` the architecture · `docs/` a page per decision, indexed from
+`STDLIB.md` · `STDLIB.md` the catalogue, or `ictus stdlib` for
 the same from live code · `CHANGELOG.md` what moved and what to write instead ·
 `.claude/skills/ictus-pipeline/` authoring a pipeline ·
 `.claude/skills/skill-writer/` writing a skill.

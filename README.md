@@ -99,8 +99,9 @@ loops and gates, and one iteration of the parent's budget.
 
 `ictus.interfaces` is the only place allowed to know an engine's spelling — its
 field names, template dialect, iteration accounting, CLI. `graph/` contains zero
-Conductor strings, and that is checkable rather than aspirational: a grep for
-Conductor's vocabulary above `interfaces/` should return nothing.
+Conductor strings, and that is checkable rather than aspirational:
+`tests/test_boundaries.py` tokenises each module and fails on the engine's
+vocabulary reaching one above `interfaces/`.
 
 A `Backend` supplies what it can express (`Capabilities`), how to render a
 graph (`compile`), its own extra lint rules, what this machine must provide
@@ -196,22 +197,10 @@ folder and not a return annotation.
 because a stage here needed it, so reaching for one directly names
 `ictus.stdlib.llm`.
 
-- `converge` is a bounded try/judge loop: produce, assess, revise, and exit
-  either way.
-- `council` **polls.** Several `voice` nodes assess at once and a synthesis step
-  writes each round up for the next. Its voices never hear each other directly —
-  they run concurrently — so they converge on a *record*, and the round-lag is
-  the best a parallel group can do.
-- `roundtable` **talks.** Everyone reads alone first, once, then `speaker` nodes
-  take turns: the second has heard the first *this* round, the last has heard
-  everyone, and the minutes are written once at the end rather than once a
-  round. No lag inside a round at all.
-
-Reach for `council` when the standpoints are independent and you want breadth,
-and for `roundtable` when you want them to argue. The cost of arguing is
-wall-clock — a round is the sum of its turns rather than the longest of them —
-and in a roundtable **order is part of the design**: whoever speaks last has
-heard everyone.
+`converge` is a bounded try/judge loop: produce, assess, revise, exit either
+way. `council` **polls** and `roundtable` **talks** — breadth against argument,
+paid for in wall-clock. [docs/deliberation.md](docs/deliberation.md) is the page
+for choosing between them and for what the knobs cost.
 
 ## Preflight
 
@@ -332,15 +321,9 @@ time it mattered nobody read it either.
 
 ## The running contract
 
-A pipeline is a folder, not a module — three files, three questions:
-
-    pipelines/needs-council/
-      pipeline.py            what the graph is       (composition)
-      config.yaml            how it runs             (policy)
-      input.md               what to run it on       (this run's values)
-      build/                 emitted YAML, committed
-
-`ictus init <folder>` writes all three. `config.yaml` is required and the minimal
+A pipeline is a folder, not a module — `pipeline.py` the graph,
+`config.yaml` the policy, `input.md` this run's values, `build/` the emitted
+YAML, committed. `ictus init <folder>` writes the three it can. `config.yaml` is required and the minimal
 one is a line:
 
     provider: claude-agent-sdk

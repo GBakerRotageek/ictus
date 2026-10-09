@@ -4,7 +4,22 @@ Read this when a run refused to start, or when you want to know what is checked
 before anything is spent. Preflight is free; a run that discovers a missing
 credential after a gate has already paid for the step in front of it.
 
-A pipeline declares what it needs from the environment, where it is written:
+## What is checked
+
+Four kinds of requirement, each declared on the pipeline and each checked before
+a launch. `ictus preflight` prints every one it found, then only the problems.
+
+| Declared with | Checked by | `--probe` additionally |
+| --- | --- | --- |
+| `require_mcp` | the command exists, its env vars are set | opens the connection |
+| `require_executable` | the command is on `PATH` | runs the tool's own `probe` |
+| an `Integration` | its env vars are set | — |
+| a `DataSource` | its env vars are set, and a writable one is declared writable | — |
+
+The rest of this page is the MCP case, which is the one with a remedy loop
+inside the run as well as a check before it.
+
+## Declaring a server
 
 ```python
 pipeline.require_mcp(

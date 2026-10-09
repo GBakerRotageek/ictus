@@ -15,6 +15,10 @@ longest of them. Reach for `council` when the standpoints are independent and
 you want breadth; reach for `roundtable` when you want them to actually argue.
 Order is part of the design — whoever speaks last has heard everyone.
 
+`study=` adds a read-alone phase before anybody speaks. It defaults to `""`,
+which skips the phase, so a roundtable does *not* read alone unless you say
+what to read.
+
 `deliberate=` (on by default) hands every voice the others' positions and
 concerns from the last round, verbatim and attributed, and asks it to answer
 them by name. Off, a voice sees only the synthesis — one more agent's

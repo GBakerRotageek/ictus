@@ -67,8 +67,16 @@ def _prose(text: str) -> str:
 
 
 def _sections(text: str) -> dict[str, int]:
-    """Each `##` section and its rough token count."""
-    parts = re.split(r"^## ", _prose(text), flags=re.M)[1:]
+    """Each `##` section and its rough token count.
+
+    A page with no `##` at all is one section: itself. Returning `{}` for it was
+    a hole — `docs/preflight.md` ran unsectioned and therefore unmeasured, and
+    could have grown to any size without the ceiling ever applying.
+    """
+    body = _prose(text)
+    parts = re.split(r"^## ", body, flags=re.M)[1:]
+    if not parts:
+        return {"(whole page, no sections)": len(body) // 4}
     return {s.splitlines()[0][:50]: len(s) // 4 for s in parts if s.strip()}
 
 
@@ -235,3 +243,18 @@ def test_no_table_has_been_flattened_into_prose(page: Path) -> None:
         if line.strip().count("|") >= 2 and not line.strip().startswith(("|", "#"))
     ]
     assert not bad, f"{page.relative_to(ROOT)} has table rows inside a paragraph at {bad}"
+
+
+def test_the_layers_diagram_names_every_package() -> None:
+    """`AGENTS.md` draws the direction, so a new package has to appear in it.
+
+    The source tree one file over is checked the same way, and this one was not:
+    `cli`, `plugins` and `prompting` were all missing, which is the one question
+    the diagram exists to answer.
+    """
+    page = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    drawn = re.search(r"```text\n(errors .*?)```", page, re.S)
+    assert drawn, "no layers diagram found in AGENTS.md"
+    packages = {p.parent.name for p in (ROOT / "src" / "ictus").glob("*/__init__.py")}
+    missing = sorted(name for name in packages if name not in drawn.group(1))
+    assert not missing, f"AGENTS.md draws no direction for {missing}"

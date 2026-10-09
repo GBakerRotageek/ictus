@@ -59,7 +59,7 @@ def test_a_summary_is_the_first_line_of_the_real_docstring() -> None:
     assert found.summary == first
 
 
-def test_the_groups_are_the_folders_under_stdlib() -> None:
+def test_the_groups_are_listed_in_the_order_a_pipeline_is_built() -> None:
     assert [g.name for g in groups()] == ["gates", "llm", "steps", "exits", "stages", "scopes"]
 
 

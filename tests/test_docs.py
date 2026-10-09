@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ import pytest
 
 import ictus.stdlib as stdlib
 import ictus.stdlib.llm as stdlib_llm
+from ictus.runspec.config import PipelineConfig
 
 if TYPE_CHECKING:
     from ictus.graph.scope import Scope
@@ -275,3 +277,17 @@ class TestRepositoryInstructions:
                 f"{prose}: the engine lookup belongs in AGENTS.md, which the run discovers"
             )
             assert "conductor-cli" not in text, prose
+
+
+def test_every_config_setting_is_in_the_table() -> None:
+    """`docs/configuration.md` is where somebody looks up what `config.yaml` takes.
+
+    A setting absent from it is a setting nobody finds. `workspace_instructions`
+    was missing while eleven of its twelve siblings were documented — it decides
+    whether a run reads the target project's `AGENTS.md` at all, so the one
+    undocumented field was not a minor one.
+    """
+    page = (CATALOGUE.parent / "docs" / "configuration.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"`([a-z_]+)`", page))
+    missing = sorted(f.name for f in fields(PipelineConfig) if f.name not in documented)
+    assert not missing, f"docs/configuration.md does not document {missing}"
