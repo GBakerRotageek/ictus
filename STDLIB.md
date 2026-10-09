@@ -93,10 +93,10 @@ A run that has to tell somebody what it is doing is
 | `roundtable` | Several people taking turns, in order, until they agree | `agreed`, `unresolved` |
 | `council` | Several standpoints deliberating until they agree on a report | `agreed`, `unresolved` |
 
-`halted` exists on `council` and `roundtable` only with `interject=True`; without
-it the scope has two endings, and `branch_on_outcome` refuses a route to one it
-cannot reach. The rules shared by every scope — outcome constants, spec types,
-what each exit carries — are in [docs/scopes.md](docs/scopes.md).
+`interject=True` adds a third outcome, `halted`, to `council` and `roundtable`.
+[docs/scopes.md](docs/scopes.md) has that and the rest of what holds for every
+scope; [docs/deliberation.md](docs/deliberation.md) is for choosing between the
+two and pricing their options.
 
 ## Where the rest of it went
 

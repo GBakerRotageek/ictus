@@ -50,14 +50,10 @@ plus a `type: workflow` agent in the parent; a **Scope** is a stage whose
 endings the caller routes on with `branch_on_outcome` (`STDLIB.md` defines all
 three).
 
-**Several agents on one question: `council` polls, `roundtable` talks.** A
-council's voices run at once, so none has heard the others when it speaks and a
-synthesis step writes each round up — breadth, and a round of lag. A
-roundtable's speakers take turns, so the second has heard the first *this*
-round and they answer each other by name — argument, at the cost of wall-clock,
-and order matters because whoever speaks last has heard everyone. Pass `study`
-and each reads alone before anybody speaks; without it the first speaker frames
-the table. Both need `max_turns` on anyone given tools.
+**Several agents on one question: `council` polls, `roundtable` talks** —
+breadth against argument, paid for in wall-clock. Pass `study` or the first
+speaker frames the table, and give `max_turns` to anyone given tools.
+`docs/deliberation.md` is the page for choosing, and for what each option costs.
 
 Reach for `ictus.stdlib` before hand-rolling. `ictus stdlib` prints the whole
 catalogue from the installed library and cannot drift from it; some of what is

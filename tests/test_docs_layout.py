@@ -258,3 +258,71 @@ def test_the_layers_diagram_names_every_package() -> None:
     packages = {p.parent.name for p in (ROOT / "src" / "ictus").glob("*/__init__.py")}
     missing = sorted(name for name in packages if name not in drawn.group(1))
     assert not missing, f"AGENTS.md draws no direction for {missing}"
+
+
+#: A page past this is a manual, and nobody reads a manual to answer one
+#: question. The skill checker's Level 2 ceiling, applied to a document for the
+#: same reason: it is loaded whole or not at all. README.md reached 5,679 before
+#: anything measured it, by growing a copy of nearly every page under `docs/`.
+PAGE_CEILING = 3000
+
+#: The longest run of words two pages may share. Set above what survives
+#: deliberately — a quoted rule, a shared definition — and far below a copied
+#: section. Two README sections were word-for-word identical to
+#: `running-a-pipeline.md` and nothing noticed, because nothing compared pages.
+SHARED_RUN_CEILING = 40
+
+
+@pytest.mark.parametrize("page", _pages(), ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_no_page_is_a_manual(page: Path) -> None:
+    """Sections can each be small while the page they are in is enormous."""
+    size = len(_prose(page.read_text(encoding="utf-8"))) // 4
+    assert size <= PAGE_CEILING, (
+        f"{page.relative_to(ROOT)} is ~{size} tokens, over ~{PAGE_CEILING}. "
+        "Give the parts that answer their own question their own page, and link them."
+    )
+
+
+def _words(page: Path) -> list[str]:
+    return re.findall(r"[a-z0-9]+", _prose(page.read_text(encoding="utf-8")).lower())
+
+
+def _longest_shared_run(first: list[str], second: list[str]) -> int:
+    """How many consecutive words the two have in common, at most.
+
+    Binary search over shingle length: if they share no run of n words they
+    share none of n+1 either, so the predicate is monotone.
+    """
+
+    def share(size: int) -> bool:
+        head = {tuple(first[i : i + size]) for i in range(len(first) - size + 1)}
+        tail = {tuple(second[i : i + size]) for i in range(len(second) - size + 1)}
+        return bool(head & tail)
+
+    # Searching past the ceiling buys nothing: the answer is already "too much".
+    # A reported run equal to the bound means "at least this", hence the `+`.
+    best, low, high = 0, 1, SHARED_RUN_CEILING + 1
+    while low <= high:
+        mid = (low + high) // 2
+        if share(mid):
+            best, low = mid, mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def test_no_page_carries_a_copy_of_another() -> None:
+    """One owner per fact; everyone else links to it.
+
+    A copy is not merely waste — it rots apart from the original. Every stale
+    claim found in the last audit was in a copy: the README said a roundtable
+    reads alone first, and said gates are `HUMAN_DECISION`, for exactly as long
+    as it took the owning page to be corrected without it.
+    """
+    words = {page: _words(page) for page in _pages()}
+    copied = [
+        f"{a.relative_to(ROOT)} and {b.relative_to(ROOT)} share {run}+ words"
+        for a, b in itertools.combinations(words, 2)
+        if (run := _longest_shared_run(words[a], words[b])) > SHARED_RUN_CEILING
+    ]
+    assert not copied, f"{copied}. Decide which page owns it; the other links there."
