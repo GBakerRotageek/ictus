@@ -24,11 +24,12 @@ waits forever. Connect first, then seed from `GET /api/state`, then dedupe on
 
 Token is needed for the WebSocket handshake and for mutating routes only.
 `GET /api/state`, `/api/gate-status`, `/api/info` and `/api/logs` answer with no
-token, guarded by Origin/Host alone. Observation needs no credential; only
-answering does.
+token, guarded by Origin/Host alone. History needs no credential; the live
+socket and answering both do.
 
-The socket and the JSONL event log carry byte-identical sequences — verified by
-comparing both for one run — so a fixture recorded from either is valid for both.
+The socket and the JSONL event log carry the same events in the same order —
+verified by comparing both for one run — so a fixture recorded from either is
+valid for both. The bytes differ: the log escapes non-ASCII, the socket does not.
 
 ## Events received
 
@@ -46,7 +47,7 @@ comparing both for one run — so a fixture recorded from either is valid for bo
 | `guidance_received` | mid-run steer |
 
 Also `script_*`, `set_*`, `wait_*`, `mcp_*`, `subworkflow_*`, `parallel_*`,
-`for_each_*` per step kind. ~45 types total.
+`for_each_*` per step kind. ~70 types total.
 
 `option_details` entries carry `label`, `value`, `route`, `prompt_for`,
 `multiline`, so free text on a choice arrives with the gate.
@@ -108,9 +109,10 @@ and the run record archived.
 - Fleet run record at `~/.conductor/runs/<run_id>.json`: `run_id`, `pid`,
   `workflow_path`, `workflow_name`, `started_at`, `event_log_path`, `port`
   (nullable), `mode`, `checkpoint_dir`.
-- On reap the record is **moved** to `~/.conductor/runs/terminal/<run_id>.json`,
-  so globbing `~/.conductor/runs/*.json` finds live runs only and needs no
-  staleness filter.
+- On a graceful exit the record is **moved** to
+  `~/.conductor/runs/terminal/<run_id>.json`. A killed or crashed run leaves its
+  record behind, so a glob of `~/.conductor/runs/*.json` is filtered on the pid —
+  never on age.
 - Dashboard port defaults to `0` — OS auto-select. Concurrent runs do not collide.
 - Auth: per-run `secrets.token_urlsafe(32)`, plus Origin/Host validation on every
   HTTP and WebSocket request.
@@ -146,12 +148,14 @@ and the run record archived.
 - `slack_channel` sets `listens=True`; `slack_webhook` does not.
 - Compiles to `build/<pipeline_id>.listen.json`, version `1`. Root pipelines
   only — a stage has no run of its own to start.
-- Manifest holds: `workflow` (sibling filename), `listeners[]`
-  (`service`, `prefix`, `inputs.question`, `inputs.thread`), and `requires`
-  (`commands`, `env`) — every declared executable and every integration and MCP
-  env var, deduplicated by name.
-- `requires` exists because preflight is a command, not an artifact: nothing in
-  the workflow YAML records a declared executable or env var.
+- Manifest holds: `workflow` (sibling filename), `pipeline`, `description`,
+  `workspace_instructions`, `listeners[]` (`service`, `prefix`,
+  `inputs.question`, `inputs.thread`), and `requires` (`commands`, `env`) —
+  every declared executable, and every env var an integration, MCP server or
+  datasource declares, deduplicated by name.
+- `requires` exists because preflight is a command, not an artifact: the workflow
+  YAML records no declared executable, and names an env var only where an MCP
+  server passes one through.
 - `ictus-bridge listen [FOLDER]` reads manifests under `FOLDER` recursively. No folder
   answers gates only.
 - The listener runs `conductor run <workflow> -i ...`, never `ictus run`. It

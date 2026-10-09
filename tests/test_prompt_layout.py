@@ -209,5 +209,7 @@ def test_a_prompt_is_read_through_importlib_resources() -> None:
     """Not open(__file__/..), which breaks in a zip and in any relocated install."""
     from ictus.stdlib.llm.voice import _STANCE
 
-    assert _STANCE.startswith("You are one voice among several")
+    # Not the opening line: which paragraph comes first is a prompt-design
+    # decision and has already moved once. That it loaded at all is the claim.
+    assert "You are one voice among several" in _STANCE
     assert not _STANCE.endswith("\n"), "prompt() strips, so an editor's final newline is inert"

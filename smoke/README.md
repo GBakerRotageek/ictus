@@ -14,7 +14,9 @@ That folder is also the one pipeline committed past the `demo_work/` ignore,
 because three tests and every Makefile target below `soundcheck` read that
 directory and fail on a clone with nothing in it.
 
-`subscribe.py` is standard library only. Nothing to install beyond Conductor.
+`subscribe.py` runs on ictus's own `live_runs`, `WebSocket` and `history`;
+`fake_channel.py` is standard library. Nothing to install beyond Conductor and
+ictus themselves.
 
 ## What you need
 
@@ -57,7 +59,7 @@ With the venv activated, drop the `uv run` prefix from the commands below.
 From the repository root, one terminal, two commands. `ictus run` detaches and
 returns straight away; the run is left parked at its first gate, waiting.
 
-**One — launch.** Detached, serving a dashboard:
+**One — launch:**
 
     uv run ictus run demo_work/pipelines/smoke-events
 
@@ -70,7 +72,7 @@ the subscriber works whether or not a browser is attached.
 
 Approve both and the `set` step runs. To exercise free text instead:
 
-    python3 smoke/subscribe.py 'confirm_start=start' \
+    uv run python3 smoke/subscribe.py 'confirm_start=start' \
       'smoke_gate=rejected:not this time'
 
 ## What you should see
@@ -108,7 +110,8 @@ step, so what is committed in `build/` is what runs. Which service they report
 to, and what it is subscribed to, are in `pipeline.py` only.
 
 You do not need Slack to watch this work. `fake_channel.py` answers both shapes
-ictus posts in and prints what it was sent:
+ictus posts in and prints what it was sent. Leave it running in its own
+terminal, and export the rest where the run happens:
 
     python3 smoke/fake_channel.py
     export SLACK_BOT_TOKEN=xoxb-pretend
@@ -155,12 +158,12 @@ the gate needs no configuration.
 
 ### Answering from the channel
 
-`ictus-bridge listen` answers a gate when one of its buttons is pressed. It needs a
+`ictus-bridge` answers a gate when one of its buttons is pressed. It needs a
 Slack app with Socket Mode on, an app-level token with `connections:write`, and
 the same bot token the pipeline posts with:
 
     export SLACK_APP_TOKEN=xapp-...
-    uv run ictus-bridge listen --allow U0123ABC
+    uv run ictus-bridge --allow U0123ABC
 
 A press is answered on the run that posted the button, and only on the newest
 message a question was asked in — a button left over from an earlier round of a
@@ -181,9 +184,9 @@ step already said.
   pid and event log path — with no argument passed to the subscriber.
 - **Seeding.** The socket replays nothing on connect. Without the `/api/state`
   seed the already-open gate is invisible and the subscriber waits forever on a
-  run that is waiting for it. Delete the `history(port)` call to watch it hang.
-- **Unauthenticated reads.** `/api/state` is fetched with no token. Only the
-  WebSocket handshake needs one.
+  run that is waiting for it. Delete the `history(run)` call to watch it hang.
+- **Unauthenticated reads.** `/api/state` is fetched with no token. The
+  WebSocket handshake needs one, and so does every mutating POST route.
 - **Answering.** `gate_response` carries `selected_value`, and `additional_input`
   goes up as a bare string and comes back on `gate_resolved` keyed by the
   option's `prompt_for`.
@@ -197,6 +200,8 @@ step already said.
 
 ## Re-recording the fixtures
 
-`tests/fixtures/run-events-{approved,rejected}.jsonl` were produced by exactly
-this, one run each. Replace them with a fresh `smoke-events-<run_id>.jsonl` if
-the engine's vocabulary changes under us.
+`tests/fixtures/run-events-{approved,rejected}.jsonl` were produced this way,
+one run each, before the pipeline was renamed — the names inside them are
+`spike` and `spike_gate`. Replace them with a fresh `smoke-events-<run_id>.jsonl`
+if the engine's vocabulary changes under us, and fix `tests/test_watch.py`,
+which asserts the rejected run's note word for word.

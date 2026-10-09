@@ -54,8 +54,9 @@ before it. What moved is where things live and what they are called.
   anywhere: inline prose over 60 characters in prompt position fails, as does a
   prompt file nothing reads, a request with no file, and a file missing from
   the built wheel.
-- **`ictus.stdlib.prompts` is now `ictus.stdlib.baseline`**, since `prompts/` is
-  the name of the data directories.
+- **`ictus.stdlib.prompts` is now `ictus.stdlib.baseline`.** Prompt text sits in
+  the folder of the module that reads it, so there is no `prompts/` directory
+  anywhere for the old name to describe.
 
 Breaking, with what to write instead:
 
@@ -84,6 +85,8 @@ The rest of `interfaces/conductor/` moved the same way: `workflow`, `templates`,
 `serialize`, `mapping`, `parallel` and `manifest` into `emit/`; `live`,
 `respond`, `trace` and `signals` into `control/`.
 
+| Was | Now |
+| --- | --- |
 | `ictus.cli` (module) | `ictus.cli` (package: `app`, `building`, `running`, `watching`, `catalogue`) |
 
 - **`resolve` and `submit` take a `Press`**, not a Slack `Click`/`Note`.
@@ -93,7 +96,7 @@ The rest of `interfaces/conductor/` moved the same way: `workflow`, `templates`,
   `terminals/` → `exits/`, and the six scopes moved out of `stages/` into
   `scopes/`. The flat `ictus.stdlib` namespace is unaffected except as noted
   above.
-- **`ictus.notify` and `ictus.sources` re-export nothing.** Both are boundary
+- **`ictus.notify` and `ictus.sources` re-export no service.** Both are boundary
   packages now held to the same rule, and a flat re-export puts every service's
   name in the one file whose job is not to have it.
 - **The Slack bridge is `ictus.bridge`**, its own package with its own console
@@ -110,7 +113,8 @@ The rest of `interfaces/conductor/` moved the same way: `workflow`, `templates`,
 - **`render_output_schema` was lowering output ports to Conductor's `output:`
   block from inside `graph/node.py`** — its docstring said so, and its only
   caller was always the Conductor backend. Moved to
-  `interfaces/conductor/agents.py`. `graph/` now builds no YAML shape at all.
+  `interfaces/conductor/emit/agents.py`. `graph/` now builds no YAML shape at
+  all.
 - **`Pipeline.add_subworkflow` and `widen_subworkflow` used the engine's noun**
   for a thing the graph itself calls a sub-graph (`NodeKind.SUB_GRAPH`,
   `SubGraphNode`). Renamed to `add_subgraph` and `widen_subgraph`.

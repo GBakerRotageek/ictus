@@ -102,11 +102,12 @@ field names, template dialect, iteration accounting, CLI. `graph/` contains zero
 Conductor strings, and that is checkable rather than aspirational: a grep for
 Conductor's vocabulary above `interfaces/` should return nothing.
 
-A `Backend` supplies four things: what it can express (`Capabilities`), how to
-render a graph (`compile`), its own extra lint rules, and how to validate and
-run what it produced. Rules like "a route list with no catch-all raises at run
-time" belong to a backend, not to graphs in general, so `lint_pipeline(p)`
-without a backend reports only what is true anywhere.
+A `Backend` supplies what it can express (`Capabilities`), how to render a
+graph (`compile`), its own extra lint rules, what this machine must provide
+before a launch (`preflight`), and how to validate and run what it produced.
+Rules like "a route list with no catch-all raises at run time" belong to a
+backend, not to graphs in general, so `lint_pipeline(p)` without a backend
+reports only what is true anywhere.
 
 Not a plan to leave Conductor — a way to keep the coupling countable.
 
@@ -129,7 +130,7 @@ is written rather than recovered from prompt text by a regular expression:
 prompt = tpl(
     "Break this plan into steps.\n\n",
     plan.ref("plan"),
-    optional("Address these notes:\n", ref_to("review", "notes", STRING)),
+    optional("Address these notes:\n", ref_to("review", "notes", STR)),
 )
 ```
 
@@ -160,9 +161,11 @@ is silent until a run is already in flight:
 - conditional routes with no catch-all — a **runtime** error that passes validation
 - a reference to an output *field* that was never declared (only the agent
   segment is checked)
-- a duplicate agent name
 - a stage whose contract has drifted from the workflow it hosts
 - a required input nothing is wired to
+
+A duplicate agent name is refused earlier still — `add` raises on the second
+node to claim an id, since ids are the routing keyspace.
 
 ## How the stdlib is laid out
 
@@ -388,7 +391,7 @@ should not have to treat "a person looked at it and said no" as an error.
 ## Usage
 
     make soundcheck            # lint, types, tests, emit, and conductor validate
-    make run WF=smoke-test     # run that folder, dashboard on
+    make run WF=smoke-events   # run that folder, dashboard on
 
     cd ~/work/my-service
     ictus run ~/pipelines/needs-council            # input.md supplies the inputs
@@ -400,7 +403,7 @@ should not have to treat "a person looked at it and said no" as an error.
     ictus validate pipelines/  # hands the emitted YAML to conductor
 
     ictus watch pipelines/needs-council --follow   # report what no step can see
-    ictus-bridge listen --allow U0123ABC                  # answer gates from Slack buttons
+    ictus-bridge listen --allow U0123ABC           # answer gates from Slack buttons
 
 A pipeline that calls `pipeline.integrate(...)` reports into a channel from
 inside the run: an announcement before every gate, the start gate included, and

@@ -26,9 +26,17 @@ DOC = CATALOGUE.read_text(encoding="utf-8")
 CATALOGUE_TEXT = DOC.split("\n## Running", 1)[0]
 
 # A table row naming a constructor: `| `name` | use | options | ... |`
+#: A catalogue row: `| `name` | use |`, with an optional third column of
+#: outcomes for a scope. The options and produces columns went to
+#: `ictus stdlib <name>`, which reads `inspect.signature` and the docstrings, so
+#: a parameter renamed underneath its description is no longer possible to write
+#: down — which is why the test that used to check that is gone rather than
+#: broken.
 ROWS = {
-    m.group(1): m.group(2)
-    for m in re.finditer(r"^\| `([a-z_]+)` \| [^|]+ \| ([^|]*) \|", CATALOGUE_TEXT, re.M)
+    m.group(1): (m.group(3) or "").strip()
+    for m in re.finditer(
+        r"^\| `([a-z_]+)` \| ([^|]+?) \|(?: ([^|]*) \|)?\s*$", CATALOGUE_TEXT, re.M
+    )
 }
 
 CODE = "\n".join(re.findall(r"```(?:python|sh)\n(.*?)```", DOC, re.S))
@@ -73,10 +81,22 @@ def test_every_stdlib_constructor_is_catalogued(name: str) -> None:
     assert name in ROWS, f"{name} is exported from the stdlib but has no row in STDLIB.md"
 
 
+#: The catalogue became an index, so a spec type may be documented on the page
+#: that owns the thing taking it — `Voice` moved with the scopes. Searching the
+#: pages STDLIB.md links to is the same question asked of the whole set.
+LINKED = DOC + "".join(
+    (CATALOGUE.parent / target).read_text(encoding="utf-8")
+    for target in re.findall(r"\]\((docs/[\w.-]+\.md)\)", DOC)
+    if (CATALOGUE.parent / target).is_file()
+)
+
+
 @pytest.mark.parametrize("name", SPECS)
 def test_every_spec_type_is_mentioned(name: str) -> None:
     """`Voice`, `Attempt`, `ScriptStep`, `ReviewOption` — you cannot use the stage without them."""
-    assert f"`{name}" in DOC, f"{name} is exported but never mentioned in STDLIB.md"
+    assert f"`{name}" in LINKED, (
+        f"{name} is exported but appears in neither STDLIB.md nor any page it links to"
+    )
 
 
 @pytest.mark.parametrize("name", sorted(ROWS))
@@ -85,19 +105,21 @@ def test_nothing_catalogued_has_been_removed(name: str) -> None:
     assert _find(name) is not None, f"STDLIB.md documents {name!r}, which the stdlib no longer has"
 
 
-@pytest.mark.parametrize("name", sorted(ROWS))
-def test_every_documented_option_is_a_real_parameter(name: str) -> None:
-    """An option renamed underneath its description reads as true and is not."""
-    found = _find(name)
-    if found is None:
-        pytest.skip("covered by the removal test")
-    params = set(inspect.signature(found).parameters)  # type: ignore[arg-type]
-    # A backtick token followed by ':' is a YAML key being named, not a parameter.
-    claimed = set(re.findall(r"`([a-z_]+)`(?!:)", ROWS[name]))
-    unknown = sorted(claimed - params)
-    assert not unknown, (
-        f"STDLIB.md lists {unknown} for {name}, whose parameters are {sorted(params)}"
-    )
+@pytest.mark.parametrize("name", sorted(n for n in ROWS if ROWS[n]))
+def test_every_documented_outcome_is_a_real_one(name: str) -> None:
+    """A scope's outcomes are what you write `branch_on_outcome` against.
+
+    The options column is gone — `ictus stdlib <name>` reads those off the
+    signature, so they cannot drift. Outcomes stayed in the table because you
+    need them in front of you to route a scope, which means they can still be
+    wrong, which means they still need checking.
+    """
+    from ictus.stdlib.scopes import outcomes
+
+    real = {getattr(outcomes, n) for n in outcomes.__all__}
+    claimed = set(re.findall(r"`([a-z_]+)`", ROWS[name]))
+    unknown = sorted(claimed - real)
+    assert not unknown, f"STDLIB.md gives {name} outcome(s) {unknown}; real ones are {sorted(real)}"
 
 
 def test_the_outcome_vocabularies_are_stated_correctly() -> None:

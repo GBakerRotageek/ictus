@@ -35,7 +35,7 @@ from ictus.interfaces.conductor.lints import (
     VALIDATED_UPSTREAM,
 )
 from ictus.lint import lint_pipeline
-from ictus.stdlib import Voice, approval_gate, council, succeed
+from ictus.stdlib import Voice, approval_gate, constant, council, succeed
 
 if TYPE_CHECKING:
     from ictus.graph.values import YamlDict
@@ -659,3 +659,57 @@ class TestContextCeiling:
         """Nothing reads a previous pass, so nothing can be emptied behind it."""
         p = self._flat(context_max_tokens=120_000, context_trim=TrimStrategy.DROP_OLDEST)
         assert not _problems(p, "graph that loops")
+
+
+class TestRetypedConstants:
+    """Conductor YAML-loads a bare ``value:``, and the node still declares string.
+
+    The gap this closes: ``constant(value="3")`` emits a node declaring
+    ``string`` and binds the integer ``3``, so a route comparing it to ``"3"``
+    is comparing two types and is never true. Nothing said so.
+    """
+
+    def _pipeline(self, value: str, **kw: object) -> Pipeline:
+        p = Pipeline(pipeline_id="t", description="d")
+        node = p.add(constant(node_id="c", value=value, **kw))  # type: ignore[arg-type]
+        done = p.add(succeed(node_id="done", reason="x"))
+        p.set_entry(node)
+        p.route(node, done)
+        return p
+
+    def _problems(self, value: str, **kw: object) -> list[str]:
+        return [
+            m
+            for m in lint_pipeline(self._pipeline(value, **kw), backend=conductor)
+            if "output_type" in m
+        ]
+
+    @pytest.mark.parametrize(
+        ("value", "becomes"),
+        [("3", "int"), ("true", "bool"), ("1.5", "float"), ("null", "NoneType")],
+    )
+    def test_a_literal_that_retypes_is_refused(self, value: str, becomes: str) -> None:
+        found = self._problems(value)
+        assert found, f"{value!r} binds a {becomes} and was not refused"
+        assert becomes in found[0]
+
+    @pytest.mark.parametrize("value", ["approved", "a whole sentence", "CHANGE_ME"])
+    def test_free_text_is_left_alone(self, value: str) -> None:
+        assert not self._problems(value)
+
+    @pytest.mark.parametrize("value", ["no", "yes", "on", "off"])
+    def test_yaml_1_1_booleans_are_not_refused(self, value: str) -> None:
+        """Conductor's loader is ``typ="safe", pure=True`` — YAML 1.2.
+
+        These four are the reason the rule asks the engine's loader rather than
+        carrying a word list. Under YAML 1.1 they are booleans; here they are
+        strings, and refusing them would be refusing correct pipelines.
+        """
+        assert not self._problems(value)
+
+    def test_declaring_the_type_settles_it(self) -> None:
+        assert not self._problems("3", output_type=PortType.NUMBER)
+
+    def test_a_template_is_not_guessed_at(self) -> None:
+        """What a reference renders to is not knowable while the graph is written."""
+        assert not self._problems("{{ other.output.value }}")

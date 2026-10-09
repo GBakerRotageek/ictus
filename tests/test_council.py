@@ -94,7 +94,7 @@ class TestVoice:
         satisfaction forever.
         """
         prompt = str(_agent(_council().body, "perf")["prompt"])
-        assert "`satisfied` is about the record, not the material" in prompt
+        assert "It is about the record, not the material" in prompt
         assert "any disagreement you still hold included" in prompt
 
     def test_the_first_round_has_no_report_to_accept(self) -> None:

@@ -11,7 +11,10 @@ import re
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from ictus.graph.node import AgentNode, GateNode, Node, TerminateNode
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
+
+from ictus.graph.node import AgentNode, ComputeNode, GateNode, Node, TerminateNode
 from ictus.graph.ref import Origin
 from ictus.interfaces.conductor.emit.templates import output_path
 from ictus.interfaces.conductor.emit.workflow import DEFAULT_PROVIDER
@@ -58,6 +61,7 @@ def conductor_problems(pipeline: Pipeline) -> list[str]:
         problems.extend(_ignored_field_problems(pipeline, node, where))
         problems.extend(_relative_path_problems(node, where))
         problems.extend(_session_problems(pipeline, node, where))
+        problems.extend(_retyped_value_problems(node, where))
         problems.extend(_env_reference_problems(node, where))
         problems.extend(_template_problems(node, by_id, declared_inputs, where))
         problems.extend(_group_reference_problems(pipeline, node, where))
@@ -309,6 +313,49 @@ def _session_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
         f"{provider!r} cannot do — it would start cold every time and Conductor refuses "
         f"the workflow. Use one of {sorted(REMEMBERING_PROVIDERS)}, or turn remembering off."
     ]
+
+
+def _retyped_value_problems(node: Node, where: str) -> list[str]:
+    """A ``set`` step whose value Conductor's YAML loader will hand back retyped.
+
+    Conductor runs a bare ``value:`` through a YAML load, so ``"no"`` becomes
+    ``False`` and ``"3"`` an integer — a silent type change at the point a route
+    condition is about to test it. ``output_type`` is what pins it, and the node
+    declares ``string`` without it, so the graph and the run disagree and nothing
+    says so.
+
+    Only literals: a value carrying ``{{`` is rendered at run time and what it
+    becomes is not knowable here.
+    """
+    if not isinstance(node, ComputeNode) or node.value is None or node.value_type is not None:
+        return []
+    if "{{" in node.value:
+        return []
+    loaded = _as_yaml(node.value)
+    if isinstance(loaded, str):
+        return []
+    return [
+        f"{where}: step {node.node_id!r} sets {node.value!r} with no output_type, and "
+        f"Conductor loads that as {type(loaded).__name__} {loaded!r} — the node declares "
+        "string, so a route testing it is comparing two different types and is never true. "
+        "Pass output_type=PortType.<the type you mean>, or quote it into something YAML "
+        "reads as text."
+    ]
+
+
+def _as_yaml(text: str) -> object:
+    """What Conductor's loader makes of this scalar. Text, if it will not parse.
+
+    ``typ="safe", pure=True`` because that is the loader ``executor/set_step.py``
+    builds, and the answer depends on it: that is YAML 1.2, where ``no``, ``yes``,
+    ``on`` and ``off`` stay strings. Only ``true``/``false``, integers, floats and
+    ``null`` retype. Guessing a YAML 1.1 loader here would report four spellings
+    that are in fact safe.
+    """
+    try:
+        return YAML(typ="safe", pure=True).load(text)
+    except YAMLError:
+        return text
 
 
 def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:

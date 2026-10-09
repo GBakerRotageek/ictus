@@ -8,8 +8,8 @@ Every constructor also takes `description`, and most take `inputs`. Options belo
 are the rest.
 
 Laid out by what each thing *is*, in `graph.NodeKind`'s own vocabulary — gates,
-model calls, steps, exits, stages, scopes. The folders under `src/ictus/stdlib/`
-match these headings one for one.
+model calls, steps, exits, stages, scopes. Each of these headings is
+a folder under `src/ictus/stdlib/`.
 
 | Tier | Placed with | Costs the caller |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ where it came from.
 | `briefing` | Summarise upstream output for a person to decide on | `subject`, `source`, `output_name` | `summary: string` |
 | `voice` | One standpoint's assessment — persona plus focus | `persona`, `focus`, `subject`, `intent`, `prior`, `direction`, `tools`, `max_turns` | `satisfied: boolean`, `position: string`, `concerns: string`, `unchecked: string` |
 | `validate_mcp` | Prove an MCP server is reachable by calling a read-only tool | `server` | `available: boolean`, `detail: string` |
-| `remediate` | Work through a blockage with the person at the terminal | `problem`, `subject` | `resolved: boolean`, `summary: string` |
+| `remediate` | Work through a blockage with the person waiting at the gate | `problem`, `subject` | `resolved: boolean`, `summary: string` |
 
 ## Human decisions
 
@@ -42,7 +42,9 @@ where it came from.
 | `ask_human` | Ask questions known at composition time | `questions`, `allow_abort`, `allow_skip` | `answers: object`, `transcript`, `answered_count`, `outcome`, one port per question id |
 | `ask_human_for` | Ask questions an earlier node produced | `source`, `allow_abort` | `answers: object`, `transcript`, `answered_count`, `outcome` |
 
-Route with `pipeline.branch(gate, {...})`. `Question(text, id=, choices=, required=)`.
+Route a gate with `pipeline.branch(gate, {...})`; `ask_human` and `ask_human_for`
+collect values rather than offering a decision, so they route with `pipeline.route(...)`.
+`Question(text, id=, choices=, required=)`.
 
 ## Steps without a model
 
@@ -126,7 +128,7 @@ composition.
 | `try_shell` | Run one command whose failure the caller routes on | `command`, `args`, `parameter`, `outputs`, `stdin`, `timeout`, `working_dir`, `node_id` | `ok`, `failed` | `stdout`, `stderr`, `exit_code` |
 | `converge` | Bounded try/judge loop; running out is a value, not a crash | `attempt`, `judge`, `judge_prompt`, `verdict_port`, `passes`, `pause_between` | `converged`, `exhausted` | the attempt's outputs, `feedback`, `passes` |
 | `read_ticket` | Read one ticket through a read-only source, holding its credential inside the stage | `against`, `timeout`, `subject` | `read`, `missing` | `ticket`, `why` |
-| `investigate` | Bounded look/ask loop against a read-only datasource; the thinking step has no tools and can only request a statement | `against`, `looks`, `reasoning`, `model`, `max_turns`, `limit`, `timeout`, `remember`, `may_read_files`, `environment`, `subject` | `answered`, `exhausted` | `answer`, `looks`, `last_sql` |
+| `investigate` | Bounded look/ask loop against a read-only datasource; the thinking step has no tools by default and can only request a statement | `against`, `looks`, `reasoning`, `model`, `max_turns`, `limit`, `timeout`, `remember`, `may_read_files`, `environment`, `subject` | `answered`, `exhausted` | `answer`, `looks`, `last_sql` |
 | `roundtable` | Several people taking turns, in order, until they agree | `speakers`, `subject`, `charge`, `rounds`, `study`, `interject`, `remember`, `closing` | `agreed`, `unresolved`, `halted` (with `interject`) | `minutes`, `dissent`, `rounds` |
 | `council` | Several standpoints deliberating until they agree on a report | `voices`, `subject`, `charge`, `rounds`, `interject`, `deliberate`, `verify`, `verify_each`, `verify_turns`, `remember`, `synthesis` | `agreed`, `unresolved`, `halted` (with `interject`) | `report`, `dissent`, `unverified`, `rounds`, `corrections` |
 

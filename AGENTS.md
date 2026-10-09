@@ -1,27 +1,39 @@
 # Working in this repository
 
-ictus is a typed Python composition layer that compiles to Conductor workflow
-YAML. Pipelines are authored as Python, checked by mypy and by composition
-lints, emitted as YAML, and executed by Conductor.
+ictus compiles typed Python into Conductor workflow YAML. Conductor executes it.
+Mistakes are meant to surface while a pipeline is written: a live run costs money
+and minutes, a composition error costs nothing. **An abstraction earns its place
+here only by moving a failure earlier** — one that merely moves a failure
+somewhere else is worse than none.
 
-The point is that mistakes are caught when a pipeline is written rather than
-when it runs. A live run costs money and takes minutes; a composition error
-costs nothing. **An abstraction here earns itself only by moving a failure
-earlier** — one that merely moves a failure somewhere else is worse than none.
+**Let the checks tell you.** The test suite, the lint rules and the composition
+errors raised at the line that writes them already refuse most of what this file
+could say. Prose that restates an enforced rule goes stale; the enforcement does
+not, and a count written down here would be the first thing to rot. What follows
+is the part no check can carry: the environment, the reasons, and the
+conventions nothing holds but you.
+
+```sh
+make soundcheck          # ruff, format, mypy strict, pytest, emit, validate
+uv run ictus lint      demo_work/pipelines
+uv run ictus emit      demo_work/pipelines   # after ANY change that reaches YAML
+uv run ictus validate  demo_work/pipelines   # Conductor's own loader
+uv run ictus trace     <pipeline>            # what each step actually did
+```
+
+`build/` is committed, so any change reaching YAML leaves the tree stale until
+you re-emit. Run `lint` **and** `validate`; neither is sufficient alone.
 
 ## Where the ground truth is
 
-Conductor is a **uv tool install**. It lives in its own isolated virtualenv and
-is *not* importable from this project's `.venv` or from system python. Resolve
-it through the console script:
+Conductor lives in its own virtualenv — a **uv tool install**, or a sibling
+venv whose console script is linked in. Either way it is *not* importable
+from this project's `.venv` or from system python.
 
 ```sh
 "$(dirname "$(readlink -f "$(command -v conductor)")")/python" \
   -c "import conductor, pathlib; print(pathlib.Path(conductor.__file__).parent)"
 ```
-
-On this machine that is
-`~/.local/share/uv/tools/conductor-cli/lib/python3.12/site-packages/conductor`.
 
 | File | Settles |
 | --- | --- |
@@ -31,164 +43,80 @@ On this machine that is
 | `executor/` | what a step does at run time, as against what it accepts |
 | `gates/`, `interrupt/` | human gates, and the pause / skip / stop / guidance API |
 
-Any claim about what can or cannot be expressed, or about how the engine
-behaves, is settled there — not by this project's documentation, which describes
-what ictus chose to surface rather than what the engine offers.
-
 **`import conductor` failing is a fact about your shell, not about Conductor.**
-`ModuleNotFoundError` means you asked the wrong interpreter. It is not evidence
-that a feature is absent. A council once reported that retry, per-agent
-timeouts, reasoning effort and skills all needed engine changes; all four were
-fields already in `config/schema.py`, and every voice had given up after one
-failed import.
+A council once reported that retry, per-agent timeouts, reasoning effort and
+skills all needed engine changes; all four were already fields in
+`config/schema.py`, and every voice had given up after one failed import.
 
-**Check the case you are actually claiming.** Two mistakes have now been made
-twice each here:
+**Check the case you are actually claiming.** Three mistakes made twice each:
 
-- *Schema vs executor.* `AgentDef.working_dir` is one field serving two step
-  kinds, and it behaves differently in each — script steps get it as the
-  subprocess cwd (`executor/script.py`, `cwd=`), agents get it resolved against
-  the workflow file. A docstring covering one case is not evidence about the
-  other.
+- *Schema vs executor.* `working_dir` is one spelling on two step kinds that
+  behave differently — `ScriptStepDef`'s becomes the subprocess cwd
+  (`execution/local.py`, `cwd=spec.working_dir`), `AgentDef`'s is resolved
+  against the workflow file (`engine/workflow.py`,
+  `_resolve_agent_working_dir`). A docstring covering one case is not evidence
+  about the other.
 - *ictus vs Conductor.* "The engine supports it" and "ictus exposes it" are
-  different questions. A field present in `config/schema.py` and absent from
-  `src/ictus` is not a closed finding — it is the cheapest kind of open one.
+  different questions. A field in `config/schema.py` and absent from `src/ictus`
+  is not a closed finding — it is the cheapest kind of open one.
 - *Schema vs provider.* `config/schema.py` says what a workflow may **say**;
-  `providers/<name>.py` says what the provider you chose actually **reads**.
-  `retry` and `reasoning` are on every `AgentDef` and `claude-agent-sdk` reads
-  neither; `context_tier` is documented as Copilot-only and `aca` forwards it
-  too. Check the provider before calling a field a wiring gap. Two authoritative
-  sources: each provider's `CAPABILITIES` block (`providers/capabilities.py`
-  names the flags) and, for fields with no flag, the code that consumes the
-  value. `interfaces/conductor/lints.py` keeps the answers in three sets, split
-  by *who notices*: `HONOURED_BY` where nothing upstream checks and the ictus
-  lint is the only guard, `VALIDATED_UPSTREAM` where `conductor validate`
-  refuses it already and a lint here would duplicate it, `HONOURED_EVERYWHERE`
-  where the field holds on every provider. Before adding an entry, emit a
-  workflow that sets the field on a provider that ignores it and run
-  `conductor validate` on it — that one command decides which set it belongs in.
+  `providers/<name>.py` says what your provider actually **reads**. `retry` and
+  `context_tier` are on every `AgentDef` and `claude-agent-sdk` reads neither.
+  Check `providers/capabilities.py`, then the code that consumes the value.
+  `src/ictus/interfaces/conductor/lints.py` sorts the answers by *who notices*:
+  `HONOURED_BY` (only the ictus lint guards it), `VALIDATED_UPSTREAM`
+  (`conductor validate` already refuses it), `HONOURED_EVERYWHERE`. Before
+  adding an entry, emit a workflow setting the field on a provider that ignores
+  it and run `conductor validate` — that command decides which set it is in.
 
-## Layers, and what each may know
+## Layers
 
-ictus builds Conductor pipelines. That is the whole job: compose a typed graph,
-check it, compile it, and run what it compiled. Anything that is not that is
-either an adapter (data a pipeline declares) or not ictus at all.
+ictus builds Conductor pipelines. That is the whole job. Anything else is either
+an adapter — data a pipeline declares — or not ictus at all.
 
-- `graph/` models pipelines and knows **no engine**: nodes, typed ports, typed
-  references, scopes, map groups.
-- `interfaces/` is the boundary — `Backend`, `Capabilities`, engine-neutral
-  environment checks.
-- `interfaces/conductor/` is the **only** package permitted to know Conductor's
-  spelling: field names, template dialect, iteration accounting, CLI. Inside it,
-  `emit/` is a pure function of a pipeline — no environment read, no process
-  started, so `ictus emit` works on a laptop with no credentials and no engine —
-  `control/` only ever acts on a run that already exists, and `preflight.py`
-  answers questions about this machine. Nothing in `emit/` imports `control/`.
-- `stdlib/` holds ready-made nodes, stages and scopes built on the graph layer,
-  in folders named for `graph.NodeKind`'s vocabulary rather than the engine's.
-- `runspec/` is the running contract as code: what `config.yaml` and `input.md`
-  say, and what `ictus init` writes. `assemble/` turns those answers into graph
-  structure — the start gate, the announcements — at load, so that what is
-  emitted is what runs. `runs/` acts on a run that already exists: read the
-  manifests, launch one, answer a gate on one. All three are service-neutral.
-- `net/` is protocol with no ictus in it. It has two callers in different
-  concerns, which is why it is not filed under either.
-- `notify/` and `sources/` are the **adapter** boundaries — who hears about a
-  run, and where it reads from. A concrete service lives in one folder under
-  one of them and is pure data: a constructor returning an `Integration` or
-  `Datasource` whose `program` nothing above ever reads.
-- `bridge/` is **not ictus**. It is the chat daemon — a socket held open to a
-  vendor, button presses, forms — which ships in the same wheel under its own
-  `ictus-bridge` console script. It may import anything in `ictus`; nothing in
-  `ictus` may import it.
-- `cli/` is one module per group of verbs — `building`, `running`, `watching` —
-  each registering on the `app` in `cli/app.py`. A module that is not imported
-  from `cli/__init__.py` contributes no commands, which is the modern shape of
-  a bug that used to come from an `if __name__` guard; `TestEveryCommandIsReachable`
-  catches both.
-- `demo_work/pipelines/` holds real pipelines, one folder each. Nothing in
-  `src/` imports from it.
+Each package says what it is in its own `__init__.py`; read those rather than a
+second copy here. What is not in any one of them is the direction:
 
-Only `__init__.py` and `errors.py` sit loose at the top of `src/ictus`. The
-second is there because all twelve packages import it — filing it under any one
-of them would point a dependency the wrong way — and because `__init__.py`
-re-exports it, which makes the two of them the package's own root vocabulary
-rather than a module that never found a home.
-
-Three rules, all three enforced by `tests/test_boundaries.py` rather than by
-this file:
-
-1. A Conductor field name above the `interfaces/conductor/` line is a defect
-   with a name, not a style preference — as is a function above it that returns
-   `YamlDict`, since assembling the engine's document shape *is* lowering. Both
-   are checked over `graph/`, `stdlib/`, `lint/`, `runspec/` and `assemble/`.
-2. A service's spelling anywhere but its own adapter folder or `bridge/` is the
-   same defect one axis over. The check tokenises, so prose naming the thing
-   being excluded is fine; an identifier is not.
-3. `ictus` never imports `ictus.bridge`, and never imports a concrete adapter
-   constructor by name. A *pipeline* names its service — that is the point of a
-   pipeline. The library that compiles it does not.
-
-Each of those had been written down somewhere and held by nothing, which is how
-the CLI grew a Slack bot, `answer.py` came to be typed on a Slack dataclass, and
-the one module in the audience boundary that knew the engine ended up filed
-under a vendor's name.
-
-## Three tiers
-
-A **Node** is one entry in the flat `agents:` list. A **Stage** is its own YAML
-file plus a `type: workflow` agent in the parent. A **Scope** is a stage whose
-every exit is an outcome the caller routes on rather than an exception that
-kills it.
-
-Two scopes put several agents on one question and they are not interchangeable.
-`council` **polls**: its voices run at once, so none has heard the others when
-it speaks, and a synthesis step writes each round up for the next — breadth, and
-a round of lag nothing can remove from a parallel group. `roundtable` **talks**:
-everyone reads alone first, then speakers take turns, so the second has heard
-the first *this* round and the last has heard everyone. Order is part of its
-design, and the cost of arguing is wall-clock.
-
-## The running contract
-
-A pipeline is a folder: `pipeline.py` (the graph), `config.yaml` (policy —
-provider, budget, gates), `input.md` (this run's values, as YAML frontmatter
-over a prose body), and `build/` (emitted YAML, **committed** so a diff shows
-what runs).
-
-## How to work here
-
-```sh
-make soundcheck          # ruff, ruff format, mypy strict, pytest, emit, validate
-uv run ictus lint      demo_work/pipelines
-uv run ictus emit      demo_work/pipelines   # after ANY change that reaches YAML
-uv run ictus validate  demo_work/pipelines   # Conductor's own loader
-uv run ictus preflight demo_work/pipelines   # can this machine run it?
-uv run ictus trace     <pipeline>            # what each step actually did
-uv run ictus-bridge listen demo_work/pipelines   # the chat daemon, separately
+```text
+errors ← graph ← stdlib ← assemble      interfaces/conductor/
+              ← runspec                   emit/      a pure function of a pipeline
+              ← lint ← interfaces         control/   acts on a run that exists
+                     ← runs ← bridge      preflight  asks about this machine
+notify, sources   adapters, pure data   net  protocol with no ictus in it
 ```
 
-`build/` is committed, so a change to a prompt, a baseline or a constructor
-leaves the tree stale until you re-emit — `test_committed_yaml_matches_a_fresh_emit`
-is what catches it. Run `lint` **and** `validate`; neither is sufficient alone.
+Three rules hold it, and `tests/test_boundaries.py` states each precisely and
+explains itself on failure: **no Conductor spelling above the backend** (nor any
+function returning `YamlDict`, since building the engine's document shape *is*
+lowering); **no service named outside its own adapter folder or `bridge/`**;
+**nothing in `ictus` imports `ictus.bridge` or an adapter constructor by name.**
 
-Conventions that are enforced rather than suggested:
+Why they exist is the part the tests cannot say. Each had been written down
+somewhere and held by nothing — which is how the CLI grew a Slack bot, how
+`answer.py` came to be typed on a Slack dataclass, and how the one module in the
+audience boundary that knew the engine ended up filed under a vendor's name.
+`notify` and `interfaces` are different axes: who hears about a run, and what
+executes it. A run on any engine can report to any audience.
 
-- **A module with prompt text is a folder.** The code is its `__init__.py`, the
-  prose sits beside it as `<name>.md`, and the import path does not change:
-  `stdlib/llm/voice/__init__.py` reads `stdlib/llm/voice/stance.md` with
-  `prompt(__name__, "stance")` from `ictus.prompting`. In prompt
-  position — an argument to `tpl`, or `prompt=`/`system_prompt=` — a string
-  literal is a connective, not a sentence, and over 60 characters
-  `test_prompt_layout.py` refuses it. Typed refs stay in code:
-  `tpl(prompt(__name__, "charge"), node.ref("x"))`. Putting `{x}` in the text
-  and resolving it by name is the string-matching `Ref` exists to replace.
+## Council and roundtable are not interchangeable
+
+`STDLIB.md` defines Node, Stage and Scope, and `ictus stdlib` lists what exists
+in each. What it does not say is why the two deliberating scopes are different
+instruments.
+`council` **polls** — voices run at once, so none has heard the others when it
+speaks, and a synthesis step writes each round up for the next: breadth, at a
+round of lag nothing can remove from a parallel group. `roundtable` **talks** —
+everyone reads alone, then speakers take turns, so the last has heard everyone.
+Order is part of its design, and the cost of arguing is wall-clock.
+
+## Conventions nothing enforces
 
 - **Tests assert behaviour at the public boundary.** A test that would still
   pass with the implementation deleted is not a test. Reproduce a bug with a
   failing test before fixing it.
 - **Make invalid states unrepresentable** before adding a runtime check. Prefer
-  a `CompositionError` where it is written over a lint over a run-time failure.
+  a `CompositionError` where it is written, over a lint, over a run-time
+  failure.
 - **Errors carry context** about what was being attempted. Never swallow one to
   simplify a signature.
 - **Comment the non-obvious decision**, never restate the code. Most comments
@@ -199,21 +127,18 @@ Conventions that are enforced rather than suggested:
 
 ## Reference
 
-- `README.md` — the architecture, the engine boundary, what the lints add.
-- `STDLIB.md` — every constructor, the wiring table, and the gotchas that have
-  each cost a real run.
-- `.claude/skills/ictus-pipeline/SKILL.md` — authoring a new pipeline, and the
-  environment limits that decide whether a node can reach anything.
+`README.md` the architecture · `STDLIB.md` the catalogue, or `ictus stdlib` for
+the same from live code · `CHANGELOG.md` what moved and what to write instead ·
+`.claude/skills/ictus-pipeline/` authoring a pipeline ·
+`.claude/skills/skill-writer/` writing a skill.
 
-## Licence
-
-GPL-3.0-or-later, in `LICENSE`. Contributions are under the same terms; a change
-that adds a dependency needs one whose licence is compatible with it.
+GPL-3.0-or-later, in `LICENSE`. Contributions are under the same terms; a new
+dependency needs a compatible licence.
 
 ## What this is for
 
 Not to replace an interactive coding agent. Those are better at open-ended work
-done once, because they accumulate context, iterate against reality, and take
+done once, because they accumulate context, iterate against reality and take
 correction mid-flight. This is for work you do repeatedly with a shape you have
 already learned: the same review every change, the same provisioning every
 deploy, gates in known places, a cost ceiling, and a run a second person can
