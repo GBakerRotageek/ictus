@@ -17,7 +17,7 @@ from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import Ref, Template
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Hashable, Iterable, Iterator, Mapping
 
 __all__ = [
     "NODE_KINDS",
@@ -41,6 +41,7 @@ __all__ = [
     "TerminateNode",
     "Validator",
     "WaitNode",
+    "coerced_outcome",
     "slugify",
 ]
 
@@ -122,8 +123,32 @@ class RetryPolicy:
             raise CompositionError(
                 f"retry first_delay_seconds must be positive, got {self.first_delay_seconds}"
             )
-        if len(set(self.on)) != len(self.on):
+        if _repeated(self.on):
             raise CompositionError(f"retry policy repeats a failure category: {list(self.on)}")
+
+
+def _repeated[T: Hashable](items: Iterable[T]) -> list[T]:
+    """Values appearing more than once, in the order they first repeat.
+
+    Returns rather than raises, so each caller keeps its own wording: a port
+    declared twice, a gate choice reused and an answer id reused are three
+    different mistakes, and in each the message is most of the value. There
+    were four spellings of this one idea in this file — a ``seen`` set, two
+    ``list.count`` comprehensions and a ``len(set(...))`` — and the
+    ``count`` ones are quadratic besides.
+
+    ``requirements.py`` has a fifth and deliberately keeps it: it needs the
+    members back to render ``RunSignal.value``, and importing this would give
+    the module that ``notify/`` and ``sources/`` both depend on a run-time edge
+    into the largest module in ``graph``.
+    """
+    seen: set[T] = set()
+    repeats: list[T] = []
+    for item in items:
+        if item in seen and item not in repeats:
+            repeats.append(item)
+        seen.add(item)
+    return repeats
 
 
 def _has_text(prompt: str | Template) -> bool:
@@ -141,6 +166,29 @@ def slugify(label: str) -> str:
     while "__" in out:
         out = out.replace("__", "_")
     return out.strip("_")
+
+
+#: Words Conductor's renderer turns into something that is not a string.
+_COERCED = frozenset({"True", "False", "None", "true", "false", "null"})
+
+
+def coerced_outcome(name: str) -> bool:
+    """Whether Conductor would hand this outcome back as a non-string.
+
+    A rendered output goes through ``json.loads`` (`_maybe_parse_json`), so
+    ``"true"``, ``"3"`` and anything opening a JSON container arrive as a bool,
+    a number or a structure — and every ``equals`` comparison against the name
+    then fails without saying anything. Lives here rather than in ``scope.py``
+    because ``ScopeNode`` can be constructed directly, without the builder.
+    """
+    stripped = name.strip()
+    if stripped in _COERCED or stripped[:1] in '{["':
+        return True
+    try:
+        float(name)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -163,14 +211,11 @@ class Node(ABC):
                 f"node_id {self.node_id!r} is not a routing identifier; "
                 f"use {slugify(self.node_id)!r} (lowercase, digits and underscore only)"
             )
-        seen: set[str] = set()
         names = [p.name for p in self.inputs] + [p.name for p in self.outputs]
-        for name in names:
-            if name in seen:
-                raise CompositionError(
-                    f"node {self.node_id!r} declares port {name!r} more than once"
-                )
-            seen.add(name)
+        if repeats := _repeated(names):
+            raise CompositionError(
+                f"node {self.node_id!r} declares port {repeats[0]!r} more than once"
+            )
 
     @property
     @abstractmethod
@@ -451,7 +496,7 @@ class GateNode(Node):
         if not self.choices:
             raise CompositionError(f"gate {self.node_id!r} requires at least one choice")
         values = [c.value for c in self.choices]
-        dupes = {v for v in values if values.count(v) > 1}
+        dupes = _repeated(values)
         if dupes:
             raise CompositionError(
                 f"gate {self.node_id!r} has duplicate choice values: {sorted(dupes)}"
@@ -728,7 +773,7 @@ class QuestionsNode(Node):
                 "(known when written) or 'source' (produced by an earlier node)"
             )
         ids = [q.id for q in self.questions if q.id]
-        dupes = {i for i in ids if ids.count(i) > 1}
+        dupes = _repeated(ids)
         if dupes:
             raise CompositionError(
                 f"questions node {self.node_id!r} reuses answer id(s) {sorted(dupes)}"
@@ -810,6 +855,16 @@ class ScopeNode(SubGraphNode):
     """
 
     outcomes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in self.outcomes:
+            if coerced_outcome(name):
+                raise CompositionError(
+                    f"scope {self.node_id!r} cannot use the outcome {name!r}: Conductor "
+                    "parses a rendered output with json.loads, so it would arrive as a "
+                    "non-string and every comparison against it would silently fail"
+                )
+        super().__post_init__()
 
     @property
     def outcome(self) -> Ref:

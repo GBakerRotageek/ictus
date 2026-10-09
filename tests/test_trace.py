@@ -221,7 +221,7 @@ class TestDeclaredCeilings:
 
     def test_ceilings_are_collected_through_nested_stages(self) -> None:
         """A stage's steps appear in the parent run's log under their own names."""
-        from ictus.cli.watching import _declared_ceilings
+        from ictus.cli.tracing import _declared_ceilings
 
         parent = Pipeline(pipeline_id="parent")
         stage = Stage(stage_id="inner")

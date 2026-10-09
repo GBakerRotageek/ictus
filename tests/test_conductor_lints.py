@@ -27,7 +27,7 @@ from ictus import (
     ScriptNode,
     Validator,
 )
-from ictus.graph.pipeline import TrimStrategy
+from ictus.graph.composition import TrimStrategy
 from ictus.interfaces.conductor import conductor
 from ictus.interfaces.conductor.lints import (
     HONOURED_BY,

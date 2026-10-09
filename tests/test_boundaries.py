@@ -286,6 +286,37 @@ def test_nothing_above_the_backend_builds_a_yaml_document(path: Path) -> None:
     )
 
 
+# --- the analysis never reaches into a pipeline ----------------------------------
+
+TRAVERSAL = SRC / "graph" / "traversal.py"
+
+
+def test_the_analysis_never_reaches_into_a_pipeline() -> None:
+    """``graph/traversal.py`` gets a graph through its public accessors or not at all.
+
+    That is the rule the split was for: these used to be methods, so each one
+    could read ``self._edges`` and nothing said it should not. Eight of them
+    did. A function that cannot touch a private store cannot accidentally
+    depend on an ordering the stores happen to have, and is the one kind of
+    code you can read without checking whether it mutates.
+
+    ``ast.Attribute`` only, deliberately. Widening this to ``ast.Name`` was
+    tried and fires on the five ``_End`` reads the isinstance checks need and
+    on ``_span`` in ``loop_cost``'s destructuring — on everything except the
+    hazard. A rule needing exemptions on its first day is one more thing to
+    drift.
+    """
+    tree = ast.parse(TRAVERSAL.read_bytes())
+    offending = [
+        f"traversal.py:{node.lineno}: .{node.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr.startswith("_")
+        and not node.attr.startswith("__")
+    ]
+    assert not offending, "the analysis reaching past a public accessor:\n" + "\n".join(offending)
+
+
 # --- the public surface is stated, not inferred ----------------------------------
 
 #: Modules where ``__all__`` would be noise. A command module's surface is the

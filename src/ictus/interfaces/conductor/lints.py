@@ -3,6 +3,13 @@
 Each is a claim about Conductor's runtime — its template dialect, its
 strict-undefined rendering, its output wrapper — and none duplicates
 ``conductor validate``.
+
+A registry, and deliberately one file: every cut you could draw through it
+needs a third module holding ``OUTPUT_REF`` and ``GROUP_REF``, which are shared
+across all of them. **The predicates are defined in the order
+``conductor_problems`` calls them**, in three bands, so the file reads the way
+the dispatcher runs — and each small helper sits under its one caller rather
+than in a pile at the end.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from ruamel.yaml.error import YAMLError
 
 from ictus.graph.node import AgentNode, ComputeNode, GateNode, Node, TerminateNode
 from ictus.graph.ref import Origin
+from ictus.graph.traversal import has_cycle, may_be_unresolved
 from ictus.interfaces.conductor.emit.templates import output_path
 from ictus.interfaces.conductor.emit.workflow import DEFAULT_PROVIDER
 from ictus.lint.rules import describe
@@ -148,6 +156,109 @@ HONOURED_EVERYWHERE: frozenset[str] = frozenset(
 )
 
 
+#: Strategies that make room by deleting a step's output rather than shortening
+#: it (`engine/context.py`: both `del self.agent_outputs[agent_name]`).
+_DELETING_STRATEGIES = frozenset({"drop_oldest", "summarize"})
+
+# Conductor's loader expands `${VAR}` in every string it reads
+# (config/loader.py resolve_env_vars).
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}")
+
+
+# --- the pipeline's own settings -------------------------------------------------
+
+
+def _instruction_problems(pipeline: Pipeline, where: str) -> list[str]:
+    """The same, for workspace instructions — which every step's prompt carries."""
+    return [
+        f"{where}: workspace instructions contain ${{{match.group(1)}}}. Conductor expands "
+        "it at load and prepends the result to every prompt, so a set variable's value goes "
+        "to the provider with every step."
+        for text in pipeline.instructions
+        for match in _ENV_REF.finditer(text)
+    ]
+
+
+def _context_trim_problems(pipeline: Pipeline, where: str) -> list[str]:
+    """A context ceiling that makes room by deleting what a loop reads.
+
+    A deleted output is indistinguishable from one that has not run, so the
+    loop keeps rendering nothing. ``truncate`` shortens in place instead.
+    """
+    cap = pipeline.context_max_tokens
+    if cap is None:
+        if pipeline.context_trim is not None:
+            return [
+                f"{where}: context_trim is set but context_max_tokens is not, so nothing "
+                "ever trims and the strategy is never reached. Set a ceiling, or drop the "
+                "strategy."
+            ]
+        return []
+    if pipeline.context_trim is None:
+        return [
+            f"{where}: context_max_tokens is {cap} with no context_trim. The engine does "
+            "not leave that unset — it uses drop_oldest, which deletes whole step outputs "
+            "oldest first. Name the strategy you want rather than inheriting the most "
+            "destructive one by omission."
+        ]
+    if pipeline.context_trim.value in _DELETING_STRATEGIES and has_cycle(pipeline):
+        return [
+            f"{where}: context_max_tokens is set with trim_strategy "
+            f"{pipeline.context_trim.value!r} on a graph that loops. That strategy makes "
+            "room by deleting whole step outputs, and a loop reads the previous pass "
+            "through exactly those — once one is deleted the reference renders empty and "
+            "is indistinguishable from a first pass, so the loop keeps running and stops "
+            "deliberating. Use TrimStrategy.TRUNCATE, which shortens fields in place and "
+            "leaves every reference resolvable."
+        ]
+    return []
+
+
+# --- what the provider actually reads, field by field ----------------------------
+
+
+def _deferred_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
+    """A reference to a node that may not have run yet must be guarded.
+
+    The ``?`` suffix makes the dependency optional, not the template variable,
+    and Conductor renders with strict undefined.
+    """
+    problems: list[str] = []
+    for dep in pipeline.deps_into(node):
+        deferred = dep.connection.target.optional or may_be_unresolved(pipeline, dep.source, node)
+        if not deferred:
+            continue
+        source_id = dep.source.node_id
+        for template in node.template_strings():
+            if f"{source_id}." not in template or f"{source_id} is defined" in template:
+                continue
+            problems.append(
+                f"{where}: {describe(node)} references {source_id!r} in a template, but "
+                f"{source_id!r} may not have run yet (the dependency is optional). Guard it "
+                f"with `{{% if {source_id} is defined %}}` or the first pass fails with "
+                f"\"'{source_id}' is undefined\"."
+            )
+            break
+    return problems
+
+
+def _tool_allowlist_problems(node: Node, where: str) -> list[str]:
+    """Naming individual tools raises ``ProviderError`` mid-run. Unset and empty both work."""
+    tools = getattr(node, "tools", None)
+    if not tools:
+        return []
+    return [
+        f"{where}: agent {node.node_id!r} names the tools {sorted(tools)}, which conductor "
+        "cannot translate — its `tools:` are workflow tool names, not the CLI's, and the "
+        "provider raises rather than grant the wrong ones. Use tools=() for none, or leave "
+        "it unset, which grants nothing unless the pipeline asks for native_tools."
+    ]
+
+
+# Conductor's loader expands `${VAR}` in every string it reads
+# (config/loader.py resolve_env_vars).
+
+
 def _ignored_field_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
     """Refuse a field the chosen provider will read straight past."""
     provider = pipeline.provider or DEFAULT_PROVIDER
@@ -165,14 +276,7 @@ def _ignored_field_problems(pipeline: Pipeline, node: Node, where: str) -> list[
 
 
 # Conductor's rule for when a `skills:`/`plugins:` entry is a path rather than a
-# registered name (skills/registry.py:226). Purely syntactic.
-def _is_path_entry(entry: str) -> bool:
-    return entry.startswith(("~", ".")) or "/" in entry or "\\" in entry
-
-
-# Rendered at run time, so ictus cannot know what it resolves to.
-def _is_deferred(value: str) -> bool:
-    return "{{" in value or "${" in value
+# registered name (skills/registry.py). Purely syntactic.
 
 
 def _relative_path_problems(node: Node, where: str) -> list[str]:
@@ -219,89 +323,17 @@ def _relative_path_problems(node: Node, where: str) -> list[str]:
 
 #: Strategies that make room by deleting a step's output rather than shortening
 #: it (`engine/context.py`: both `del self.agent_outputs[agent_name]`).
-_DELETING_STRATEGIES = frozenset({"drop_oldest", "summarize"})
 
 
-def _context_trim_problems(pipeline: Pipeline, where: str) -> list[str]:
-    """A context ceiling that makes room by deleting what a loop reads.
-
-    A deleted output is indistinguishable from one that has not run, so the
-    loop keeps rendering nothing. ``truncate`` shortens in place instead.
-    """
-    cap = pipeline.context_max_tokens
-    if cap is None:
-        if pipeline.context_trim is not None:
-            return [
-                f"{where}: context_trim is set but context_max_tokens is not, so nothing "
-                "ever trims and the strategy is never reached. Set a ceiling, or drop the "
-                "strategy."
-            ]
-        return []
-    if pipeline.context_trim is None:
-        return [
-            f"{where}: context_max_tokens is {cap} with no context_trim. The engine does "
-            "not leave that unset — it uses drop_oldest, which deletes whole step outputs "
-            "oldest first. Name the strategy you want rather than inheriting the most "
-            "destructive one by omission."
-        ]
-    if pipeline.context_trim.value in _DELETING_STRATEGIES and pipeline.has_cycle():
-        return [
-            f"{where}: context_max_tokens is set with trim_strategy "
-            f"{pipeline.context_trim.value!r} on a graph that loops. That strategy makes "
-            "room by deleting whole step outputs, and a loop reads the previous pass "
-            "through exactly those — once one is deleted the reference renders empty and "
-            "is indistinguishable from a first pass, so the loop keeps running and stops "
-            "deliberating. Use TrimStrategy.TRUNCATE, which shortens fields in place and "
-            "leaves every reference resolvable."
-        ]
-    return []
+def _is_path_entry(entry: str) -> bool:
+    return entry.startswith(("~", ".")) or "/" in entry or "\\" in entry
 
 
-def _tool_allowlist_problems(node: Node, where: str) -> list[str]:
-    """Naming individual tools raises ``ProviderError`` mid-run. Unset and empty both work."""
-    tools = getattr(node, "tools", None)
-    if not tools:
-        return []
-    return [
-        f"{where}: agent {node.node_id!r} names the tools {sorted(tools)}, which conductor "
-        "cannot translate — its `tools:` are workflow tool names, not the CLI's, and the "
-        "provider raises rather than grant the wrong ones. Use tools=() for none, or leave "
-        "it unset, which grants nothing unless the pipeline asks for native_tools."
-    ]
+# Rendered at run time, so ictus cannot know what it resolves to.
 
 
-# Conductor's loader expands `${VAR}` in every string it reads
-# (config/loader.py resolve_env_vars).
-_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}")
-
-
-def _env_reference_problems(node: Node, where: str) -> list[str]:
-    """A `${VAR}` in text a model reads is either a crash or a leak.
-
-    Expansion happens at load: unset refuses the workflow, set puts the value
-    in the prompt.
-    """
-    problems: list[str] = []
-    for text in node.template_strings():
-        for match in _ENV_REF.finditer(text):
-            problems.append(
-                f"{where}: agent {node.node_id!r} has ${{{match.group(1)}}} in text a model "
-                "reads. Conductor expands it at load: unset it refuses the workflow, and set "
-                "it puts the value in the prompt. Escape it, or say the variable's name "
-                "without the ${...} syntax."
-            )
-    return problems
-
-
-def _instruction_problems(pipeline: Pipeline, where: str) -> list[str]:
-    """The same, for workspace instructions — which every step's prompt carries."""
-    return [
-        f"{where}: workspace instructions contain ${{{match.group(1)}}}. Conductor expands "
-        "it at load and prepends the result to every prompt, so a set variable's value goes "
-        "to the provider with every step."
-        for text in pipeline.instructions
-        for match in _ENV_REF.finditer(text)
-    ]
+def _is_deferred(value: str) -> bool:
+    return "{{" in value or "${" in value
 
 
 def _session_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
@@ -360,6 +392,81 @@ def _as_yaml(text: str) -> object:
         return YAML(typ="safe", pure=True).load(text)
     except YAMLError:
         return text
+
+
+def _env_reference_problems(node: Node, where: str) -> list[str]:
+    """A `${VAR}` in text a model reads is either a crash or a leak.
+
+    Expansion happens at load: unset refuses the workflow, set puts the value
+    in the prompt.
+    """
+    problems: list[str] = []
+    for text in node.template_strings():
+        for match in _ENV_REF.finditer(text):
+            problems.append(
+                f"{where}: agent {node.node_id!r} has ${{{match.group(1)}}} in text a model "
+                "reads. Conductor expands it at load: unset it refuses the workflow, and set "
+                "it puts the value in the prompt. Escape it, or say the variable's name "
+                "without the ${...} syntax."
+            )
+    return problems
+
+
+# --- references and templates, which resolve or silently do not ------------------
+
+
+def _template_problems(
+    node: Node, by_id: dict[str, Node], declared_inputs: set[str], where: str
+) -> list[str]:
+    """Check the field segment of every reference, which Conductor never does."""
+    problems: list[str] = []
+    for template in (*node.template_strings(), *node.settled_template_strings()):
+        for ref_node, ref_field in OUTPUT_REF.findall(template):
+            target = by_id.get(ref_node)
+            if target is None:
+                problems.append(f"{where}: {describe(node)} references unknown node {ref_node!r}")
+                continue
+            if not ref_field:
+                continue
+            head = ref_field.split(".")[0]
+            if isinstance(target, GateNode) and head == "additional_input":
+                continue
+            if head not in {p.name for p in target.outputs}:
+                known = ", ".join(p.name for p in target.outputs) or "(none declared)"
+                problems.append(
+                    f"{where}: {describe(node)} references {ref_node}.output.{head}, "
+                    f"which {ref_node!r} does not declare; declared outputs: {known}"
+                )
+        problems.extend(
+            f"{where}: {describe(node)} references workflow input {name!r}, which is not "
+            f"declared; declared inputs: {', '.join(sorted(declared_inputs)) or '(none declared)'}"
+            for name in INPUT_REF.findall(template)
+            if name not in declared_inputs
+        )
+    return problems
+
+
+def _group_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
+    """Check references addressed through a parallel group."""
+    groups = {g.group_id: g for g in pipeline.groups}
+    problems: list[str] = []
+    for template in node.template_strings():
+        for group_name, member in GROUP_REF.findall(template):
+            group = groups.get(group_name)
+            if group is None:
+                known = ", ".join(sorted(groups)) or "(none)"
+                problems.append(
+                    f"{where}: {describe(node)} reads {group_name}.outputs, but "
+                    f"{group_name!r} is not a parallel group; groups here: {known}"
+                )
+                continue
+            if member and member not in {m.node_id for m in group.members}:
+                known = ", ".join(sorted(m.node_id for m in group.members))
+                problems.append(
+                    f"{where}: {describe(node)} reads {group_name}.outputs.{member}, "
+                    f"but {member!r} is not in that group; members: {known}"
+                )
+    return problems
 
 
 def _undeclared_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
@@ -476,82 +583,3 @@ def _collect_member_path(pipeline: Pipeline, ref: Ref, into: dict[str, Ref]) -> 
     if source is None or pipeline.group_of(source) is None:
         return
     into[output_path(pipeline, source, ref.port)] = ref
-
-
-def _deferred_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
-    """A reference to a node that may not have run yet must be guarded.
-
-    The ``?`` suffix makes the dependency optional, not the template variable,
-    and Conductor renders with strict undefined.
-    """
-    problems: list[str] = []
-    for dep in pipeline.deps_into(node):
-        deferred = dep.connection.target.optional or pipeline.may_be_unresolved(dep.source, node)
-        if not deferred:
-            continue
-        source_id = dep.source.node_id
-        for template in node.template_strings():
-            if f"{source_id}." not in template or f"{source_id} is defined" in template:
-                continue
-            problems.append(
-                f"{where}: {describe(node)} references {source_id!r} in a template, but "
-                f"{source_id!r} may not have run yet (the dependency is optional). Guard it "
-                f"with `{{% if {source_id} is defined %}}` or the first pass fails with "
-                f"\"'{source_id}' is undefined\"."
-            )
-            break
-    return problems
-
-
-def _group_reference_problems(pipeline: Pipeline, node: Node, where: str) -> list[str]:
-    """Check references addressed through a parallel group."""
-    groups = {g.group_id: g for g in pipeline.groups}
-    problems: list[str] = []
-    for template in node.template_strings():
-        for group_name, member in GROUP_REF.findall(template):
-            group = groups.get(group_name)
-            if group is None:
-                known = ", ".join(sorted(groups)) or "(none)"
-                problems.append(
-                    f"{where}: {describe(node)} reads {group_name}.outputs, but "
-                    f"{group_name!r} is not a parallel group; groups here: {known}"
-                )
-                continue
-            if member and member not in {m.node_id for m in group.members}:
-                known = ", ".join(sorted(m.node_id for m in group.members))
-                problems.append(
-                    f"{where}: {describe(node)} reads {group_name}.outputs.{member}, "
-                    f"but {member!r} is not in that group; members: {known}"
-                )
-    return problems
-
-
-def _template_problems(
-    node: Node, by_id: dict[str, Node], declared_inputs: set[str], where: str
-) -> list[str]:
-    """Check the field segment of every reference, which Conductor never does."""
-    problems: list[str] = []
-    for template in (*node.template_strings(), *node.settled_template_strings()):
-        for ref_node, ref_field in OUTPUT_REF.findall(template):
-            target = by_id.get(ref_node)
-            if target is None:
-                problems.append(f"{where}: {describe(node)} references unknown node {ref_node!r}")
-                continue
-            if not ref_field:
-                continue
-            head = ref_field.split(".")[0]
-            if isinstance(target, GateNode) and head == "additional_input":
-                continue
-            if head not in {p.name for p in target.outputs}:
-                known = ", ".join(p.name for p in target.outputs) or "(none declared)"
-                problems.append(
-                    f"{where}: {describe(node)} references {ref_node}.output.{head}, "
-                    f"which {ref_node!r} does not declare; declared outputs: {known}"
-                )
-        problems.extend(
-            f"{where}: {describe(node)} references workflow input {name!r}, which is not "
-            f"declared; declared inputs: {', '.join(sorted(declared_inputs)) or '(none declared)'}"
-            for name in INPUT_REF.findall(template)
-            if name not in declared_inputs
-        )
-    return problems

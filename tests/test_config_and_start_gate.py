@@ -16,6 +16,7 @@ from ictus import END, AgentNode, InputPort, OutputPort, Pipeline, PortType, tpl
 from ictus.assemble.start_gate import CANCELLED_ID, GATE_ID, add_start_gate
 from ictus.errors import CompositionError
 from ictus.graph.mapping import Item
+from ictus.graph.traversal import budget_cost
 from ictus.interfaces.conductor import ConductorBackend, conductor
 from ictus.lint import lint_pipeline
 from ictus.runspec.config import MINIMAL, ConfigError, PipelineConfig, read_config
@@ -299,7 +300,7 @@ def test_the_quoted_cost_and_the_compiled_limit_come_from_one_place(
     assert isinstance(workflow, dict)
     limits = workflow["limits"]
     assert isinstance(limits, dict)
-    assert limits["max_iterations"] == pipeline.budget_cost()
+    assert limits["max_iterations"] == budget_cost(pipeline)
 
 
 class TestWorkspaceInstructions:

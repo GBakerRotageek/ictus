@@ -24,9 +24,10 @@ from ictus import (
     tpl,
 )
 from ictus.graph.pipeline import Pipeline as PipelineType
-from ictus.interfaces.conductor import (
+from ictus.graph.traversal import require_loop_bound
+from ictus.interfaces.conductor import ConductorBackend
+from ictus.interfaces.conductor.control.launch import (
     TYPED_INPUT_FLAG,
-    ConductorBackend,
     binary,
     launch_command,
 )
@@ -196,7 +197,7 @@ def test_gate_with_notes_loop_loads(validates: Callable[[PipelineType], None]) -
     p.feed(review, "notes", draft, "notes")
     validates(p)
     # The bound is the backend's arithmetic; the graph only insists one exists.
-    p.require_loop_bound()
+    require_loop_bound(p)
 
 
 #: A Slack conversation id, and the shape that breaks: trailing zeros in the

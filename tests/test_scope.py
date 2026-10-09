@@ -163,6 +163,19 @@ def test_an_outcome_json_would_coerce_is_refused(name: str) -> None:
         outcome_scope(stage_id="s", outcomes=("ok", name))
 
 
+@pytest.mark.parametrize("name", ["true", "False", "None", "null", "1", "2.5", "[x", "{y"])
+def test_the_node_refuses_it_too_without_going_through_a_scope(name: str) -> None:
+    """``ScopeNode`` is exported from ``ictus`` and can be built directly.
+
+    The vocabulary was checked only by the builder, so a node constructed by
+    hand carried outcomes the builder refuses by name — and
+    ``branch_on_outcome`` then checked the routing was complete against a
+    vocabulary that could never match at run time.
+    """
+    with pytest.raises(CompositionError, match=r"json\.loads"):
+        ScopeNode(node_id="s", target="./s.yaml", outcomes=("ok", name))
+
+
 @pytest.mark.parametrize("name", ["yes", "no", "off", "n1", "found"])
 def test_an_outcome_json_leaves_alone_is_allowed(name: str) -> None:
     outcome_scope(stage_id="s", outcomes=("ok", name))

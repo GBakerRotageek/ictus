@@ -28,7 +28,8 @@ from ictus.errors import IctusError
 from ictus.stdlib.baseline import AGENT_BASELINE
 
 if TYPE_CHECKING:
-    from ictus.graph.pipeline import NativeTools, Pipeline
+    from ictus.graph.composition import NativeTools
+    from ictus.graph.pipeline import Pipeline
 
 __all__ = ["CONFIG_FILE", "MINIMAL", "NO_BASELINE", "ConfigError", "PipelineConfig", "read_config"]
 

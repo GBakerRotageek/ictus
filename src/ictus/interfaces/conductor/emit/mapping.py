@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ictus.interfaces.conductor.emit.agents import agent_entry, route_entries
+from ictus.interfaces.conductor.emit.agents import agent_entry
+from ictus.interfaces.conductor.emit.routes import route_entries
 from ictus.interfaces.conductor.emit.templates import reference_path
 
 if TYPE_CHECKING:

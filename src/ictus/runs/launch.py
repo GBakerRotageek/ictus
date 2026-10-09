@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ictus.interfaces.conductor import binary, launch_command, launch_env
+from ictus.interfaces.conductor.control.launch import binary, launch_command, launch_env
 from ictus.interfaces.conductor.control.live import live_runs
 
 if TYPE_CHECKING:

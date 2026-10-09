@@ -27,11 +27,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
+from ictus.graph.composition import WorkflowInput
 from ictus.graph.node import GateNode, Node, QuestionsNode, SubGraphNode, TerminateNode
-from ictus.graph.pipeline import WorkflowInput
 from ictus.graph.ports import InputPort, PortType
 from ictus.graph.ref import tpl
 from ictus.graph.signals import RunSignal
+from ictus.graph.traversal import budget_cost, reaches
 from ictus.stdlib.steps.announce import THREAD_PORT, announce
 
 if TYPE_CHECKING:
@@ -112,7 +113,7 @@ class _Attachment:
 
     def attach(self) -> Attached:
         bodies = _bodies(self.root)
-        priced = {id(body): body.budget_cost() for body in bodies}
+        priced = {id(body): budget_cost(body) for body in bodies}
         for body in bodies:
             # Pinned first: an inserted node arrives with no inbound edge,
             # which is how an unpinned entry is found.
@@ -280,7 +281,7 @@ class _Attachment:
             added = self._added.get(id(body), [])
             if body.max_iterations is None or not added:
                 continue
-            looping = [node.node_id for node in added if body.reaches(node, node)]
+            looping = [node.node_id for node in added if reaches(body, node, node)]
             if looping and body.loop_passes is None:
                 raise CompositionError(
                     f"{body.pipeline_id!r} sets max_iterations explicitly and loops without "
@@ -288,7 +289,7 @@ class _Attachment:
                     f"the loop ({', '.join(sorted(looping))}) cannot be priced. Set "
                     "loop_passes, and they are added to the limit for you."
                 )
-            body.max_iterations += body.budget_cost() - priced[id(body)]
+            body.max_iterations += budget_cost(body) - priced[id(body)]
 
 
 def _bodies(root: Pipeline) -> list[Pipeline]:

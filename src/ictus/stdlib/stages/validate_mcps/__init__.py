@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ictus.graph.composition import FailureMode
 from ictus.graph.node import AgentNode
-from ictus.graph.pipeline import FailureMode
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import optional, ref_to, tpl
 from ictus.graph.stage import Stage

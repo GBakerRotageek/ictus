@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
+from ictus.bridge.slack.errors import SlackError, SlackUnreachableError
 from ictus.bridge.slack.listen import (
     FORM_ID,
     Click,
     Note,
-    SlackError,
-    SlackUnreachableError,
     events,
     open_form,
     open_socket,

@@ -23,14 +23,16 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
-from ictus.graph.node import OUTCOME_PORT, ScopeNode, TerminateNode
-from ictus.graph.pipeline import Pipeline, WorkflowInput
+from ictus.graph.node import OUTCOME_PORT, ScopeNode, TerminateNode, coerced_outcome
+from ictus.graph.pipeline import Pipeline
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.ref import Ref, Template, tpl
+from ictus.graph.traversal import back_edges
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ictus.graph.composition import WorkflowInput
     from ictus.graph.node import Node
 
 __all__ = ["OUTCOME_PORT", "Scope", "ScopeNode", "outcome_scope"]
@@ -44,10 +46,6 @@ _EMPTY: dict[PortType, str] = {
     PortType.NUMBER: "0",
     PortType.BOOLEAN: "false",
 }
-
-# Exactly what `_maybe_parse_json` (engine/workflow.py) turns into a
-# non-string, together with the numeric and container checks below.
-_COERCED = frozenset({"True", "False", "None", "true", "false", "null"})
 
 
 class Scope:
@@ -69,7 +67,10 @@ class Scope:
                 "nothing for the caller to branch on and it should be a plain Stage"
             )
         for name in outcomes:
-            if name.strip() in _COERCED or _numeric(name) or name.strip()[:1] in '{["':
+            # Kept here as well as on ScopeNode: a Scope builds its node lazily,
+            # so relying on the node's own check would move this failure from
+            # the line that writes the vocabulary to the line that seals it.
+            if coerced_outcome(name):
                 raise CompositionError(
                     f"scope {stage_id!r} cannot use the outcome {name!r}: Conductor parses a "
                     "rendered output with json.loads, so it would arrive as a non-string and "
@@ -254,7 +255,7 @@ class Scope:
                 f"scope {self.stage_id!r} declares outcome(s) {sorted(reached)} that no exit "
                 "reports; either add an exit or drop them from the vocabulary"
             )
-        if self.body.back_edges() and self.body.loop_passes is None:
+        if back_edges(self.body) and self.body.loop_passes is None:
             # `_run_child_engine` catches WorkflowTerminated and nothing else,
             # so a child's MaxIterationsError escapes past every outcome route.
             raise CompositionError(
@@ -288,14 +289,6 @@ def outcome_scope(
         loop_passes=loop_passes,
         max_iterations=max_iterations,
     )
-
-
-def _numeric(name: str) -> bool:
-    try:
-        float(name)
-    except ValueError:
-        return False
-    return True
 
 
 def _node_of(ref: Ref) -> Node:

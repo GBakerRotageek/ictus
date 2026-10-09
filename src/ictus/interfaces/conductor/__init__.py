@@ -3,23 +3,24 @@
 The only package that may know Conductor's spelling: field names, template
 dialect, iteration accounting, CLI.
 
-    workflow.py   the ``workflow:`` block and the defaults worth stating
-    agents.py     one node to one ``agents:`` entry
-    serialize.py  YAML text, without altering any value
-    lints.py      rules that are true because of how Conductor runs
+    emit/        a pure function of a pipeline: the workflow block, one node
+                 to one ``agents:`` entry, templates, the manifest, YAML text
+    control/     acts on a run that exists: launching it, its events, its log
+    preflight.py asks about this machine
+    lints.py     rules that are true because of how Conductor runs
+
+This file is the backend class those three are reached through.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
 from ictus.errors import IctusError
 from ictus.graph.node import NODE_KINDS
 from ictus.interfaces import Capabilities, Document, PreflightIssue, ValidationResult
+from ictus.interfaces.conductor.control.launch import binary, launch_command
 from ictus.interfaces.conductor.control.signals import REPORTABLE
 from ictus.interfaces.conductor.emit import manifest
 from ictus.interfaces.conductor.emit.agents import agent_entry
@@ -37,149 +38,13 @@ from ictus.interfaces.environment import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from pathlib import Path
 
     from ictus.graph.pipeline import Pipeline
     from ictus.graph.values import YamlDict, YamlValue
 
-__all__ = [
-    "TYPED_INPUT_FLAG",
-    "ConductorBackend",
-    "binary",
-    "conductor",
-    "launch_command",
-    "launch_env",
-]
-
-BINARY = "conductor"
-
-
-def binary() -> str:
-    """The Conductor executable, or a ``FileNotFoundError`` naming what is missing."""
-    found = shutil.which(BINARY)
-    if found is None:
-        raise FileNotFoundError(
-            f"{BINARY!r} is not on PATH; the Conductor backend cannot check or run "
-            "what it compiles without it"
-        )
-    return found
-
-
-#: Variables about the machine, which a run cannot work without and which are
-#: nobody's pipeline secret.
-MACHINE_ENV: frozenset[str] = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TZ",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "SYSTEMROOT",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "USERPROFILE",
-    }
-)
-
-#: Prefixes for the engine's own settings and for model-provider credentials.
-#: By prefix rather than by list, so a provider added upstream still works.
-MACHINE_PREFIXES: tuple[str, ...] = (
-    "CONDUCTOR_",
-    "CLAUDE_",
-    "ANTHROPIC_",
-    "OPENAI_",
-    "AZURE_",
-    "COPILOT_",
-    "GITHUB_",
-    "ACA_",
-    "OTEL_",
-)
-
-
-def launch_env(declared: Iterable[str], source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The environment a run should receive: what it declared, and nothing else.
-
-    The run's process is the only place an environment can be cut; a step with
-    a shell sees everything the run was given. ``declared`` is the pipeline's
-    integrations, datasources and MCP servers. Anything outside that and
-    :data:`MACHINE_ENV` is absent rather than empty.
-    """
-    present = os.environ if source is None else source
-    wanted = set(declared) | MACHINE_ENV
-    return {
-        name: value
-        for name, value in present.items()
-        if name in wanted or name.startswith(MACHINE_PREFIXES)
-    }
-
-
-#: Conductor's typed input transport: ``name=<json>``, decoded strictly.
-#:
-#: ``-i`` runs a value through ``coerce_value``, which guesses a type. That is
-#: wanted for a number and ruinous for a string that looks like one: a Slack
-#: timestamp of ``1700000000.000200`` arrives as a float and comes back
-#: ``1700000000.0002``, which matches no message — so a run's reports land at
-#: the top of the channel, and the sending program blames a deleted message.
-#: About one timestamp in ten ends in a zero.
-#:
-#: Conductor marks this flag hidden and internal (``cli/run.py``,
-#: ``parse_input_json_flags``) while calling ``coerce_value`` a public contract
-#: that must not change. So it is used only where the public one would corrupt
-#: the value, never as the general way in, and
-#: ``test_conformance.py::test_a_string_input_survives_the_engine_verbatim``
-#: runs the installed engine to check it is still honoured.
-TYPED_INPUT_FLAG = "--input-json"
-
-
-def launch_command(
-    executable: str,
-    path: Path,
-    *,
-    inputs: Mapping[str, str],
-    dashboard: bool,
-    background: bool = False,
-    workspace_instructions: bool = True,
-    log_file: str | None = None,
-    verbatim: Collection[str] = (),
-) -> list[str]:
-    """The argv that runs one compiled workflow.
-
-    One place, so the CLI and the listener spell the flags the same way.
-
-    ``verbatim`` names the inputs that must arrive as the text they were given,
-    whatever they look like. Everything else is coerced by the engine, which is
-    how an ``int`` input gets an int.
-    """
-    command = [executable, "run", str(path.resolve())]
-    for name, value in inputs.items():
-        if name in verbatim:
-            command += [TYPED_INPUT_FLAG, f"{name}={json.dumps(value)}"]
-        else:
-            command += ["-i", f"{name}={value}"]
-    if log_file is not None:
-        # Verbatim: `auto` is Conductor's spelling for a generated temp path.
-        command += ["--log-file", log_file]
-    if workspace_instructions:
-        # The provider runs every step with `setting_sources=[]`. This flag
-        # walks from the working directory to the git root and prepends
-        # AGENTS.md, CLAUDE.md, .github/copilot-instructions.md and
-        # .github/instructions/*.instructions.md to every prompt.
-        command.append("--workspace-instructions")
-    if background:
-        command.append("--web-bg")
-    elif dashboard:
-        command.append("--web")
-    return command
+__all__ = ["ConductorBackend", "conductor"]
 
 
 class ConductorBackend:

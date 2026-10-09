@@ -1,9 +1,12 @@
-"""Building a Slack report, and posting one.
+"""The sending program, as data.
 
-The program below is what an announcement step runs. A string because the step
-is a subprocess, which is what keeps Slack out of ``graph`` and ``stdlib``.
+Not Python this module runs: a string substituted into an ``Integration`` and
+executed by the engine as a subprocess. That is what keeps Slack out of
+``graph`` and ``stdlib`` — the step has no ictus on its path and no import of
+this package. It is 47% of what used to be one file and none of it is reachable
+from here, which is why it is on its own.
 
-Three rules:
+Three rules it exists to hold:
 
 * The credential is read from the environment, never written into a pipeline
   or an emitted workflow.
@@ -14,124 +17,12 @@ Three rules:
 
 from __future__ import annotations
 
-import http.client
-import json
-import os
 import string
-import urllib.error
-import urllib.request
-from typing import TYPE_CHECKING
 
-from ictus.graph.requirements import Integration
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from ictus.graph.requirements import EnvVar
-    from ictus.graph.signals import RunSignal
-
-__all__ = [
-    "API",
-    "API_ENV",
-    "SECTION_LIMIT",
-    "TIMEOUT_SECONDS",
-    "api_call",
-    "endpoint",
-    "reply",
-    "slack_channel",
-    "slack_webhook",
-]
-
-API = "https://slack.com/api/chat.postMessage"
-
-#: Overrides it: a proxy, an Enterprise Grid host, or a local stand-in.
-API_ENV = "SLACK_API_URL"
-
-TIMEOUT_SECONDS = 15
-"""How long one Web API call may take. Read by the bridge too, which asks the
-same host the same questions in the other direction."""
+__all__ = ["DEADLINE_SECONDS", "PROGRAM"]
 
 #: Below the step's own timeout, which the engine treats as a failure.
 DEADLINE_SECONDS = 20
-
-#: Block Kit's ceilings. Past either, Slack refuses the message, buttons and all.
-SECTION_LIMIT = 3000
-LABEL_LIMIT = 75
-
-
-def slack_channel(
-    *,
-    token: EnvVar,
-    channel: EnvVar,
-    name: str = "slack",
-    purpose: str = "Report what this run is doing, and ask for decisions",
-    reports: Sequence[RunSignal] = (),
-    setup_hint: str = (
-        "Create a Slack app with chat:write, install it, invite it to the channel, "
-        "then export the bot token and the channel id"
-    ),
-) -> Integration:
-    """A channel reported into through ``chat.postMessage``.
-
-    Threads, so several runs at once stay legible. Needs a bot token.
-
-    Listens too, either way round, and neither credential reaches a run:
-    `ictus-bridge listen` holds a socket open as the app, which needs an
-    app-level token and the app in the channel; `ictus-bridge overhear` reads
-    the channel as a person, which needs only a user token and that person's
-    membership — and cannot answer a gate, since no user token hears a press.
-    """
-    return Integration(
-        name=name,
-        purpose=purpose,
-        env=(token, channel),
-        reports=tuple(reports),
-        command="python3",
-        program=_program(secret=token.name, channel=channel.name),
-        threads=True,
-        listens=True,
-        comments=False,
-        setup_hint=setup_hint,
-    )
-
-
-def slack_webhook(
-    *,
-    url: EnvVar,
-    name: str = "slack",
-    purpose: str = "Report what this run is doing",
-    reports: Sequence[RunSignal] = (),
-    setup_hint: str = "Create an incoming webhook on a Slack app and export its URL",
-) -> Integration:
-    """A channel posted into through an incoming webhook.
-
-    Simpler to set up and strictly less capable: no threads, no buttons, and
-    one-way, so it cannot start a run.
-    """
-    return Integration(
-        name=name,
-        purpose=purpose,
-        env=(url,),
-        reports=tuple(reports),
-        command="python3",
-        program=_program(secret=url.name, channel=""),
-        threads=False,
-        setup_hint=setup_hint,
-    )
-
-
-def _program(*, secret: str, channel: str) -> str:
-    """The sending program, with this integration's variable names baked in."""
-    return _PROGRAM.substitute(
-        secret_name=repr(secret),
-        channel_name=repr(channel),
-        api=repr(API),
-        api_env=repr(API_ENV),
-        request_timeout=str(TIMEOUT_SECONDS),
-        deadline=str(DEADLINE_SECONDS),
-        section_limit=str(SECTION_LIMIT),
-        label_limit=str(LABEL_LIMIT),
-    )
 
 
 #: Reads the message on stdin, and the parent thread, the buttons and a
@@ -145,7 +36,7 @@ def _program(*, secret: str, channel: str) -> str:
 #:
 #: ``string.Template`` so the dicts read as Python. It may contain no ``{{``,
 #: ``{%`` or ``{#``: the engine renders every argument as a template.
-_PROGRAM = string.Template(
+PROGRAM = string.Template(
     r"""import json, os, sys, threading, urllib.error, urllib.request
 
 SECRET_NAME = ${secret_name}
@@ -310,67 +201,3 @@ def main():
 main()
 """
 )
-
-
-def endpoint(method: str) -> str:
-    """Where a Web API method lives, honouring :data:`API_ENV`.
-
-    The override names ``chat.postMessage``; every other method sits beside it.
-    """
-    override = os.environ.get(API_ENV, "").strip()
-    return (override or API).rsplit("/", 1)[0] + "/" + method
-
-
-def api_call(
-    method: str,
-    token: str,
-    body: Mapping[str, object],
-    *,
-    timeout: float = TIMEOUT_SECONDS,
-) -> tuple[dict[str, object], str]:
-    """Call one Web API method: ``(answer, "")``, or ``(answer, why not)``.
-
-    Never raises, and never quotes an exception. The answer comes back on a
-    refusal too, since its ``error`` decides whether to try again.
-    """
-    request = urllib.request.Request(
-        endpoint(method),
-        data=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            answer = json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return {}, f"Slack answered HTTP {exc.code} to {method}"
-    except (OSError, ValueError, http.client.HTTPException) as exc:
-        return {}, f"could not reach Slack ({type(exc).__name__})"
-    if not isinstance(answer, dict):
-        return {}, f"Slack sent an unreadable answer to {method}"
-    if not answer.get("ok"):
-        return answer, f"Slack refused {method}: {answer.get('error')}"
-    return answer, ""
-
-
-def reply(
-    *,
-    token: str,
-    channel: str,
-    thread_ts: str,
-    text: str,
-    timeout: float = TIMEOUT_SECONDS,
-) -> str:
-    """Say ``text`` under ``thread_ts``. Returns "" on success, else why not.
-
-    Not a click's ``response_url``, which posts where the message lives — the
-    channel root, for a button in a thread. Never raises.
-    """
-    body: dict[str, object] = {"channel": channel, "text": text}
-    if thread_ts:
-        body["thread_ts"] = thread_ts
-    _, why = api_call("chat.postMessage", token, body, timeout=timeout)
-    return why

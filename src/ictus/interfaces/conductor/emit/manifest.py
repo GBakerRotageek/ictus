@@ -17,7 +17,8 @@ import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ictus.graph.pipeline import Listener, Pipeline
+    from ictus.graph.composition import Listener
+    from ictus.graph.pipeline import Pipeline
 
 __all__ = ["SUFFIX", "VERSION", "filename_for", "render"]
 

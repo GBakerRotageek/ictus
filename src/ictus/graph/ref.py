@@ -16,8 +16,8 @@ from ictus.graph.ports import PortType
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
+    from ictus.graph.composition import WorkflowInput
     from ictus.graph.node import Node
-    from ictus.graph.pipeline import WorkflowInput
 
 __all__ = [
     "AtLeast",

@@ -14,6 +14,7 @@ import pytest
 from ictus import AgentNode, OutputPort, Pipeline, PortType, equals
 from ictus.errors import CompositionError
 from ictus.graph.node import GateNode, NodeKind
+from ictus.graph.traversal import require_loop_bound
 from ictus.interfaces.conductor import ConductorBackend
 from ictus.lint import lint_pipeline
 from ictus.stdlib import (
@@ -114,7 +115,7 @@ class TestConverge:
 
     def test_the_loop_bound_follows_the_pass_count(self) -> None:
         assert _converge(passes=2).body.loop_passes == 2
-        _converge(passes=6).body.require_loop_bound()
+        require_loop_bound(_converge(passes=6).body)
 
     def test_rejection_notes_are_fed_back(self) -> None:
         deps = [(d.source.node_id, d.target.node_id) for d in _converge().body.data_deps]

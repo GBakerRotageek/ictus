@@ -11,6 +11,7 @@ from ictus import EnvVar, Integration, RunSignal
 from ictus.assemble.announcements import OPENER_ID, apply_integrations
 from ictus.assemble.start_gate import GATE_ID, add_start_gate
 from ictus.errors import CompositionError
+from ictus.graph.composition import END
 from ictus.graph.node import (
     ComputeNode,
     GateChoice,
@@ -20,9 +21,10 @@ from ictus.graph.node import (
     ScriptNode,
     TerminateNode,
 )
-from ictus.graph.pipeline import END, Pipeline
+from ictus.graph.pipeline import Pipeline
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.stage import Stage
+from ictus.graph.traversal import budget_cost
 from ictus.interfaces.conductor import ConductorBackend
 from ictus.interfaces.environment import integration_issues
 from ictus.lint import lint_pipeline
@@ -330,9 +332,9 @@ def _looping(*, loop_passes: int | None) -> Pipeline:
 def test_an_explicit_limit_grows_by_exactly_the_reporting_steps() -> None:
     """The limit budgets the work; reporting on it must not stop a run mid-pass."""
     p = _looping(loop_passes=3)
-    p.max_iterations = p.budget_cost()
+    p.max_iterations = budget_cost(p)
     apply_integrations(p)
-    assert p.max_iterations == p.budget_cost()
+    assert p.max_iterations == budget_cost(p)
 
 
 def test_reporting_inside_a_loop_with_nothing_to_price_it_by_is_refused() -> None:
@@ -349,7 +351,7 @@ def test_a_derived_limit_counts_the_reporting_steps() -> None:
     assert isinstance(workflow, dict)
     limits = workflow["limits"]
     assert isinstance(limits, dict)
-    assert limits["max_iterations"] == p.budget_cost()
+    assert limits["max_iterations"] == budget_cost(p)
 
 
 # --- what preflight says -----------------------------------------------------

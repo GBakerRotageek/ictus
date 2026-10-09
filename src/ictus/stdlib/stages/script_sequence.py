@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
-from ictus.graph.pipeline import END
+from ictus.graph.composition import END
 from ictus.graph.ports import InputPort, OutputPort, PortType
 from ictus.graph.stage import Stage
 from ictus.stdlib.steps.shell import shell

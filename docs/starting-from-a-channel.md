@@ -42,7 +42,7 @@ Attaching to a run that already exists is [run-events.md](run-events.md).
   answers gates only.
 - The listener runs `conductor run <workflow> -i ...`, never `ictus run`. It
   needs the built artifact, not the pipeline source, its config, or the compiler.
-- `launch_command` in `interfaces/conductor/` builds that argv for both the CLI
+- `launch_command` in `interfaces/conductor/control/` builds that argv for both the CLI
   and the listener. `--web-bg` detaches and serves the dashboard.
 - **A string input is handed over on `--input-json`, not `-i`.** `-i` runs a
   value through `coerce_value`, which guesses a type — wanted for a number and
@@ -86,7 +86,7 @@ Attaching to a run that already exists is [run-events.md](run-events.md).
   gates for its dashboard, or for a `listen` running alongside.
 - Two commands rather than a flag, for that reason: a `--as-me` on `listen`
   would leave `--allow` and the bot token inert in half of their own command.
-- `request_in` in `bridge/slack/listen.py` is the one recogniser both ways in
+- `request_in` in `bridge/slack/requests.py` is the one recogniser both ways in
   call, so a prefix that starts a run over the socket starts the same one here.
   `asked` is now an envelope-unwrapper over it. A history message names no
   channel, so the channel is passed rather than read.

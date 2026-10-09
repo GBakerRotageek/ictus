@@ -23,7 +23,7 @@ from ictus.graph.ref import Origin, Ref
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ictus.graph.pipeline import FailureMode
+    from ictus.graph.composition import FailureMode
 
 __all__ = ["COUNT_PORT", "ERRORS_PORT", "OUTPUTS_PORT", "Item", "MapGroup"]
 

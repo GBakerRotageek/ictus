@@ -19,6 +19,7 @@ from ictus.errors import CompositionError
 from ictus.graph.node import GateChoice, GateNode
 from ictus.graph.ports import InputPort
 from ictus.graph.ref import TemplatePart, optional, tpl
+from ictus.graph.traversal import budget_cost, total_cost
 from ictus.stdlib.exits.succeed import succeed
 
 if TYPE_CHECKING:
@@ -56,7 +57,7 @@ def add_start_gate(pipeline: Pipeline) -> Pipeline:
     if pipeline.description:
         parts.append(f"{pipeline.description}\n\n")
     # Counted before the gate's own two nodes are added.
-    once, budget = pipeline.total_cost(), pipeline.budget_cost()
+    once, budget = total_cost(pipeline), budget_cost(pipeline)
     if budget > once:
         parts.append(
             f"{once} step(s) on one pass, up to {budget} with loops, "

@@ -22,11 +22,13 @@ from ictus.graph.ref import (
     Template,
     TemplatePart,
 )
+from ictus.graph.traversal import may_be_unresolved
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.graph.pipeline import Pipeline, RouteEnd
+    from ictus.graph.composition import RouteEnd
+    from ictus.graph.pipeline import Pipeline
     from ictus.graph.values import YamlDict
 
 __all__ = [
@@ -289,4 +291,4 @@ def _deferred(pipeline: Pipeline, node: RouteEnd, ref: Ref) -> bool:
         # Both are bound before the step runs.
         return False
     source = resolve(pipeline, ref)
-    return source is not None and pipeline.may_be_unresolved(source, node)
+    return source is not None and may_be_unresolved(pipeline, source, node)

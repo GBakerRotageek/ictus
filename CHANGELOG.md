@@ -86,6 +86,107 @@ means: **the stdlib's constructors are the API and they still move.** Until
   bridge reads it, and asks the same host the same questions in the other
   direction.
 
+- **The composition records moved out of `ictus.graph.pipeline`.** That module
+  is 1,400 lines of which the class is most, and ten of the eleven names other
+  packages took from it were not the class. They are now in
+  `ictus.graph.composition`; `Pipeline` has not moved, so every
+  `from ictus.graph.pipeline import Pipeline` is untouched, and neither has
+  anything exported from `ictus` itself. Flat siblings rather than a
+  `pipeline/` package, because `tests/test_boundaries.py` exempts
+  `__init__.py` from the two checks that state a module's public surface, and
+  packaging the class would have dropped it out of both.
+
+| Was | Now |
+| --- | --- |
+| `ictus.graph.pipeline.Edge` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.END` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.DataDep` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.ExposedOutput` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.FailureMode` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.Listener` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.ParallelGroup` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.WorkflowInput` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.RouteEnd` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.EdgeTarget` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.TrimStrategy` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.ContextMode` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.BudgetMode` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.NativeTools` | `ictus.graph.composition` |
+| `ictus.graph.pipeline.Pipeline.ABORT_CASE` | `ictus.graph.composition` |
+
+- **The graph analysis is functions in `ictus.graph.traversal`, not methods on
+  `Pipeline`.** They only ever read a graph, and as methods each one could
+  reach a private store without anything saying it should not — eight of them
+  did. `tests/test_boundaries.py` now refuses a private attribute read in that
+  module, so the rule holds rather than being a note. Write
+  `budget_cost(pipeline)` where you wrote `pipeline.budget_cost()`. No
+  forwarders were left behind: a one-line method that calls a function moves no
+  failure earlier and costs a second name for the same thing. `Pipeline.entry`,
+  `outgoing`, `group_of` and `map_of` are unchanged and still methods.
+
+| Was | Now |
+| --- | --- |
+| `ictus.graph.pipeline.Pipeline.back_edges` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.budget_cost` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.has_cycle` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.longest_cycle_length` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.loop_cost` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.may_be_unresolved` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.reachable_from_entry` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.reaches` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.require_loop_bound` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.step_cost` | `ictus.graph.traversal` |
+| `ictus.graph.pipeline.Pipeline.total_cost` | `ictus.graph.traversal` |
+
+- **A node, a parallel group and a map group now really do share one routing
+  keyspace.** All three registrars said so in an error message and none checked
+  all three stores, so the same collision was refused in one order and accepted
+  in the other: `parallel("p", ...)` followed by `add(node("p"))` left the graph
+  holding both under one name, and every route to `"p"` then resolved to
+  whichever the backend looked up first. Now a `CompositionError` at the second
+  one, naming which kind of thing already holds the name.
+- **`ScopeNode` refuses an outcome `json.loads` would coerce.** `Scope` has
+  always refused `"true"`, `"3"` and anything opening a JSON container — a
+  rendered output goes through `_maybe_parse_json`, so the name comes back a
+  bool or a number and every `equals` against it fails silently. `ScopeNode` is
+  exported from `ictus` and could be built directly, and did not check. The
+  builder's check stays where it is: a `Scope` builds its node lazily, so
+  relying on the node alone would move that failure later.
+- **The modules below were split.** Nothing a pipeline imports changed, and
+  `ictus`'s own surface is untouched.
+
+| Was | Now |
+| --- | --- |
+| `ictus.notify.slack.send` | `ictus.notify.slack.declare` (the two constructors) |
+| `ictus.notify.slack.send` | `ictus.notify.slack.program` (the subprocess sender) |
+| `ictus.notify.slack.send` | `ictus.notify.slack.api` (the Web API client) |
+| `ictus.cli.watching.trace` | `ictus.cli.tracing` |
+| `ictus.interfaces.conductor.binary` | `ictus.interfaces.conductor.control.launch` |
+| `ictus.interfaces.conductor.launch_env` | `ictus.interfaces.conductor.control.launch` |
+| `ictus.interfaces.conductor.launch_command` | `ictus.interfaces.conductor.control.launch` |
+| `ictus.interfaces.conductor.TYPED_INPUT_FLAG` | `ictus.interfaces.conductor.control.launch` |
+| `ictus.bridge.slack.listen.SlackError` | `ictus.bridge.slack.errors` |
+| `ictus.bridge.slack.listen.refused` | `ictus.bridge.slack.errors` |
+| `ictus.bridge.slack.listen.request_in` | `ictus.bridge.slack.requests` |
+| `ictus.bridge.slack.listen.asked` | `ictus.bridge.slack.requests` |
+| `ictus.interfaces.conductor.emit.agents.route_entries` | `ictus.interfaces.conductor.emit.routes` |
+| `ictus.interfaces.conductor.emit.agents.kind_fields` | `ictus.interfaces.conductor.emit.fields` |
+
+`ictus.notify.slack` and `ictus.bridge.slack` re-export exactly what they did
+before, so only code that reached past a package into `send` or `listen` is
+affected.
+
+### Removed
+
+- **`Pipeline.has_gate()`** and **`Pipeline.inbound()`** — both were on the
+  class's public surface and neither had a caller anywhere: not in `src`, the
+  suite, `smoke/`, a demo pipeline or a documented example. Write
+  `any(isinstance(n, GateNode) for n in pipeline.nodes)` and
+  `[e for e in pipeline.edges if e.target is node]` if you need them; the
+  one-line forms are what the methods were. Removed before the graph was split
+  rather than after, so they were not carried into a new file and counted
+  towards its size.
+
 ## [0.1.0] — 2026-10-08
 
 The first version with a number. Everything before this was `0.0.0`, so this

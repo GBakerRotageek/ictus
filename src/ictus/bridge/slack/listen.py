@@ -14,9 +14,9 @@ Three rules about the connection:
 A press arriving while no socket is open is lost; there is no replay.
 
 Nothing here knows which engine runs a gate. A press becomes a ``Click``, whose
-``press`` is the engine-neutral ``ictus.runs.answer.Press``. ``asked`` is the
-same rule one direction over: recognising Slack's envelope lives here,
-everything from "somebody asked for a run" onwards is ``ictus.runs``'.
+``press`` is the engine-neutral ``ictus.runs.answer.Press``. Recognising a request to
+start a run is ``requests.py``; everything from "somebody asked for a run"
+onwards is ``ictus.runs``'.
 """
 
 from __future__ import annotations
@@ -27,15 +27,16 @@ import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
-from ictus.errors import IctusError
+from ictus.bridge.slack.errors import SlackError, SlackUnreachableError, refused
+from ictus.bridge.slack.requests import asked
 from ictus.net.websocket import HandshakeError, connect
-from ictus.notify.slack.send import SECTION_LIMIT, api_call, reply
+from ictus.notify.slack.api import SECTION_LIMIT, api_call, reply
 from ictus.runs.answer import Press
-from ictus.runs.launch import Asked
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 
+    from ictus.runs.launch import Asked
     from ictus.runs.triggers import Trigger
 
 logger = logging.getLogger(__name__)
@@ -43,15 +44,10 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "Click",
     "Note",
-    "SlackError",
-    "SlackUnreachableError",
-    "asked",
     "events",
     "open_form",
     "open_socket",
     "presses",
-    "refused",
-    "request_in",
     "retire",
     "say",
     "verdict",
@@ -62,33 +58,6 @@ FORM_ID = "ictus_gate_note"
 
 RETRY_FIRST_SECONDS = 1.0
 RETRY_MOST_SECONDS = 60.0
-
-#: Slack refusing the credential itself. Dialling again changes nothing.
-_FATAL = frozenset(
-    {
-        "invalid_auth",
-        "not_authed",
-        "not_allowed_token_type",
-        "missing_scope",
-        "token_revoked",
-        "token_expired",
-        "account_inactive",
-        "invalid_token",
-    }
-)
-
-
-def refused(error: str) -> bool:
-    """Whether Slack refused the credential itself, so asking again is pointless."""
-    return error in _FATAL
-
-
-class SlackError(IctusError):
-    """Slack refused the connection: the app-level token, or its scope."""
-
-
-class SlackUnreachableError(SlackError):
-    """Slack could not be reached, or asked to be tried later."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,49 +351,3 @@ def _clip(text: str, limit: int) -> str:
 
 
 # --- recognising the ask -----------------------------------------------------
-
-
-def request_in(event: Mapping[str, object], channel: str, trigger: Trigger) -> Asked | None:
-    """One message, if it is a request for a run.
-
-    The rule both ways in share, so a prefix that starts a run over the socket
-    starts the same one when a channel is read directly.
-
-    ``channel`` is passed rather than read out: an Events API message names the
-    channel it arrived from, and a message read back from ``conversations.history``
-    does not — that method answers about a channel the caller already named.
-    """
-    if event.get("type") != "message":
-        return None
-    # Anything the app said, and anything that is not somebody typing: edits,
-    # deletions, joins, and the thread-broadcast copies of those.
-    if event.get("bot_id") or event.get("subtype"):
-        return None
-    text = event.get("text")
-    if not isinstance(text, str):
-        return None
-    found = trigger.pattern.match(text)
-    if found is None:
-        return None
-    # The message's own ts, never its thread_ts: a request made inside a
-    # thread is answered in that thread.
-    return Asked(
-        question=found.group("question").strip(),
-        thread=str(event.get("ts", "")),
-        channel=channel,
-        who=str(event.get("user", "")),
-        trigger=trigger,
-    )
-
-
-def asked(envelope: dict[str, object], trigger: Trigger) -> Iterator[Asked]:
-    """The request in one envelope, if it holds one."""
-    payload = envelope.get("payload")
-    if not isinstance(payload, dict) or payload.get("type") != "event_callback":
-        return
-    event = payload.get("event")
-    if not isinstance(event, dict):
-        return
-    request = request_in(event, str(event.get("channel", "")), trigger)
-    if request is not None:
-        yield request

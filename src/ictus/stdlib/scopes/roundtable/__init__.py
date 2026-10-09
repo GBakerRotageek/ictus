@@ -26,8 +26,8 @@ from ictus.stdlib.steps.counter import counter as counter_step
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from ictus.graph.composition import ParallelGroup
     from ictus.graph.node import Node
-    from ictus.graph.pipeline import ParallelGroup
     from ictus.graph.ref import Ref, Template, TemplatePart
 
 __all__ = ["AGREED", "HALTED", "UNRESOLVED", "Speaker", "roundtable"]
@@ -207,14 +207,7 @@ def roundtable(
                 )
                 for other in speakers
             ]
-            opened.append(
-                "\nThese were formed independently — nobody had heard anybody. Where "
-                "the conversation has drifted away from one of them, that is worth a "
-                "sentence: either somebody made an argument that moved it, and you can "
-                "say whose, or it drifted because the first person to speak framed it "
-                "and nobody went back. The second happens quietly and is worth "
-                "catching.\n\n"
-            )
+            opened.append("\n" + prompt(__name__, "notes") + "\n\n")
 
         heard: list[TemplatePart] = []
         for other in speakers:
@@ -410,14 +403,7 @@ def _close(
                                 "\n",
                             )
                         ),
-                        "\nThese were formed independently. Compare them with where "
-                        "each person ended: who moved, and on whose argument. A table "
-                        "whose openings differed and whose ending does not is either a "
-                        "conversation that worked or a first speaker who framed it and "
-                        "three people who followed — and those look identical in the "
-                        "final positions, which is why you are being handed both. If "
-                        "you cannot point to the argument that moved somebody, say so "
-                        "rather than crediting agreement.\n",
+                        "\n" + prompt(__name__, "opening") + "\n",
                     )
                     if desks
                     else ()

@@ -25,10 +25,10 @@ from typing import Annotated
 
 import typer
 
+from ictus.bridge.slack.errors import SlackError
 from ictus.bridge.slack.listen import (
     Click,
     Note,
-    SlackError,
     open_form,
     presses,
     retire,
@@ -36,7 +36,7 @@ from ictus.bridge.slack.listen import (
     verdict,
 )
 from ictus.bridge.slack.watch import POLL_SECONDS, overheard
-from ictus.notify.slack.send import reply
+from ictus.notify.slack.api import reply
 from ictus.runs.answer import resolve, submit
 from ictus.runs.launch import Asked, Started, start
 from ictus.runs.triggers import Trigger, triggers_in
@@ -164,12 +164,7 @@ def listen(
         try:
             for event in presses(token, triggers=watching):
                 if isinstance(event, Asked):
-                    # Slack redelivers what it thinks was not acknowledged,
-                    # which reads exactly like somebody asking twice.
-                    if event.thread in seen or event.trigger is None:
-                        continue
-                    seen.add(event.thread)
-                    pool.submit(_handle_ask, event, bot)
+                    _ask_once(event, seen, pool, bot)
                     continue
                 pool.submit(_handle_press, event, permitted, bot)
         except KeyboardInterrupt:
@@ -302,16 +297,26 @@ def overhear(
     with ThreadPoolExecutor(max_workers=LISTEN_WORKERS) as pool:
         try:
             for request in overheard(token, channels=channels, triggers=watching, every=every):
-                # One poll's window can overlap the last one's, which reads
-                # exactly like somebody asking twice.
-                if request.thread in seen or request.trigger is None:
-                    continue
-                seen.add(request.thread)
-                pool.submit(_handle_ask, request, token)
+                _ask_once(request, seen, pool, token)
         except KeyboardInterrupt:
             typer.secho("\nstopped reading; the runs are untouched", fg=typer.colors.BRIGHT_BLACK)
         except SlackError as exc:
             _fail(str(exc))
+
+
+def _ask_once(request: Asked, seen: set[str], pool: ThreadPoolExecutor, token: str) -> None:
+    """Start a run for one request, unless its thread already started one.
+
+    Both ways in can deliver the same ask twice and for different reasons:
+    Slack redelivers what it thinks was not acknowledged, and one poll's window
+    can overlap the last one's. Either reads exactly like somebody asking
+    twice, and two copies of the rule is where that drifts apart — the two
+    verbs stay two verbs, but this they share.
+    """
+    if request.thread in seen or request.trigger is None:
+        return
+    seen.add(request.thread)
+    pool.submit(_handle_ask, request, token)
 
 
 def became_of(request: Asked, started: Started) -> str:

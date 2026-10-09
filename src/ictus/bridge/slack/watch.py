@@ -42,8 +42,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ictus.bridge.slack.listen import SlackError, SlackUnreachableError, refused, request_in
-from ictus.notify.slack.send import TIMEOUT_SECONDS, endpoint
+from ictus.bridge.slack.errors import SlackError, SlackUnreachableError, refused
+from ictus.bridge.slack.requests import request_in
+from ictus.notify.slack.api import TIMEOUT_SECONDS, endpoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence

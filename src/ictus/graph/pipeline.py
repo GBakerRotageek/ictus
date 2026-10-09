@@ -2,19 +2,45 @@
 
 ``Pipeline`` owns every edge; nodes never point at each other. Invalid state is
 rejected at the call that introduces it, not at emission.
+
+The records it holds are in ``composition.py`` and the analysis that walks a
+finished graph is in ``traversal.py``. What is left is the stores, and the
+refusal guarding each, in ten bands:
+
+    the registry             what is in this graph, and what runs beside what
+    what the run needs       MCP servers, commands, data sources
+    who hears about it       services a run reports to, messages that start one
+    start policy             where the run begins, what goes before the gate
+    parameters and results   what it takes in, what a parent reads back
+    wiring                   connect · connect_input · feed · route
+    branching                a complete fan-out from one source
+    splicing                 rewriting a graph its author already finished
+    refusals                 every guard the bands above call
+    reading the graph back   accessors, each returning a copy
+
+Nothing above ``refusals`` is read-only and nothing below it mutates.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError, PortTypeError
+from ictus.graph.composition import (
+    ABORT_CASE,
+    END,
+    DataDep,
+    Edge,
+    ExposedOutput,
+    FailureMode,
+    Listener,
+    ParallelGroup,
+    WorkflowInput,
+    _End,
+)
 from ictus.graph.mapping import Item, MapGroup
 from ictus.graph.node import (
     OUTCOME_PORT,
-    GateNode,
     Node,
     NodeKind,
     QuestionsNode,
@@ -23,201 +49,30 @@ from ictus.graph.node import (
     TerminateNode,
 )
 from ictus.graph.ports import InputPort, OutputPort, PortConnection, PortType
-from ictus.graph.ref import Origin, Ref, Template, equals
+from ictus.graph.ref import Ref, Template, equals
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
+    from ictus.graph.composition import (
+        BudgetMode,
+        ContextMode,
+        EdgeTarget,
+        NativeTools,
+        RouteEnd,
+        TrimStrategy,
+    )
+    from ictus.graph.node import GateNode
     from ictus.graph.requirements import Datasource, Executable, Integration, McpServer
     from ictus.graph.signals import RunSignal
     from ictus.graph.values import YamlScalar
 
-__all__ = [
-    "END",
-    "BudgetMode",
-    "ContextMode",
-    "DataDep",
-    "Edge",
-    "EdgeTarget",
-    "ExposedOutput",
-    "FailureMode",
-    "Listener",
-    "NativeTools",
-    "ParallelGroup",
-    "Pipeline",
-    "RouteEnd",
-    "TrimStrategy",
-    "WorkflowInput",
-]
-
-_STRUCTURED = frozenset({PortType.OBJECT, PortType.ARRAY})
+__all__ = ["Pipeline"]
 
 # Conductor permits only these inside a parallel group
-# (config/validator.py, in `_validate_parallel_groups`).
+# (config/validator.py, in `_validate_parallel_groups`). Kept beside
+# `parallel()`, its only reader, the way `mapping.py` keeps `_ITERABLE`.
 _GROUPABLE = frozenset({NodeKind.LLM_CALL, NodeKind.COMPUTATION})
-
-ContextMode = Literal["accumulate", "last_only", "explicit"]
-#: Built-in tools for a step that names none of its own: nothing, everything
-#: the CLI can do, or exactly the tool ids listed.
-NativeTools = Literal["none", "claude_code"] | tuple[str, ...]
-BudgetMode = Literal["audit", "enforce"]
-
-
-class FailureMode(StrEnum):
-    """What a parallel group does when one of its members fails."""
-
-    FAIL_FAST = "fail_fast"
-    CONTINUE_ON_ERROR = "continue_on_error"
-    ALL_OR_NOTHING = "all_or_nothing"
-
-
-class TrimStrategy(StrEnum):
-    """How an engine makes room when accumulated context hits its ceiling."""
-
-    TRUNCATE = "truncate"
-    """Shorten fields in place. The only one that leaves references resolvable."""
-
-    DROP_OLDEST = "drop_oldest"
-    """Delete whole step outputs, oldest first."""
-
-    SUMMARIZE = "summarize"
-    """Replace outputs with one summary. Falls back to ``DROP_OLDEST`` with no model."""
-
-
-@dataclass(frozen=True, eq=False)
-class ParallelGroup:
-    """Members that run at once, routed as one node.
-
-    Only model calls and computations may be members.
-    Members carry no edges of their own.
-    """
-
-    group_id: str
-    members: tuple[Node, ...]
-    description: str = ""
-    failure_mode: FailureMode = FailureMode.FAIL_FAST
-
-    @property
-    def node_id(self) -> str:
-        return self.group_id
-
-
-class _End:
-    """Sentinel for Conductor's ``$end`` route target."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "END"
-
-
-END = _End()
-
-type RouteEnd = Node | ParallelGroup | MapGroup
-type EdgeTarget = RouteEnd | _End
-
-
-@dataclass(frozen=True, eq=False)
-class WorkflowInput:
-    """A typed parameter of the whole pipeline. Emitted as ``workflow.input``."""
-
-    name: str
-    port_type: PortType
-    required: bool = True
-    default: YamlScalar = None
-    description: str = ""
-    prose: bool = False
-    """Whether the input file's body text feeds this parameter. At most one per pipeline."""
-
-    def ref(self) -> Ref:
-        return Ref(
-            source_id=self.name,
-            port=self.name,
-            port_type=self.port_type,
-            origin=Origin.WORKFLOW_INPUT,
-            source=self,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class Listener:
-    """What wakes a pipeline. Compiled into a manifest beside the workflow."""
-
-    service: Integration | None
-    """Where it reports back, when it reports anywhere.
-
-    ``None`` is the ordinary case for a pipeline that only needs starting: the
-    credential for a channel belongs to whoever reads it, and a run that says
-    nothing there has no use for one."""
-
-    prefix: str
-    """What marks a message as a request rather than conversation."""
-
-    into: WorkflowInput
-    """The input the text after the prefix arrives in."""
-
-    thread: WorkflowInput | None = None
-    """Where the conversation is addressed. ``None`` when the pipeline reports nowhere."""
-
-
-@dataclass(frozen=True, eq=False)
-class Edge:
-    """A control edge — who runs next. Emitted as ``routes`` or ``options[].route``.
-
-    Carries no data; what a node reads is a ``DataDep``.
-    """
-
-    source: RouteEnd
-    target: EdgeTarget
-    case: str | None = None
-    when: str | Template | None = None
-
-    def condition_refs(self) -> tuple[Ref, ...]:
-        return tuple(self.when.refs()) if isinstance(self.when, Template) else ()
-
-    @property
-    def is_end(self) -> bool:
-        return isinstance(self.target, _End)
-
-    @property
-    def target_node(self) -> RouteEnd | None:
-        """The successor, or ``None`` when this edge ends the run."""
-        return None if isinstance(self.target, _End) else self.target
-
-    @property
-    def describe_target(self) -> str:
-        """For error messages only. Never emitted."""
-        target = self.target_node
-        return "END" if target is None else target.node_id
-
-
-@dataclass(frozen=True, eq=False)
-class ExposedOutput:
-    """One entry of a pipeline's final ``output:`` map, before rendering.
-
-    Held as source and port, not a rendered template; the backend addresses it.
-    """
-
-    source: Node | MapGroup
-    port: OutputPort
-    default: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DataDep:
-    """A data edge — what a node reads. Emitted into the target's ``input`` list.
-
-    The source may be a map group, which publishes one aggregate under its name.
-    """
-
-    source: Node | MapGroup
-    target: Node
-    connection: PortConnection
-    previous_pass: bool = False
-    """Whether this edge reads what the source produced on the previous pass.
-
-    Only valid between two members of one parallel group, inside a loop.
-    """
 
 
 class Pipeline:
@@ -311,17 +166,20 @@ class Pipeline:
         self._before_start: Node | None = None
         self._entry: RouteEnd | None = None
 
-    # -- construction ----------------------------------------------------
+    # -- the registry --------------------------------------------------------
 
     def add[N: Node](self, node: N) -> N:
         """Register a node. Returns it unchanged, keeping the concrete type."""
         existing = self._by_id.get(node.node_id)
         if existing is not None:
+            # Said before `_claim`, which knows the name is taken but not by
+            # what: only here is the other holder the very object passed in.
             what = "the same node twice" if existing is node else "two nodes"
             raise CompositionError(
                 f"pipeline {self.pipeline_id!r} would register {what} under node_id "
                 f"{node.node_id!r}; ids are the routing keyspace and must be unique"
             )
+        self._claim(node.node_id, f"node {node.node_id!r}")
         self._nodes.append(node)
         self._by_id[node.node_id] = node
         return node
@@ -357,11 +215,7 @@ class Pipeline:
         Members must already be registered here. The group costs its member
         count against the iteration budget.
         """
-        if group_id in self._groups or group_id in self._by_id:
-            raise CompositionError(
-                f"pipeline {self.pipeline_id!r} already has something named {group_id!r}; "
-                "groups and nodes share one routing keyspace"
-            )
+        self._claim(group_id, f"parallel group {group_id!r}")
         if len(members) < 2:
             raise CompositionError(
                 f"parallel group {group_id!r} needs at least two members; "
@@ -407,11 +261,7 @@ class Pipeline:
         ``body`` gets no routes of its own and is not emitted in ``agents:``; it
         becomes the group's inline template.
         """
-        if group_id in self._groups or group_id in self._maps or group_id in self._by_id:
-            raise CompositionError(
-                f"pipeline {self.pipeline_id!r} already has something named {group_id!r}; "
-                "groups and nodes share one routing keyspace"
-            )
+        self._claim(group_id, f"map group {group_id!r}")
         self._require_member(body, f"body of map group {group_id!r}")
         if self.group_of(body) is not None:
             raise CompositionError(f"{body.node_id!r} is already a member of a parallel group")
@@ -464,6 +314,8 @@ class Pipeline:
                 return group
         return None
 
+    # -- what the run needs --------------------------------------------------
+
     def require_mcp(self, server: McpServer) -> McpServer:
         """Declare an MCP server this pipeline needs access to.
 
@@ -484,6 +336,14 @@ class Pipeline:
     def mcp_servers(self) -> tuple[McpServer, ...]:
         """Every MCP server this pipeline declares, in declaration order."""
         return tuple(self._mcp.values())
+
+    def all_mcp_servers(self) -> tuple[McpServer, ...]:
+        """This pipeline's servers and those of every stage it contains."""
+        seen: dict[str, McpServer] = {s.name: s for s in self._mcp.values()}
+        for child in self._children.values():
+            for server in child.all_mcp_servers():
+                seen.setdefault(server.name, server)
+        return tuple(seen.values())
 
     def require_executable(self, tool: Executable) -> Executable:
         """Declare a command that must be reachable before this pipeline runs.
@@ -541,33 +401,7 @@ class Pipeline:
                 seen.setdefault(source.name, source)
         return tuple(seen.values())
 
-    def all_mcp_servers(self) -> tuple[McpServer, ...]:
-        """This pipeline's servers and those of every stage it contains."""
-        seen: dict[str, McpServer] = {s.name: s for s in self._mcp.values()}
-        for child in self._children.values():
-            for server in child.all_mcp_servers():
-                seen.setdefault(server.name, server)
-        return tuple(seen.values())
-
-    def before_start_gate[N: Node](self, node: N) -> N:
-        """Run ``node`` first, ahead of the confirmation gate.
-
-        Wire nothing: placement is done by whoever applies the start policy, so
-        it holds whether the gate is on or off. One node per pipeline.
-        """
-        if self._before_start is not None:
-            raise CompositionError(
-                f"pipeline {self.pipeline_id!r} already runs {self._before_start.node_id!r} "
-                "before the start gate; only one thing can go first"
-            )
-        self.add(node)
-        self._before_start = node
-        return node
-
-    @property
-    def start_herald(self) -> Node | None:
-        """What runs before the start gate, if anything was asked to."""
-        return self._before_start
+    # -- who hears about it --------------------------------------------------
 
     def integrate(
         self, service: Integration, *, thread: WorkflowInput | None = None
@@ -692,80 +526,41 @@ class Pipeline:
                 seen.setdefault(service.name, service)
         return tuple(seen.values())
 
-    def insert_before[N: Node](self, existing: Node, inserted: N) -> N:
-        """Put ``inserted`` in front of ``existing``, taking over its inbound edges.
-
-        The entry point moves too when ``existing`` was it.
-        """
-        self._require_member(existing, "insertion point")
-        self.add(inserted)
-        self._edges = [
-            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
-            if edge.target_node is existing
-            else edge
-            for edge in self._edges
-        ]
-        self._edges.append(Edge(source=inserted, target=existing))
-        if self._entry is existing:
-            self._entry = inserted
-        return inserted
-
-    def insert_before_end[N: Node](self, inserted: N) -> N:
-        """Put ``inserted`` on every way this graph reaches the end of the run.
-
-        Each edge keeps its case, so a gate branch still means what it meant.
-        """
-        finishing = [edge for edge in self._edges if edge.is_end]
-        if not finishing:
-            raise CompositionError(
-                f"pipeline {self.pipeline_id!r} has no route to END to put "
-                f"{inserted.node_id!r} in front of"
-            )
-        self.add(inserted)
-        self._edges = [
-            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
-            if edge.is_end
-            else edge
-            for edge in self._edges
-        ]
-        self._edges.append(Edge(source=inserted, target=END))
-        return inserted
-
-    def prepend[N: Node](self, node: N) -> N:
-        """Run ``node`` before whatever this graph currently starts with.
-
-        The old entry keeps its inbound edges, so ``node`` runs once.
-        """
-        first = self.entry()
-        self.add(node)
-        self.route(node, first)
-        self.set_entry(node)
-        return node
-
-    def widen_subgraph(self, host: SubGraphNode, port: InputPort) -> None:
-        """Give a stage already placed here one more parameter.
-
-        For attachment after placement, not for authoring. Mutates the frozen
-        node in place, since edges and refs hold the node itself. Optional
-        ports only, so other placements of the same stage stay valid.
-        """
-        self._require_member(host, "stage")
-        if host.node_id not in self._children:
-            raise CompositionError(
-                f"{host.node_id!r} is not a stage placed in pipeline {self.pipeline_id!r}"
-            )
-        if not port.optional:
-            raise CompositionError(
-                f"stage {host.node_id!r} can only be given an optional parameter after it "
-                f"was placed; {port.name!r} is required, and every caller would break"
-            )
-        if any(existing.name == port.name for existing in host.inputs):
-            raise CompositionError(f"stage {host.node_id!r} already has a parameter {port.name!r}")
-        object.__setattr__(host, "inputs", (*host.inputs, port))
-
     def subscribed_signals(self) -> frozenset[RunSignal]:
         """Every signal any integration here or in a nested stage asked for."""
         return frozenset(s for service in self.all_integrations() for s in service.reports)
+
+    # -- start policy --------------------------------------------------------
+
+    def set_entry(self, start: RouteEnd) -> None:
+        """Pin the entry point rather than letting it fall out of insertion order.
+
+        A parallel group is a legal entry point.
+        """
+        self._require_routable(start, "entry point")
+        self._entry = start
+
+    def before_start_gate[N: Node](self, node: N) -> N:
+        """Run ``node`` first, ahead of the confirmation gate.
+
+        Wire nothing: placement is done by whoever applies the start policy, so
+        it holds whether the gate is on or off. One node per pipeline.
+        """
+        if self._before_start is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already runs {self._before_start.node_id!r} "
+                "before the start gate; only one thing can go first"
+            )
+        self.add(node)
+        self._before_start = node
+        return node
+
+    @property
+    def start_herald(self) -> Node | None:
+        """What runs before the start gate, if anything was asked to."""
+        return self._before_start
+
+    # -- parameters and results ----------------------------------------------
 
     def declare_input(
         self,
@@ -807,15 +602,63 @@ class Pipeline:
         self._inputs[name] = param
         return param
 
-    def set_entry(self, start: RouteEnd) -> None:
-        """Pin the entry point rather than letting it fall out of insertion order.
+    @property
+    def workflow_inputs(self) -> tuple[WorkflowInput, ...]:
+        """Every declared pipeline parameter."""
+        return tuple(self._inputs.values())
 
-        A parallel group is a legal entry point.
+    @property
+    def declared_input_ports(self) -> tuple[InputPort, ...]:
+        """The pipeline's parameters as typed ports, for use by a parent pipeline."""
+        return tuple(
+            InputPort(p.name, p.port_type, p.description, optional=not p.required)
+            for p in self._inputs.values()
+        )
+
+    def expose_output(
+        self, name: str, node: Node | MapGroup, from_port: str, *, default: str | None = None
+    ) -> None:
+        """Publish a node output as part of the pipeline's final result.
+
+        The port type is kept so a stage can be wired into a parent and checked
+        like any other edge, though Conductor's ``output:`` is ``dict[str, str]``.
         """
-        self._require_routable(start, "entry point")
-        self._entry = start
+        self._require_routable(node, "output source")
+        port = node.get_output(from_port)
+        if name in self._outputs:
+            raise CompositionError(f"pipeline output {name!r} is already exposed")
+        # Source and port, not a rendered string: how a reference is spelled is
+        # the backend's business, and `output_path` already knows the rule.
+        self._outputs[name] = ExposedOutput(source=node, port=port, default=default)
 
-    # -- edges -----------------------------------------------------------
+    @property
+    def exposed_outputs(self) -> dict[str, ExposedOutput]:
+        """The pipeline's final output templates."""
+        return dict(self._outputs)
+
+    @property
+    def exposed_output_ports(self) -> tuple[OutputPort, ...]:
+        """The pipeline's result as typed ports, for use by a parent pipeline."""
+        return tuple(
+            OutputPort(name, e.port.port_type, e.port.description, e.port.element)
+            for name, e in self._outputs.items()
+        )
+
+    @property
+    def output_contract_names(self) -> frozenset[str]:
+        """Every key a parent can rely on reading back from this workflow.
+
+        A terminal's ``result`` replaces the workflow ``output:`` on its path,
+        so a key counts only if every way the run can end produces it.
+        """
+        exposed = frozenset(self._outputs)
+        terminals = [n for n in self._nodes if isinstance(n, TerminateNode)]
+        settled = [frozenset(n.result) for n in terminals if n.result]
+        if not settled or len(settled) != len(terminals):
+            return exposed
+        return exposed | frozenset.intersection(*settled)
+
+    # -- wiring --------------------------------------------------------------
 
     def connect(
         self,
@@ -941,6 +784,8 @@ class Pipeline:
         self._edges.append(edge)
         return edge
 
+    # -- branching -----------------------------------------------------------
+
     def branch(self, gate: GateNode, routes: Mapping[str, EdgeTarget]) -> None:
         """Route each of a gate's choices to a target.
 
@@ -1005,36 +850,127 @@ class Pipeline:
                 )
             )
 
-    ABORT_CASE = "__abort__"
-
     def abort_route(self, node: QuestionsNode, target: EdgeTarget) -> Edge:
         """Where a person goes if they abandon a set of questions."""
         self._require_member(node, "abort source")
         if not isinstance(target, _End):
             self._require_routable(target, "abort target")
-        if any(e.source is node and e.case == self.ABORT_CASE for e in self._edges):
+        if any(e.source is node and e.case == ABORT_CASE for e in self._edges):
             raise CompositionError(f"{node.node_id!r} already has an abort route")
-        edge = Edge(source=node, target=target, case=self.ABORT_CASE)
+        edge = Edge(source=node, target=target, case=ABORT_CASE)
         self._edges.append(edge)
         return edge
 
-    def expose_output(
-        self, name: str, node: Node | MapGroup, from_port: str, *, default: str | None = None
-    ) -> None:
-        """Publish a node output as part of the pipeline's final result.
+    # -- splicing ------------------------------------------------------------
 
-        The port type is kept so a stage can be wired into a parent and checked
-        like any other edge, though Conductor's ``output:`` is ``dict[str, str]``.
+    def insert_before[N: Node](self, existing: Node, inserted: N) -> N:
+        """Put ``inserted`` in front of ``existing``, taking over its inbound edges.
+
+        The entry point moves too when ``existing`` was it.
         """
-        self._require_routable(node, "output source")
-        port = node.get_output(from_port)
-        if name in self._outputs:
-            raise CompositionError(f"pipeline output {name!r} is already exposed")
-        # Source and port, not a rendered string: how a reference is spelled is
-        # the backend's business, and `output_path` already knows the rule.
-        self._outputs[name] = ExposedOutput(source=node, port=port, default=default)
+        self._require_member(existing, "insertion point")
+        self.add(inserted)
+        self._splice_before(lambda edge: edge.target_node is existing, inserted, existing)
+        if self._entry is existing:
+            self._entry = inserted
+        return inserted
 
-    # -- guards ----------------------------------------------------------
+    def insert_before_end[N: Node](self, inserted: N) -> N:
+        """Put ``inserted`` on every way this graph reaches the end of the run.
+
+        Each edge keeps its case, so a gate branch still means what it meant.
+        """
+        finishing = [edge for edge in self._edges if edge.is_end]
+        if not finishing:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} has no route to END to put "
+                f"{inserted.node_id!r} in front of"
+            )
+        self.add(inserted)
+        self._splice_before(lambda edge: edge.is_end, inserted, END)
+        return inserted
+
+    def _splice_before(
+        self, matching: Callable[[Edge], bool], inserted: Node, onward: EdgeTarget
+    ) -> None:
+        """Redirect every edge ``matching`` at ``inserted``, then route it onward.
+
+        Rebind the whole list before appending, never after: the comprehension
+        rewrites every edge it is given, so an edge appended first is rewritten
+        onto itself and ``inserted`` ends up routing to itself instead of to
+        whatever it was put in front of. Both callers had their own copy of
+        this and neither said so.
+        """
+        self._edges = [
+            Edge(source=edge.source, target=inserted, case=edge.case, when=edge.when)
+            if matching(edge)
+            else edge
+            for edge in self._edges
+        ]
+        self._edges.append(Edge(source=inserted, target=onward))
+
+    def prepend[N: Node](self, node: N) -> N:
+        """Run ``node`` before whatever this graph currently starts with.
+
+        The old entry keeps its inbound edges, so ``node`` runs once.
+        """
+        # Resolved before the add: `entry()` finds the unique node with no
+        # inbound edge, and `node` is about to be a second one. Add first and
+        # this raises "has 2 nodes with no inbound edge" on every graph that
+        # had not pinned its entry.
+        first = self.entry()
+        self.add(node)
+        self.route(node, first)
+        self.set_entry(node)
+        return node
+
+    def widen_subgraph(self, host: SubGraphNode, port: InputPort) -> None:
+        """Give a stage already placed here one more parameter.
+
+        For attachment after placement, not for authoring. Mutates the frozen
+        node in place, since edges and refs hold the node itself. Optional
+        ports only, so other placements of the same stage stay valid.
+        """
+        self._require_member(host, "stage")
+        if host.node_id not in self._children:
+            raise CompositionError(
+                f"{host.node_id!r} is not a stage placed in pipeline {self.pipeline_id!r}"
+            )
+        if not port.optional:
+            raise CompositionError(
+                f"stage {host.node_id!r} can only be given an optional parameter after it "
+                f"was placed; {port.name!r} is required, and every caller would break"
+            )
+        if any(existing.name == port.name for existing in host.inputs):
+            raise CompositionError(f"stage {host.node_id!r} already has a parameter {port.name!r}")
+        object.__setattr__(host, "inputs", (*host.inputs, port))
+
+    # -- refusals ------------------------------------------------------------
+
+    def _claim(self, name: str, what: str) -> None:
+        """Take a name in the one keyspace nodes and groups share.
+
+        Each of the three registrars said so in its own error message and none
+        of them checked all three stores, so the same collision was refused in
+        one order and accepted in the other: ``parallel("p", ...)`` then
+        ``add(node("p"))`` left the graph holding both, and every route to
+        ``"p"`` then resolved to whichever the backend looked up first.
+        """
+        holder = (
+            "a node"
+            if name in self._by_id
+            else "a parallel group"
+            if name in self._groups
+            else "a map group"
+            if name in self._maps
+            else None
+        )
+        if holder is not None:
+            raise CompositionError(
+                f"pipeline {self.pipeline_id!r} already has something named {name!r} "
+                f"({holder}), so {what} cannot have it too; "
+                "groups and nodes share one routing keyspace"
+            )
 
     def _require_routable(self, end: RouteEnd, role: str) -> None:
         """A routing endpoint must be a node or a group of this pipeline."""
@@ -1053,6 +989,13 @@ class Pipeline:
             return
         self._require_member(end, role)
 
+    def _require_member(self, node: Node, role: str) -> None:
+        if self._by_id.get(node.node_id) is not node:
+            raise CompositionError(
+                f"{role} {node.node_id!r} is not part of pipeline {self.pipeline_id!r}; "
+                "add() it first (a node from another pipeline is never implicitly shared)"
+            )
+
     def _reject_grouped_source(self, source: Node) -> None:
         """A member routes as part of its group, never on its own."""
         group = self.group_of(source)
@@ -1067,13 +1010,6 @@ class Pipeline:
                 f"{source.node_id!r} is the body of map group {mapped.group_id!r} and "
                 "cannot have its own outgoing edge; a for_each item cannot decide where "
                 "the run goes next — route from the group, once every item has finished"
-            )
-
-    def _require_member(self, node: Node, role: str) -> None:
-        if self._by_id.get(node.node_id) is not node:
-            raise CompositionError(
-                f"{role} {node.node_id!r} is not part of pipeline {self.pipeline_id!r}; "
-                "add() it first (a node from another pipeline is never implicitly shared)"
             )
 
     @staticmethod
@@ -1102,7 +1038,7 @@ class Pipeline:
                     "`when` condition, or use a gate."
                 )
 
-    # -- graph queries ---------------------------------------------------
+    # -- reading the graph back ----------------------------------------------
 
     @property
     def nodes(self) -> tuple[Node, ...]:
@@ -1115,49 +1051,9 @@ class Pipeline:
         return tuple(self._edges)
 
     @property
-    def workflow_inputs(self) -> tuple[WorkflowInput, ...]:
-        """Every declared pipeline parameter."""
-        return tuple(self._inputs.values())
-
-    @property
     def input_bindings(self) -> tuple[tuple[WorkflowInput, Node, InputPort], ...]:
         """Every parameter-to-port binding."""
         return tuple(self._input_edges)
-
-    @property
-    def exposed_outputs(self) -> dict[str, ExposedOutput]:
-        """The pipeline's final output templates."""
-        return dict(self._outputs)
-
-    @property
-    def exposed_output_ports(self) -> tuple[OutputPort, ...]:
-        """The pipeline's result as typed ports, for use by a parent pipeline."""
-        return tuple(
-            OutputPort(name, e.port.port_type, e.port.description, e.port.element)
-            for name, e in self._outputs.items()
-        )
-
-    @property
-    def output_contract_names(self) -> frozenset[str]:
-        """Every key a parent can rely on reading back from this workflow.
-
-        A terminal's ``result`` replaces the workflow ``output:`` on its path,
-        so a key counts only if every way the run can end produces it.
-        """
-        exposed = frozenset(self._outputs)
-        terminals = [n for n in self._nodes if isinstance(n, TerminateNode)]
-        settled = [frozenset(n.result) for n in terminals if n.result]
-        if not settled or len(settled) != len(terminals):
-            return exposed
-        return exposed | frozenset.intersection(*settled)
-
-    @property
-    def declared_input_ports(self) -> tuple[InputPort, ...]:
-        """The pipeline's parameters as typed ports, for use by a parent pipeline."""
-        return tuple(
-            InputPort(p.name, p.port_type, p.description, optional=not p.required)
-            for p in self._inputs.values()
-        )
 
     @property
     def data_deps(self) -> tuple[DataDep, ...]:
@@ -1170,10 +1066,6 @@ class Pipeline:
     def outgoing(self, node: RouteEnd) -> list[Edge]:
         """Edges leaving ``node``, in insertion order."""
         return [e for e in self._edges if e.source is node]
-
-    def inbound(self, node: Node) -> list[Edge]:
-        """Edges arriving at ``node``, in insertion order."""
-        return [e for e in self._edges if e.target is node]
 
     def entry(self) -> RouteEnd:
         """Resolve the entry point.
@@ -1207,229 +1099,3 @@ class Pipeline:
             f"pipeline {self.pipeline_id!r} has {len(roots)} nodes with no inbound edge "
             f"({names}); call set_entry() to pin the entry point"
         )
-
-    def _successors(self, end: RouteEnd) -> Iterable[RouteEnd]:
-        """What runs after ``end``. Entering a group reaches its members."""
-        if isinstance(end, ParallelGroup):
-            yield from end.members
-        if isinstance(end, MapGroup):
-            yield end.body
-        for edge in self._edges:
-            if edge.source is end and not isinstance(edge.target, _End):
-                yield edge.target
-        if isinstance(end, Node):
-            enclosing: RouteEnd | None = self.group_of(end) or self.map_of(end)
-            if enclosing is not None:
-                # A member continues wherever the group routes.
-                for edge in self._edges:
-                    if edge.source is enclosing and not isinstance(edge.target, _End):
-                        yield edge.target
-
-    def reaches(self, start: RouteEnd, goal: RouteEnd) -> bool:
-        seen: set[str] = set()
-        stack: list[RouteEnd] = [start]
-        while stack:
-            current = stack.pop()
-            if current.node_id in seen:
-                continue
-            seen.add(current.node_id)
-            for nxt in self._successors(current):
-                if nxt is goal:
-                    return True
-                stack.append(nxt)
-        return False
-
-    def reachable_from_entry(self) -> set[str]:
-        start = self.entry()
-        seen: set[str] = {start.node_id}
-        stack: list[RouteEnd] = [start]
-        while stack:
-            for nxt in self._successors(stack.pop()):
-                if nxt.node_id not in seen:
-                    seen.add(nxt.node_id)
-                    stack.append(nxt)
-        return seen
-
-    def back_edges(self) -> list[Edge]:
-        """Control edges that close a cycle: edges into a node still on the DFS stack."""
-        state: dict[str, int] = {}
-        found: list[Edge] = []
-
-        def visit(node: RouteEnd) -> None:
-            state[node.node_id] = 1
-            for edge in self.outgoing(node):
-                # A group is a routing endpoint like a node.
-                if isinstance(edge.target, _End):
-                    continue
-                mark = state.get(edge.target.node_id, 0)
-                if mark == 1:
-                    found.append(edge)
-                elif mark == 0:
-                    visit(edge.target)
-            state[node.node_id] = 2
-
-        roots: list[RouteEnd] = [self.entry(), *self._nodes] if self._nodes else []
-        for node in roots:
-            if state.get(node.node_id, 0) == 0:
-                visit(node)
-        return found
-
-    def may_be_unresolved(self, source: RouteEnd, target: RouteEnd) -> bool:
-        """Whether ``target`` can run before ``source`` has produced anything.
-
-        True when ``target`` is reachable from the entry without passing through
-        ``source``, which is when a reference to it must be emitted optional.
-        """
-        start = self.entry()
-        if start is source:
-            return False
-        if start is target:
-            return True
-
-        # A group does not route onward until its members finish, so both the
-        # member and its group are barriers.
-        barriers = {source.node_id}
-        if isinstance(source, Node):
-            group = self.group_of(source)
-            if group is not None:
-                barriers.add(group.group_id)
-
-        # The entry can itself be the barrier; expanding it would walk past it.
-        if start.node_id in barriers:
-            return False
-
-        seen: set[str] = {start.node_id}
-        stack: list[RouteEnd] = [start]
-        while stack:
-            for nxt in self._successors(stack.pop()):
-                if nxt.node_id in barriers or nxt.node_id in seen:
-                    continue
-                if nxt is target:
-                    return True
-                seen.add(nxt.node_id)
-                stack.append(nxt)
-        return False
-
-    def has_cycle(self) -> bool:
-        return bool(self.back_edges())
-
-    def has_gate(self) -> bool:
-        """Whether any node pauses for a human."""
-        return any(isinstance(n, GateNode) for n in self._nodes)
-
-    def require_loop_bound(self) -> None:
-        """Refuse a cyclic graph that never says how many times it may go round."""
-        if self.has_cycle() and self.loop_passes is None and self.max_iterations is None:
-            raise CompositionError(
-                f"pipeline {self.pipeline_id!r} contains a loop but sets no loop_passes; "
-                "an unbounded loop has no safe default. Pass loop_passes=N (or an "
-                "explicit max_iterations) so the bound is a decision, not an accident."
-            )
-
-    def total_cost(self) -> int:
-        """Every step in this graph, run once.
-
-        Executions, not nodes: a parallel group costs one per member, a map
-        group one per item.
-        """
-        grouped = {m.node_id for g in self._groups.values() for m in g.members}
-        grouped |= {m.body.node_id for m in self._maps.values()}
-        loose = sum(1 for n in self._nodes if n.node_id not in grouped)
-        collections: tuple[RouteEnd, ...] = (*self.groups, *self.maps)
-        return loose + sum(self.step_cost(g) for g in collections)
-
-    def budget_cost(self) -> int:
-        """Step executions this graph can reach, loops included.
-
-        Treats an unbounded loop as a single pass; call ``require_loop_bound``
-        first to make the bound a decision.
-        """
-        if not self.has_cycle():
-            return max(1, self.total_cost())
-        return max(1, self.total_cost() + self.loop_cost(self.loop_passes or 1))
-
-    def loop_cost(self, passes: int) -> int:
-        """Extra step executions the graph's loops buy beyond one pass each.
-
-        Every cycle is priced. Nesting multiplies: a cycle inside ``d`` others
-        costs ``passes ** (d + 1)``. Over-prices rather than under-prices.
-        """
-        loops = self._loops()
-        extra = 0
-        for header, (cost, _span) in loops.items():
-            # Nesting is by header, not span: a loop is inside another only
-            # when its header sits within the other's body.
-            depth = sum(1 for h, (_, span) in loops.items() if h != header and header in span)
-            extra += cost * (passes ** (depth + 1) - 1)
-        return extra
-
-    def _loops(self) -> dict[str, tuple[int, frozenset[str]]]:
-        """One entry per loop header: its costliest pass, and every step on it.
-
-        Back edges are grouped by target, which is the loop header.
-        """
-        loops: dict[str, tuple[int, frozenset[str]]] = {}
-        for edge in self.back_edges():
-            cost, span = self._cycle_span(edge)
-            header = edge.describe_target
-            known = loops.get(header)
-            if known is None:
-                loops[header] = (cost, span)
-            else:
-                loops[header] = (max(known[0], cost), known[1] | span)
-        return loops
-
-    def longest_cycle_length(self) -> int:
-        """Step executions on the costliest cycle, or 0 when the graph is acyclic."""
-        return max((self._cycle_span(e)[0] for e in self.back_edges()), default=0)
-
-    def step_cost(self, end: RouteEnd) -> int:
-        """How many step executions reaching ``end`` costs."""
-        if isinstance(end, ParallelGroup):
-            return len(end.members)
-        if isinstance(end, MapGroup):
-            return end.expect_items
-        return 1
-
-    # Past this the estimate falls back to the whole graph's cost, which
-    # over-prices rather than under-prices.
-    _PATH_BUDGET = 20_000
-
-    def _cycle_span(self, back_edge: Edge) -> tuple[int, frozenset[str]]:
-        """The costliest simple cycle closed by ``back_edge``: its cost and its steps."""
-        if isinstance(back_edge.target, _End):
-            return self.step_cost(back_edge.source), frozenset({back_edge.source.node_id})
-        start, goal = back_edge.target, back_edge.source
-        if start is goal:
-            return self.step_cost(start), frozenset({start.node_id})
-
-        best = 0
-        span: frozenset[str] = frozenset({start.node_id, goal.node_id})
-        visits = 0
-        stack: list[tuple[RouteEnd, int, frozenset[str]]] = [
-            (start, self.step_cost(start), frozenset({start.node_id}))
-        ]
-        while stack:
-            current, cost, seen = stack.pop()
-            visits += 1
-            if visits > self._PATH_BUDGET:
-                return self.total_cost(), frozenset(n.node_id for n in self._nodes)
-            if current is goal:
-                if cost > best:
-                    best, span = cost, seen
-                continue
-            for nxt in self._route_successors(current):
-                if nxt.node_id in seen:
-                    continue
-                stack.append((nxt, cost + self.step_cost(nxt), seen | {nxt.node_id}))
-        return (best or self.step_cost(goal)), span
-
-    def _route_successors(self, end: RouteEnd) -> Iterable[RouteEnd]:
-        """What runs after ``end``, following routes only.
-
-        Does not descend into a group's members; the group's own cost covers them.
-        """
-        source = self.group_of(end) or self.map_of(end) if isinstance(end, Node) else None
-        for edge in self._edges:
-            if edge.source is (source or end) and not isinstance(edge.target, _End):
-                yield edge.target

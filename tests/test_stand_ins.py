@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ictus.bridge.slack.watch import latest, since
-from ictus.notify.slack.send import endpoint, reply
+from ictus.notify.slack.api import endpoint, reply
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

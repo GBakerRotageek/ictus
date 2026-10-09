@@ -14,7 +14,8 @@ from typer.testing import CliRunner
 
 from ictus.bridge.cli import app as bridge
 from ictus.bridge.cli import became_of, only
-from ictus.bridge.slack.listen import SlackError, asked, request_in
+from ictus.bridge.slack.errors import SlackError
+from ictus.bridge.slack.requests import asked, request_in
 from ictus.bridge.slack.watch import MOST_PAGES, PAGE, Heard, latest, overheard, since
 from ictus.interfaces.conductor.emit.manifest import SUFFIX, VERSION
 from ictus.runs.launch import Asked, Started

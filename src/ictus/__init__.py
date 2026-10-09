@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, version
 
 from ictus.errors import CompositionError, EmitError, LintError, PortTypeError, UnknownPortError
+from ictus.graph.composition import END, Edge, WorkflowInput
 from ictus.graph.node import (
     AgentNode,
     Backoff,
@@ -25,7 +26,7 @@ from ictus.graph.node import (
     WaitNode,
     slugify,
 )
-from ictus.graph.pipeline import END, Edge, Pipeline, WorkflowInput
+from ictus.graph.pipeline import Pipeline
 from ictus.graph.ports import InputPort, OutputPort, PortConnection, PortType
 from ictus.graph.ref import (
     Ref,

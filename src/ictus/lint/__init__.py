@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError, LintError
 from ictus.graph.node import SubGraphNode
+from ictus.graph.traversal import reachable_from_entry
 from ictus.lint.rules import (
     capability_problems,
     describe,
@@ -27,7 +28,8 @@ from ictus.lint.rules import (
 )
 
 if TYPE_CHECKING:
-    from ictus.graph.pipeline import Pipeline, RouteEnd
+    from ictus.graph.composition import RouteEnd
+    from ictus.graph.pipeline import Pipeline
     from ictus.interfaces import Backend
 
 __all__ = ["check", "lint_pipeline"]
@@ -62,7 +64,7 @@ def lint_pipeline(
     problems: list[str] = placeholder_problems(pipeline, where)
     problems.extend(previous_pass_problems(pipeline, where))
     problems.extend(undeclared_use_problems(pipeline, where, _declared))
-    reachable = pipeline.reachable_from_entry()
+    reachable = reachable_from_entry(pipeline)
     problems.extend(
         f"{where}: {describe(node)} is unreachable from entry point "
         f"{entry.node_id!r} and will never run"

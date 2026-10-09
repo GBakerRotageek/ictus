@@ -31,7 +31,7 @@ from ictus.stdlib.steps.shell import shell
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ictus.graph.pipeline import WorkflowInput
+    from ictus.graph.composition import WorkflowInput
     from ictus.graph.ref import Ref, Template
     from ictus.graph.scope import Scope
 

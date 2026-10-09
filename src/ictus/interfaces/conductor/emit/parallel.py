@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ictus.interfaces.conductor.emit.agents import route_entries
+from ictus.interfaces.conductor.emit.routes import route_entries
 
 if TYPE_CHECKING:
     from ictus.graph.pipeline import Pipeline

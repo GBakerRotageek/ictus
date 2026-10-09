@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from ictus.graph.values import YamlDict
 
 from ictus.errors import EmitError
+from ictus.graph.traversal import budget_cost, require_loop_bound
 from ictus.interfaces.conductor.emit.mcp import mcp_servers_block
 
 __all__ = ["DEFAULT_PROVIDER", "NOTHING_INHERITED", "Inherited", "workflow_block"]
@@ -35,10 +36,10 @@ def max_iterations(pipeline: Pipeline) -> int:
     """
     if pipeline.max_iterations is not None:
         return _within_ceiling(pipeline, pipeline.max_iterations)
-    pipeline.require_loop_bound()
+    require_loop_bound(pipeline)
     # Priced by `budget_cost` rather than here, so the start gate quotes the
     # same number this compiles in.
-    return _within_ceiling(pipeline, pipeline.budget_cost())
+    return _within_ceiling(pipeline, budget_cost(pipeline))
 
 
 def _within_ceiling(pipeline: Pipeline, wanted: int) -> int:

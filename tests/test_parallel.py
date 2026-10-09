@@ -23,7 +23,15 @@ from ictus import (
     PortType,
     tpl,
 )
-from ictus.graph.pipeline import FailureMode
+from ictus.graph.composition import FailureMode
+from ictus.graph.traversal import (
+    back_edges,
+    has_cycle,
+    longest_cycle_length,
+    may_be_unresolved,
+    reachable_from_entry,
+    require_loop_bound,
+)
 from ictus.interfaces.conductor import conductor
 from ictus.lint import lint_pipeline
 from ictus.stdlib import succeed, validate_mcps
@@ -81,7 +89,7 @@ class TestComposition:
     def test_members_are_reachable_through_their_group(self) -> None:
         """Without this they look orphaned: a member has no inbound edge."""
         p, a, b = _grouped()
-        assert {a.node_id, b.node_id} <= p.reachable_from_entry()
+        assert {a.node_id, b.node_id} <= reachable_from_entry(p)
         assert lint_pipeline(p) == []
 
 
@@ -180,7 +188,7 @@ class TestValidateMcpsStage:
         gate = next(n for n in stage.body.nodes if n.node_id == "unblock")
         retry = next(e for e in stage.body.outgoing(gate) if e.case == "retry")
         assert retry.describe_target == "checks"
-        assert stage.body.has_cycle()
+        assert has_cycle(stage.body)
 
     def test_an_empty_list_is_refused(self) -> None:
         with pytest.raises(ValueError, match="at least one server"):
@@ -216,15 +224,15 @@ class TestCyclesThroughGroups:
 
     def test_a_loop_back_into_a_group_is_a_cycle(self) -> None:
         p = self._looping()
-        assert p.has_cycle()
-        assert [e.describe_target for e in p.back_edges()] == ["both"]
+        assert has_cycle(p)
+        assert [e.describe_target for e in back_edges(p)] == ["both"]
 
     def test_the_loop_is_priced_in_executions_not_hops(self) -> None:
         """The budget is in step executions, and a two-member group costs two.
 
         `both -> decide -> both` is two hops and three executions.
         """
-        assert self._looping().longest_cycle_length() == 3
+        assert longest_cycle_length(self._looping()) == 3
 
     def test_an_unbounded_loop_through_a_group_is_still_refused(self) -> None:
         p = Pipeline(pipeline_id="t")
@@ -235,7 +243,7 @@ class TestCyclesThroughGroups:
         p.route(group, again)
         p.route(again, group)
         with pytest.raises(CompositionError, match="loop_passes"):
-            p.require_loop_bound()
+            require_loop_bound(p)
 
 
 class TestRemediation:
@@ -312,7 +320,7 @@ class TestRemediation:
 
         Four hops, five executions: the group runs both its members every pass.
         """
-        assert self._stage().longest_cycle_length() == 5
+        assert longest_cycle_length(self._stage()) == 5
 
     def test_it_still_loads(self, validates: Callable[[Pipeline], None]) -> None:
         validates(self._stage())
@@ -345,7 +353,7 @@ class TestGroupMemberAvailability:
     def test_member_output_is_not_treated_as_deferred(self) -> None:
         p, reader = self._downstream()
         a = next(n for n in p.nodes if n.node_id == "a")
-        assert not p.may_be_unresolved(a, reader)
+        assert not may_be_unresolved(p, a, reader)
 
     def test_no_guard_is_emitted_around_it(self) -> None:
         p, _ = self._downstream()

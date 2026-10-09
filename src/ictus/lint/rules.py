@@ -9,18 +9,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ictus.errors import CompositionError
+from ictus.graph.composition import ABORT_CASE
 from ictus.graph.node import GateNode, NodeKind, ScopeNode, SubGraphNode
 from ictus.graph.ref import Origin
+from ictus.graph.traversal import has_cycle
 
 if TYPE_CHECKING:
+    from ictus.graph.composition import RouteEnd
     from ictus.graph.mapping import MapGroup
     from ictus.graph.node import Node
-    from ictus.graph.pipeline import Pipeline, RouteEnd
+    from ictus.graph.pipeline import Pipeline
     from ictus.graph.ref import Ref
     from ictus.interfaces import Capabilities
-
-# Conductor carries an abandoned question set on `abort_route`, not in `routes:`.
-ABORT_CASE = "__abort__"
 
 # What to call a node in a violation: the word the author typed, rather than
 # `NodeKind`'s engine-facing value.
@@ -203,7 +203,7 @@ def previous_pass_problems(pipeline: Pipeline, where: str) -> list[str]:
 
     With no loop there is no previous pass, so the reference renders empty.
     """
-    if pipeline.has_cycle():
+    if has_cycle(pipeline):
         return []
     return [
         f"{where}: {dep.target.node_id!r} reads {dep.source.node_id!r} with "

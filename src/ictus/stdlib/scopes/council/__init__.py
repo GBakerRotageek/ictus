@@ -371,6 +371,35 @@ def council(
             for seat in seats:
                 body.feed(checker, "corrections", seat, VERIFY)
 
+    return _close(
+        scope,
+        seats=seats,
+        counter=counter,
+        rounds=rounds,
+        interject=interject,
+        report=report,
+        checker=checker,
+    )
+
+
+def _close(
+    scope: Scope,
+    *,
+    seats: Sequence[AgentNode],
+    counter: Node,
+    rounds: int,
+    interject: bool,
+    report: AgentNode,
+    checker: AgentNode | None,
+) -> Scope:
+    """The end of a round: take an exit if the voices are settled, or go again.
+
+    Lifted out for the same reason ``roundtable._close`` was, and shaped to
+    match it: ``docs/deliberation.md`` exists to help a reader choose between
+    the two, and until this moved the identical phase was a named function in
+    one and a hundred and thirty lines of ``council()``'s tail in the other.
+    """
+    body = scope.body
     agreed = scope.exit(
         node_id="agreed",
         outcome=AGREED,
@@ -527,35 +556,9 @@ def _synthesis(
     extra: str, seats: Sequence[AgentNode], *, checked: bool = False
 ) -> list[TemplatePart]:
     """The report prompt: every voice's position, and what to do with them."""
-    parts: list[TemplatePart] = [
-        "Several voices have just assessed the same material, each watching for "
-        "something different. Write one report of where this round got to.\n\n"
-        "Do not average them. Where they disagree, say who disagrees with whom and "
-        "about what — a disagreement recorded as a disagreement is useful, and one "
-        "smoothed into consensus is a decision made by omission. Where a concern "
-        "from one voice would be answered by another's suggestion, say so.\n\n"
-        "Put anything still contested in `dissent`, naming the voices. Leave it "
-        "empty only when nothing is.\n\n"
-        "Each voice also reports what it could not check. Collect all of it into "
-        "`unverified`, naming the voice and what blocked it. This is the one part "
-        "of the report you must not tidy away: a finding that rests on a lookup "
-        "nobody managed to perform is not a finding, and it must be visible as "
-        "such rather than written up in the same voice as a checked one. Where a "
-        "voice put a claim in `concerns` that its own `unchecked` shows it could "
-        "not verify, say so in `unverified` rather than repeating the claim.\n\n"
-        "Voices agreeing is not evidence. Several voices blocked by the same "
-        "failed lookup will reach the same wrong conclusion independently and "
-        "look like consensus; if their `unchecked` entries name the same "
-        "obstacle, say that plainly — it is the most useful thing in the round.\n",
-    ]
+    parts: list[TemplatePart] = [prompt(__name__, "synthesis") + "\n"]
     if checked:
-        parts.append(
-            "\nEach voice was checked on its own before you saw it. Where a claim did "
-            "not survive, it is struck out below its author: do not carry it into the "
-            "report, and do not quietly restate it in your own words. A voice whose "
-            "position rested on a struck claim has a weaker position than it thinks, "
-            "and saying so is the report's job.\n"
-        )
+        parts.append("\n" + prompt(__name__, "synthesis_checked") + "\n")
     if extra:
         parts.append(f"\n{extra.strip()}\n")
     for seat in seats:
