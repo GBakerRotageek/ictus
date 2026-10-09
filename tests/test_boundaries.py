@@ -199,7 +199,30 @@ def test_no_adapter_is_imported_by_ictus_proper(path: Path) -> None:
 #: through: ``render_output_schema``, whose docstring said "lower to Conductor's
 #: ``output:`` block" while living in ``graph/node.py``, and ``add_subworkflow``,
 #: using the engine's noun for a thing the graph itself calls a sub-graph.
-ENGINE_FREE = ("graph", "stdlib", "lint", "runspec", "assemble")
+ENGINE_FREE = (
+    "graph",
+    "stdlib",
+    "lint",
+    "runspec",
+    "assemble",
+    # Below or beside the backend rather than above it, and engine-free for a
+    # different reason: an adapter is data a pipeline declares, `net` is
+    # protocol with no ictus in it, and `bridge` is a service's users driving
+    # runs on whatever happens to be executing them. Each said so in its own
+    # docstring and was held by nothing — `bridge/slack/listen.py` promises
+    # "nothing here knows which engine runs a gate", which is exactly the kind
+    # of claim that stops being true quietly.
+    "notify",
+    "sources",
+    "bridge",
+    "net",
+    "plugins",
+    "prompting",
+)
+#: Not `runs` or `cli`: the layering puts both downstream of `interfaces`
+#: (`interfaces <- runs <- bridge`, and everything <- cli), so naming the engine
+#: there is the design rather than a leak. What holds them is that they reach it
+#: only through `interfaces.conductor` — never by spelling a flag or a field.
 
 #: Conductor's own spelling. Deliberately only words with no other meaning —
 #: ``wait``, ``script`` and ``set`` are Conductor step types *and* ordinary
